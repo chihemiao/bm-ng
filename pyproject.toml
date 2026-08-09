@@ -1,0 +1,20 @@
+[project]
+name = "hl-funding-carry"
+version = "0.0.0"
+requires-python = ">=3.14,<3.15"
+dependencies = ["websockets==17.0.1"]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.16.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["B", "C90", "E", "F", "I"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
