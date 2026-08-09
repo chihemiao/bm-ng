@@ -1,6 +1,6 @@
 # Goal: HL Funding Carry V1 — Testnet
 
-**状态**：PLANNED / SEPARATE_REPOSITORY / ZERO_LIVE_AUTHORITY / NO_MAINNET_KEY
+**状态**：GATE_0_COMPLETE / PURE_EXECUTION_LEARNING / ZERO_LIVE_AUTHORITY / NO_MAINNET_KEY
 **合法终态（二选一）**：
 - `HL_T0_TESTNET_V1_CONFIRMED` — 执行层在 testnet 上通过全部故障注入
 - `HL_T0_NO_GO_COMPLETE` — 经济性或资格不成立，带证据停止
@@ -39,7 +39,9 @@ mainnet 下单 / 任何真实资金 / Tier 1 做市 / Tier 2 逆选择过滤 / B
 ### 2.1 隔离
 - 独立仓库、独立运行目录、独立部署身份。
 - 不得读取、导入或复用 OKX 项目的凭据、账户文件、运行状态、证据根、服务配置。
-- 一个账户只能有一个 writer。研究脚本、监控、手动工具一律只读。
+- 一个账户只能有一个持开仓租约的 risk-increasing writer；检测到多个持有者立即 fail-closed。
+- 额外实例只允许撤单，不得 reduce-only、平仓、市价了结或提交任何新订单；每实例使用独立 testnet 凭据并记录实例 ID。该约束是代码级而非交易所权限级，凭据级 cancel-only 不可得会单独阻止未来 mainnet Goal。
+- kill switch 的平仓只能由主执行器提交；主执行器失效时 watchdog 只能撤单。主执行器必须把经对账确认的外部撤单视为正常状态。
 
 ### 2.2 凭据
 - **仓库内、主机上、环境变量里不得存在任何 mainnet 私钥或 API key。** CI 扫描强制。
@@ -58,29 +60,28 @@ mainnet 下单 / 任何真实资金 / Tier 1 做市 / Tier 2 逆选择过滤 / B
 - 未知订单、未知仓位、数据缺口、时钟异常、依赖 digest 漂移、nonce 异常一律 fail-closed。
 
 ### 2.4 事件流约束（"证据是数据"的防膨胀条款）
-- 事件 schema 必须版本化，存储 append-only。
+- 事件 schema 必须版本化，存储 append-only；顶层 kind 冻结为 `market / decision / order / reconciliation / ops`。
+- 公共信封含 `schema_ver/event_kind/payload_schema/venue/conn_id/boot_id/recv_wall_ns/recv_mono_ns/source`。runtime 不得按 `source` 分支；无法解析的原始帧以 `ops.raw_quarantine` 原样留证并 fail-closed。
+- 订单信封的 client/venue order ID 可空并带 `identity_status`；请求事件强制 client order ID 非空，未知身份不得被 schema 丢弃，必须进入 reconciliation，逾时未解决则冻结。
 - 新增事件类型必须同时提供从旧 schema 的重放兼容性测试。
 - 事件类型总数 ≤ 20（CI 计数）。
 - 任一历史时间窗口必须可确定性重放。
 
 ### 2.5 反膨胀（CI 硬门禁，违反即 fail，无人工豁免）
-| 检查 | 阈值 | 工具 |
+作用域：RUNTIME=`data/execution/strategy/risk/reconciliation/ops`；TESTS=`tests`；RESEARCH=`research/`（无 `__init__.py`，≤10 文件）。Gate 0 两份根目录证据为 SEALED，不计限额且不得修改。
+
+| 检查 | 阈值 | 作用域 |
 |---|---|---|
-| 运行闭包总行数 | ≤ 8,000（不含测试/vendored） | `cloc` + 脚本 |
-| 运行闭包文件总数 | ≤ 40 | 脚本 |
-| 仓库内 markdown 文件总数 | ≤ 8 | 脚本 |
-| 事件类型总数 | ≤ 20 | 脚本 |
-| 单文件行数 | ≤ 400 | `ruff` |
-| 单函数行数 | ≤ 60 | `ruff` |
-| 圈复杂度 | ≤ 10 | `radon` / `xenon` |
-| 顶层包数 | ≤ 7 | 脚本 |
-| 代码重复率 | ≤ 3% | `jscpd` |
-| 死代码（置信度≥80%） | 0 | `vulture` |
-| 直接依赖数 | ≤ 25 | 脚本 |
-| 单个 PR 净增行数 | ≤ 200 | 脚本 |
-| 本文档行数 | ≤ 300 | `wc -l` |
-| 版本化文件名 | 0 个匹配 | 正则 |
-| mainnet 凭据特征 | 0 个匹配 | 脚本 |
+| 运行闭包总行数 / 文件数 | ≤8,000 / ≤40 | RUNTIME |
+| fault harness 行数 | ≤600 | `tests/harness/` |
+| markdown / 事件类型 / 顶层包 | ≤8 / ≤20 / ≤7 | 全仓 / RUNTIME / 原七目录 |
+| 单文件 / 单函数 / 圈复杂度 | ≤400 / ≤60 / ≤10 | RUNTIME+TESTS+RESEARCH 的 `.py` |
+| 代码重复率 / 死代码 | ≤3% / 0（置信度≥80%） | RUNTIME+TESTS / RUNTIME |
+| 直接依赖 / 单 PR 净增 | ≤25 / ≤200 | 全仓 |
+| 本文档行数 / 版本化文件名 | ≤300 / 0 | 本文件 / 全仓 |
+| mainnet 凭据特征 | 0 | 全仓，含 notebook 输出 |
+
+TESTS 与 RESEARCH 不计运行闭包；PR 净增仍按全仓计。部署 artifact 只允许六个 RUNTIME 包与依赖，出现 TESTS/RESEARCH 即 fail。`tests/` 文件必须为 `test_*.py` 或位于 `tests/harness/`。
 
 版本化文件名正则（直接 fail）：
 ```
@@ -94,8 +95,8 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 **分支保护禁止 admin bypass。** 门禁必须是 required check。
 
 **架构边界**（`import-linter` contract，CI 强制）：
-- `research` 不得 import `execution`
-- `ops` / 任何监控代码不得 import 下单模块
+- RUNTIME 不得 import TESTS 或 RESEARCH
+- `ops` 可 import `execution.cancel`，不得 import `execution.orders`
 - `strategy` 不得直接 import 交易所 SDK（必须走 `execution` 抽象）
 
 ---
@@ -103,45 +104,35 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 ## 3. Gate（6 个）
 
 ### Gate 0 — 资格与经济性前置判定
-**不建仓库、不写生产代码、不设 CI。产出是一个 notebook 和一组数字。**
-
-1. **账户资格**：逐条对照 Hyperliquid 与候选对冲场所的服务条款，确认账户资格全部满足。不满足 → `NO_GO_COMPLETE`，Goal 终止。
-2. **拓扑二选一并冻结**（不得同时实现，不得后续变更）：
-   - **T0A**：HL perp ↔ CEX perp。收益 = 两边资金费**差值**，历史上很小且会转负。
-   - **T0B**：spot ↔ perp cash-and-carry。收益 = 单边资金费全额，但占用现货资金并承担 basis。
-3. **资金费差值研究**。判据必须是：
-   ```
-   E[持有小时数] × E[每小时净资金费] − round-trip 成本 − basis/退出滑点 > 0
-   ```
-   **禁止使用任何"每小时资金费阈值"作为判据**——round-trip 成本是一次性的，资金费是累积的，两者不同量纲。
-   成本口径：全 maker 四腿约 0.06%，全 taker 约 0.18%。**maker rebate 不计入收益**（HL rebate 需要全平台 maker 份额 >0.5%，个人达不到）。
-   **确认取的是每小时实际结算值而非 8h 计算值**——搞错就是 8 倍误差。
-4. **在看最终样本之前冻结**：样本外区间、评价指标、GO/NO-GO 数值门槛。这是整份文档最重要的一条纪律。
-
-**验收**：拓扑已冻结；三种结论之一被记录并签署——期望显著为负 → `NO_GO_COMPLETE`；接近零 → 继续，但本 Goal 定位确认为纯执行层学习；显著为正 → 先复核是否漏算某一腿的资金费方向。
+**COMPLETE（2026-08-10）**：人类已确认账户资格；拓扑冻结为 T0A（HL perp ↔ Bybit perp）。
+12 个月实际结算资金费在全 maker 6bp 后为 0 项显著正，分类 `near_zero`；本 Goal 仅作为执行层学习继续，不构成策略 GO。
+SEALED 证据：`gate0_funding.ipynb` SHA-256 `88cb74296a62776c5f52ab4cfb599705232053a55f5e32ae3019fb8239c91136`；`gate0_funding_raw.jsonl.gz` SHA-256 `4896c59d7884b74083064214581f8169c2af1093e2431fd3c88dd15f4386c4b5`。
 
 ---
 
 ### Gate 1 — 数据采集（有时间价值，Gate 0 通过后立即启动）
-- WS 采集：HL 的 `l2Book`、`trades`、`BBO`、`funding`、`activeAssetCtx`；对冲腿同类数据。
-- 每条记录带四个时间戳：交易所事件时间、本机接收时间、本机发送时间、ACK 时间。
+- 公开只读 WS 采集：HL `l2Book/trades/bbo/activeAssetCtx`；Bybit `orderbook/publicTrade/tickers`；BTC/ETH。HL `activeAssetCtx` 与 Bybit `tickers` 记录 public current funding rate（及场所提供时的 next funding time），不使用私有账户流。
+- 原始帧到达即打 wall/monotonic 时间并原样落盘，归一化只在重放时做。行情记录 exchange/recv 时间；连接订阅记录 send/ack；订单请求记录 send/ack/terminal；不存在的时间必须为空，不得复制伪造。
 - 记录重连、丢包、乱序、schema 变化、时钟漂移。
 - append-only 压缩文件 + 每文件 checksum + manifest。
-- 并行拉 HL 官方 S3（`s3://hyperliquid-archive`，requester-pays）建立历史基线。**记录一个事实**：官方只提供每块 ≥0.5 秒的快照，不是完整事件流。
+- 缺口检测按场所：Bybit 使用 venue sequence；HL 无 sequence，只能用连接闭合与 pilot 冻结的最大到达间隔，证据强度较弱且必须披露。
+- explained gap 单次 ≤4h、窗口累计 ≤2%、可用于延迟统计的小时覆盖率 ≥95%；unexplained gap 从恢复后的首个验证连续点重置计数，旧数据保留。
+- HL 官方 S3 requester-pays 仅作可选离线基线，不是在线补缺或连续性权威，不创建 AWS profile。
 
-**采集器归属**：进 `research/`，受 Gate 2 的 CI 追溯约束——Gate 2 完成时采集器必须一并通过全部检查，不得因"先写的"而豁免。
+**采集器归属**：进 `data/`，Gate 2 前最多 800 行 / 5 文件，触顶即暂停 Gate 1、先做 Gate 2；Gate 2 完成时必须一并通过全部门禁。
 
-**验收**：连续 7 天采集无未解释缺口，可确定性重放任一时间窗口。
+**验收**：连续 7 天采集无未解释缺口且满足覆盖率，可确定性重放任一时间窗口；两所缺口证据强度差异已记录。单向延迟仅作含不可分离时钟偏差的描述性指标；到达间隔和同机 RTT 才是质量证据。
 
 ---
 
 ### Gate 2 — 骨架与门禁
 - **在写任何策略或执行代码之前**，先把 §2.5 全部检查装进 pre-commit + CI required check。
-- 冻结技术栈：`hyperliquid-python-sdk` + `ccxt` + `polars`/`duckdb`。**不使用 NautilusTrader**——Tier 0 是低频套利，重型事件驱动框架的成本等真正做市时再付。
+- Gate 1 使用原生 `websockets`；执行 SDK、`ccxt`、`polars`/`duckdb` 只在对应 Gate 的失败测试需要时逐项批准，禁止预装。**不使用 NautilusTrader**。
 - 冻结依赖精确版本 + SBOM + 漏洞扫描。
 - 目录：`data/ execution/ strategy/ risk/ reconciliation/ ops/ tests/`（7 个，即上限）。
+- 任何项目 testnet 凭据或 agent wallet 的创建、配置，或首次私有 endpoint 调用，必须在 Gate 2 验收之后；AI 全程不接触凭据。
 
-**验收**：CI 全绿；故意提交名为 `foo_v2.py` 的空文件被拒绝；故意提交一个假 mainnet key 被凭据扫描拒绝；Gate 1 的采集器已纳入门禁并通过。
+**验收**：CI 全绿；`foo_v2.py`、假 mainnet key、`ops → execution.orders` 违规 import、TESTS/RESEARCH 混入部署 artifact 均被拒；Gate 1 采集器已纳入门禁并通过。
 
 ---
 
@@ -174,7 +165,9 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 **Dead-man switch（被动）**：交易所侧 scheduled cancel。心跳停止 → 交易所自动撤单。
 **这一条保护的是进程已死、主机断网、你不在电脑前的场景，kill switch 保护不了它。**
 
-**验收**：在 testnet 上真实触发每一条自动条件；真实拔掉进程验证 DMS 生效；结果均为中性或撤单完毕 + 停机 + 事件流有完整记录。
+**能力矩阵**：HL 必须真实演练 venue-side `scheduleCancel`；Bybit 普通账户无 DCP，必须演练 host-side cancel-only watchdog，并把主机/网络同时故障不受保护记为未缓解风险。
+
+**验收**：可自然发生的条件在 testnet 真实触发；不可自然制造的条件由未打包的 `tests/harness/` 写入合法 `controlled_injection` 事件，走同一 detector→decision→action 链。含注入窗口不得用于延迟/微结构统计。每场所最强可得断线保护均已演练，能力矩阵完整。
 
 ---
 
@@ -185,6 +178,8 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 
 **不得**把尚未结算的公布资金费率记作已实现收益。
 
+**前置行为观测**：Gate 5 开始前，两所最小 testnet 仓位各跨过一次结算并查询账户级记录。两所都产生真实记录才保持现行闭环定义；任一不产生则停止，由用户选择证据降级或该项 NO-GO，不得预授权降级。
+
 **验收**：≥3 个完整闭环，全部对账一致，零未知订单/仓位。
 
 ---
@@ -193,9 +188,9 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 
 到达 `HL_T0_TESTNET_V1_CONFIRMED` 需要全部满足：
 - Gate 5 的 ≥3 个 testnet 闭环全部对账一致
-- Kill switch 每条自动条件已真实触发验证；DMS 已真实演练
+- Kill switch 每条条件已按真实触发/受控注入规则验证；每场所最强可得断线保护已演练并记录能力矩阵
 - 未知状态分叉已验证：未知状态下系统不下新单
-- 连续 30 天采集无未解释缺口
+- 完成审计前任意连续 30 日历日采集无未解释缺口且满足覆盖率；该窗口与 Gate 2–5 并行
 - 反膨胀 CI 全绿；运行闭包 ≤8,000 行且可一次性装入单个 context window
 - 仓库与主机上不存在任何 mainnet 私钥或 API key
 - 未发生未经授权的范围扩展（标的、场所、Tier、真实资金）
@@ -213,7 +208,7 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 **数据与模型**：不可解释的数据缺口；未来数据泄漏；依赖或配置 digest 漂移。
 **执行**：两个进程同时拥有写权限；外部动作结果不确定且无法权威对账；未知订单/仓位/余额；delta 超限；nonce 异常。
 **平台**：HL 验证者投票下架、强制结算或干预市场价格（JELLY 2025-03、POPCAT 2025-11、Fartcoin 2026-04 均有先例；BTC/ETH 概率低但机制存在）；HLP 大额异常损益；条款变更影响自动化交易或澳洲用户资格。
-**权限**：任何涉及真实资金、mainnet 私钥、加杠杆、加币种或改策略的情况——一律开新 Goal。
+**权限**：任何涉及真实资金、mainnet 私钥、加杠杆、加币种或改策略的情况——一律开新 Goal；两所未同时具备 venue-side DMS 时不得开启任何 mainnet Goal。
 
 ---
 
