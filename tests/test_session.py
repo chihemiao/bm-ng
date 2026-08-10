@@ -82,18 +82,24 @@ async def _reconnect_scenario() -> None:
         for stream in acknowledged:
             await websocket.send(json.dumps({"type": "ack", "stream": stream}))
         if len(cycles) == 1:
-            await websocket.send(json.dumps({"type": "market", "stream": "first"}))
+            await websocket.send(
+                json.dumps({"type": "market", "stream": HL_STREAMS[0], "value": "first"})
+            )
             await websocket.close()
             return
-        await websocket.send(json.dumps({"type": "market", "stream": "early"}))
+        await websocket.send(
+            json.dumps({"type": "market", "stream": HL_STREAMS[0], "value": "early"})
+        )
         await asyncio.sleep(0.01)
         await websocket.send(json.dumps({"type": "ack", "stream": HL_STREAMS[-1]}))
-        await websocket.send(json.dumps({"type": "market", "stream": "after"}))
+        await websocket.send(
+            json.dumps({"type": "market", "stream": HL_STREAMS[0], "value": "after"})
+        )
         await stop.wait()
 
     def on_record(record):
         records.append(record)
-        if record.event_kind == "market" and json.loads(record.raw)["stream"] == "after":
+        if record.event_kind == "market" and json.loads(record.raw)["value"] == "after":
             stop.set()
 
     async with serve(handler, "127.0.0.1", 0, ping_interval=None) as server:
@@ -102,11 +108,11 @@ async def _reconnect_scenario() -> None:
 
     assert cycles == [list(HL_STREAMS), list(HL_STREAMS)]
     markets = [
-        json.loads(record.raw)["stream"] for record in records if record.event_kind == "market"
+        json.loads(record.raw)["value"] for record in records if record.event_kind == "market"
     ]
     assert markets == ["first", "after"]
     pre_ack = [record for record in records if record.payload_schema == "pre_ack_frame"]
-    assert [json.loads(record.raw)["stream"] for record in pre_ack] == ["early"]
+    assert [json.loads(record.raw)["value"] for record in pre_ack] == ["early"]
     assert report.reconnects == 1
     assert report.ack_cycles == 2
 
@@ -124,7 +130,7 @@ async def _quarantine_scenario() -> None:
             stream = json.loads(await websocket.recv())["stream"]
             await websocket.send(json.dumps({"type": "ack", "stream": stream}))
         await websocket.send(b"\xff\x00")
-        await websocket.send(json.dumps({"type": "market", "stream": "valid"}))
+        await websocket.send(json.dumps({"type": "market", "stream": HL_STREAMS[0]}))
         await stop.wait()
 
     def on_record(record):
