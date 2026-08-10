@@ -80,7 +80,7 @@ class PublicSession:
         on_record: Callable[[SessionRecord], None],
         *,
         ping_interval: float = 20,
-        ping_timeout: float = 20,
+        ping_timeout: float = 10,
         ack_timeout: float = 10,
         max_reconnects: int = 3,
     ) -> None:
@@ -140,14 +140,18 @@ class PublicSession:
             open_timeout=1,
             proxy=None,
         ) as websocket:
-            for frame in self.subscriptions.values():
+            for stream, frame in self.subscriptions.items():
+                raw = frame.encode() if isinstance(frame, str) else frame
+                self._emit("ops", "subscription_send", raw, stream, False)
                 await websocket.send(frame)
             while not stop.is_set():
-                timeout = max(0, deadline - loop.time()) if pending else None
+                timeout = min(max(0, deadline - loop.time()), 0.1) if pending else 0.1
                 try:
                     message = await asyncio.wait_for(websocket.recv(), timeout)
                 except TimeoutError as error:
-                    raise _HardLiveness("subscription_ack_timeout") from error
+                    if pending:
+                        raise _HardLiveness("subscription_ack_timeout") from error
+                    continue
                 self._handle_message(message, pending)
 
     def _handle_message(self, message: str | bytes, pending: set[str]) -> None:
