@@ -27,6 +27,9 @@ line-length = 100
 [tool.ruff.lint]
 select = ["B", "C90", "E", "F", "I"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["data", "execution"]
+
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
