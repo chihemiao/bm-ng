@@ -24,14 +24,25 @@ PAYLOAD_SCHEMAS = frozenset(
         "subscription_send",
         "venue_down",
         "venue_recovered",
+        "writer_lease_decision",
     }
 )
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
 RECONCILIATION_SCHEMAS = frozenset(
     {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
 )
+DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {"writer_lease_decision"}
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
+WRITER_DECISIONS = {
+    ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
+    ("deny", "cancel_only"): frozenset({"incumbent_other_wallet"}),
+    ("deny", "terminated"): frozenset(
+        {"shared_writer_identity", "unknown_incumbent", "unsafe_lock_file"}
+    ),
+    ("release", "released"): frozenset({"lease_released"}),
+    ("revalidate", "invalidated"): frozenset({"lock_inode_changed"}),
+}
 COMMON_FIELDS = (
     "schema_ver",
     "event_kind",
@@ -93,8 +104,12 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _validate_order_identity(event)
     if event["event_kind"] == "ops" and event["payload_schema"] == "raw_quarantine":
         _require(_nonempty_text(event["payload"].get("raw")), "raw quarantine requires raw frame")
+    if event["payload_schema"] in DURABLE_EVENT_SCHEMAS:
+        _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     if event["payload_schema"] in RECONCILIATION_SCHEMAS:
         _validate_reconciliation(event)
+    if event["payload_schema"] == "writer_lease_decision":
+        _validate_writer_decision(event)
     return event
 
 
@@ -126,13 +141,33 @@ def _canonical(value: Any) -> list[str]:
 def _validate_reconciliation(event: dict[str, Any]) -> None:
     _require(event["event_kind"] == "reconciliation", "invalid reconciliation event kind")
     _require(event["schema_ver"] == 1, "unsupported reconciliation schema version")
-    _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     validators = {
         "reconciliation_surface": _validate_surface,
         "account_ledger_entry": _validate_ledger_entry,
         "reconciliation_decision": _validate_decision,
     }
     validators[event["payload_schema"]](event)
+
+
+def _validate_writer_decision(event: dict[str, Any]) -> None:
+    _require(event["event_kind"] == "decision", "invalid writer decision event kind")
+    _require(event["schema_ver"] == 1, "unsupported writer decision schema version")
+    fields = set(
+        "account_digest action boot_id instance_id lease_epoch lock_path_digest outcome "
+        "prior_epoch_valid reason wallet_fingerprint".split()
+    )
+    payload = _exact_fields(event["payload"], fields, "writer lease decision")
+    for field in ("account_digest", "wallet_fingerprint", "lock_path_digest"):
+        _require(_valid_digest(payload[field]), f"invalid {field}")
+    for field in ("instance_id", "boot_id"):
+        _require(_nonempty_text(payload[field]), f"invalid writer {field}")
+    _require(type(payload["prior_epoch_valid"]) is bool, "invalid prior_epoch_valid")
+    epoch = payload["lease_epoch"]
+    _require(epoch is None or type(epoch) is int and epoch > 0, "invalid lease_epoch")
+    reasons = WRITER_DECISIONS.get((payload["action"], payload["outcome"]), frozenset())
+    _require(payload["reason"] in reasons, "invalid writer decision combination")
+    needs_epoch = payload["outcome"] not in {"terminated"}
+    _require(not needs_epoch or epoch is not None, "writer decision needs lease_epoch")
 
 
 def _validate_surface(event: dict[str, Any]) -> None:

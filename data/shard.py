@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Iterator
 
 from data.contracts import (
-    RECONCILIATION_SCHEMAS,
+    DURABLE_EVENT_SCHEMAS,
     ContractError,
     checksum_matches,
     validate_envelope,
@@ -104,9 +104,9 @@ class ShardWriter:
             self._closed = True
 
     def append_event(self, event: dict[str, Any]) -> None:
-        """Append one validated reconciliation event in strict event-key order."""
+        """Append one validated durable event in strict event-key order."""
         encoded = encode_event(event)
-        _require(event["payload_schema"] in RECONCILIATION_SCHEMAS, "not a reconciliation event")
+        _require(event["payload_schema"] in DURABLE_EVENT_SCHEMAS, "not a durable event")
         _require(event["boot_id"] == self.boot_id, "event boot differs from writer")
         key = _event_key(event)
         if self._last_event_key is not None:
@@ -201,19 +201,19 @@ def replay_records(root: Path) -> Iterator[bytes]:
             raise ContractError("invalid gzip shard") from error
 
 
-def _reconciliation_events(root: Path) -> Iterator[dict[str, Any]]:
+def _durable_events(root: Path) -> Iterator[dict[str, Any]]:
     for raw in replay_records(root):
         try:
             event = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError) as error:
             raise ContractError("invalid event JSON") from error
         validate_envelope(event)
-        if event["payload_schema"] in RECONCILIATION_SCHEMAS:
+        if event["payload_schema"] in DURABLE_EVENT_SCHEMAS:
             yield event
 
 
 def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
-    """Replay canonical reconciliation events in an inclusive wall-time window."""
+    """Replay canonical durable events in an inclusive wall-time window."""
     valid_window = type(start_ns) is int and start_ns >= 0
     valid_window &= type(end_ns) is int and end_ns >= start_ns
     _require(valid_window, "invalid replay window")
@@ -223,7 +223,7 @@ def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
     seen_digests = set()
     entry_digests: dict[str, str] = {}
     previous_key: tuple[int, str, int] | None = None
-    for event in _reconciliation_events(root):
+    for event in _durable_events(root):
         canonical = encode_event(event)
         digest = hashlib.sha256(canonical).hexdigest()
         if digest in seen_digests:
