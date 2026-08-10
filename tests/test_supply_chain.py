@@ -113,6 +113,10 @@ def test_exported_lock_passes_strict_vulnerability_audit() -> None:
         )
 
 
+def test_sbom_component_validation_rejects_a_missing_version() -> None:
+    assert not sbom_components_are_complete([{"name": "unversioned"}])
+
+
 def test_locked_export_is_a_cyclonedx_15_sbom() -> None:
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory) / "sbom.json"
@@ -133,7 +137,7 @@ def test_locked_export_is_a_cyclonedx_15_sbom() -> None:
     assert sbom["bomFormat"] == "CycloneDX"
     assert sbom["specVersion"] == "1.5"
     assert sbom["metadata"]["component"]["name"] == "hl-funding-carry"
-    assert all({"name", "version"} <= component for component in sbom["components"])
+    assert sbom_components_are_complete(sbom["components"])
 
 
 def test_wheel_contains_only_current_runtime_packages_and_metadata() -> None:
