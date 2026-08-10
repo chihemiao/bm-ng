@@ -4,6 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from reconciliation.ledger import BalanceLedger, LedgerContractError, validate_balance_ledger
+
 VENUES = frozenset({"hyperliquid", "bybit"})
 SURFACES = ("orders", "fills", "positions", "balances")
 
@@ -52,7 +54,7 @@ class VenueExpectation:
     positions: ExpectedSurface
     balances: ExpectedSurface
     frozen_intents: frozenset[str]
-    balance_ledger_available: bool
+    balance_ledger: BalanceLedger | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +146,13 @@ def _validate_expectation(expectation: VenueExpectation) -> None:
         isinstance(value, str) and bool(value) for value in expectation.frozen_intents
     )
     _require(valid_intents, "invalid frozen intent")
-    _require(type(expectation.balance_ledger_available) is bool, "invalid balance ledger")
+    ledger = expectation.balance_ledger
+    _require(ledger is None or isinstance(ledger, BalanceLedger), "invalid balance ledger")
+    if ledger is not None:
+        try:
+            validate_balance_ledger(ledger)
+        except LedgerContractError as error:
+            raise StartupContractError("invalid balance ledger") from error
 
 
 def validate_startup_structure(
@@ -219,8 +227,14 @@ def _expectation_gate_reasons(
         expectation = expectations[venue]
         if expectation.frozen_intents:
             frozen.append(f"{venue}:frozen_intent")
-        if not expectation.balance_ledger_available:
-            ledger.append(f"{venue}.balances:ledger_unimplemented")
+        audit = expectation.balance_ledger
+        if audit is None:
+            ledger.append(f"{venue}.balances:ledger_unavailable")
+        else:
+            if audit.unknown_entry_ids:
+                ledger.append(f"{venue}.balances:ledger_unknown_entry")
+            if not audit.self_consistent:
+                ledger.append(f"{venue}.balances:ledger_inconsistent")
     return frozen, ledger
 
 
@@ -246,6 +260,9 @@ def _state_reasons(
             reasons.append(f"{venue}.balances:balance_identity_mismatch")
         elif actual.balances.entities.fingerprints != expected.balances.entities.fingerprints:
             reasons.append(f"{venue}.balances:balance_state_mismatch")
+        audit = expected.balance_ledger
+        if audit is not None and audit.end_ns != actual.balances.observed_ns:
+            reasons.append(f"{venue}.balances:ledger_coverage_mismatch")
     return reasons
 
 

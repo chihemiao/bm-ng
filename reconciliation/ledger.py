@@ -55,6 +55,26 @@ class BalanceLedger:
     self_consistent: bool
 
 
+def validate_balance_ledger(ledger: BalanceLedger) -> BalanceLedger:
+    _require(isinstance(ledger, BalanceLedger), "invalid balance ledger")
+    valid_clock = type(ledger.start_ns) is int and ledger.start_ns >= 0
+    valid_clock &= type(ledger.end_ns) is int and ledger.end_ns >= ledger.start_ns
+    _require(valid_clock, "invalid ledger window")
+    folded = _balance_pairs(ledger.folded_balances)
+    snapshot = _balance_pairs(ledger.snapshot_balances)
+    ids = ledger.applied_entry_ids
+    _require(isinstance(ids, tuple) and ids == tuple(sorted(set(ids))), "invalid entry IDs")
+    unknown = ledger.unknown_entry_ids
+    valid_unknown = isinstance(unknown, frozenset) and all(
+        isinstance(value, str) and bool(value) for value in unknown
+    )
+    _require(valid_unknown and not unknown.intersection(ids), "invalid unknown entry IDs")
+    expected = folded == snapshot
+    valid_consistency = type(ledger.self_consistent) is bool
+    _require(valid_consistency and ledger.self_consistent is expected, "consistency")
+    return ledger
+
+
 def _balance_pairs(value: object) -> dict[str, Decimal]:
     _require(isinstance(value, tuple) and bool(value), "invalid balance pairs")
     balances = {}
@@ -99,7 +119,8 @@ def reconcile_balance_ledger(
         totals[delta.asset] += _amount(delta.signed_amount_canonical)
     folded = tuple(sorted((asset, _format_amount(amount)) for asset, amount in totals.items()))
     observed = tuple(sorted((asset, _format_amount(amount)) for asset, amount in snapshot.items()))
-    return BalanceLedger(
+    audit = BalanceLedger(
         start_ns, end_ns, folded, observed, tuple(sorted(entry_ids)), unknown_entry_ids,
         folded == observed,
     )
+    return validate_balance_ledger(audit)

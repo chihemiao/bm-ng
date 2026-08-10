@@ -2,8 +2,10 @@ import pytest
 
 from reconciliation.ledger import (
     BalanceDelta,
+    BalanceLedger,
     LedgerContractError,
     reconcile_balance_ledger,
+    validate_balance_ledger,
 )
 
 
@@ -44,6 +46,13 @@ def test_snapshot_mismatch_and_unknown_entries_remain_explicit() -> None:
     assert audit.folded_balances == (("USDC", "1.2"),)
     assert audit.self_consistent is False
     assert audit.unknown_entry_ids == frozenset({"venue-row-9"})
+
+
+def test_a_forged_consistency_flag_is_rejected() -> None:
+    audit = BalanceLedger(100, 200, (("USDC", "1"),), (("USDC", "2"),), (), frozenset(), True)
+
+    with pytest.raises(LedgerContractError, match="consistency"):
+        validate_balance_ledger(audit)
 
 
 def test_duplicate_or_out_of_window_entries_are_rejected() -> None:
