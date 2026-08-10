@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from reconciliation.state import (
+    AdmissionDecision,
     CanonicalSet,
     ExpectedSurface,
     StartupContractError,
@@ -10,6 +11,7 @@ from reconciliation.state import (
     ValidatedStartup,
     VenueEvidence,
     VenueExpectation,
+    decide_startup_admission,
     validate_startup_structure,
     validate_surface_evidence,
 )
@@ -57,15 +59,43 @@ def _expectation(**changes) -> VenueExpectation:
     return VenueExpectation(**values)
 
 
+def _venues() -> dict[str, VenueEvidence]:
+    return {"hyperliquid": _venue(), "bybit": _venue()}
+
+
+def _expectations() -> dict[str, VenueExpectation]:
+    return {"hyperliquid": _expectation(), "bybit": _expectation()}
+
+
 def _startup(**changes) -> ValidatedStartup:
     values = {
         "startup_started_ns": 100,
         "now_ns": 200,
-        "venues": {"hyperliquid": _venue(), "bybit": _venue()},
-        "expectations": {"hyperliquid": _expectation(), "bybit": _expectation()},
+        "venues": _venues(),
+        "expectations": _expectations(),
     }
     values.update(changes)
     return validate_startup_structure(**values)
+
+
+def _decision(**changes) -> AdmissionDecision:
+    values = {
+        "startup_started_ns": 100,
+        "now_ns": 200,
+        "venues": _venues(),
+        "expectations": _expectations(),
+    }
+    values.update(changes)
+    return decide_startup_admission(**values)
+
+
+def _changed_venue(surface: str, **changes) -> VenueEvidence:
+    venue = _venue()
+    current = replace(getattr(venue, surface), **changes)
+    if "unknown_count" in changes and "fetched_count" not in changes:
+        represented = len(current.entities.fingerprints) + current.unknown_count
+        current = replace(current, fetched_count=represented)
+    return replace(venue, **{surface: current})
 
 
 def test_valid_surface_evidence_is_returned_unchanged() -> None:
@@ -189,3 +219,53 @@ def test_expectation_control_fields_are_structurally_validated(
 ) -> None:
     with pytest.raises(StartupContractError):
         _startup(expectations={"hyperliquid": expectation, "bybit": _expectation()})
+
+
+def test_only_complete_fresh_evidence_is_ready() -> None:
+    decision = _decision()
+
+    assert decision == AdmissionDecision(action="ready", reasons=())
+    assert decision.action in {"ready", "cancel_only_freeze"}
+    assert "submit" not in decision.action
+    assert "reduce" not in decision.action
+
+
+@pytest.mark.parametrize("surface", ["orders", "fills", "positions", "balances"])
+def test_each_stale_surface_freezes(surface: str) -> None:
+    venues = _venues()
+    venues["bybit"] = _changed_venue(surface, observed_ns=100)
+
+    decision = _decision(venues=venues)
+
+    assert decision.action == "cancel_only_freeze"
+    assert f"bybit.{surface}:stale" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"page_complete": False}, "pagination_incomplete"),
+        ({"truncated": True}, "truncated"),
+        ({"unknown_count": 1}, "unknown_entities"),
+        ({"mismatch_count": 1}, "mismatch"),
+    ],
+)
+def test_each_incomplete_surface_condition_freezes(changes: dict, reason: str) -> None:
+    venues = _venues()
+    venues["hyperliquid"] = _changed_venue("fills", **changes)
+
+    decision = _decision(venues=venues)
+
+    assert decision.action == "cancel_only_freeze"
+    assert f"hyperliquid.fills:{reason}" in decision.reasons
+
+
+def test_reasons_are_sorted_and_deterministic() -> None:
+    venues = {
+        "hyperliquid": _changed_venue("orders", truncated=True),
+        "bybit": _changed_venue("fills", page_complete=False),
+    }
+
+    decision = _decision(venues=venues)
+
+    assert decision.reasons == tuple(sorted(decision.reasons))
