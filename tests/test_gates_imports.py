@@ -7,6 +7,7 @@ IO_MODULES = frozenset(
     {"aiohttp", "asyncio", "httpx", "os", "pathlib", "requests", "socket", "subprocess", "urllib"}
 )
 EXCHANGE_SDKS = frozenset({"bybit", "ccxt", "hyperliquid", "hyperliquid_sdk", "pybit"})
+BUILTIN_IO = frozenset({"__import__", "compile", "eval", "exec", "input", "open", "print"})
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -31,13 +32,17 @@ def _python_files(root: Path) -> list[Path]:
     ]
 
 
-def _imports(tree: ast.AST) -> set[str]:
+def _imports(tree: ast.AST, relative: Path) -> set[str]:
     names = set()
+    package = list(relative.with_suffix("").parts[:-1])
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
+            ascend = max(0, node.level - 1)
+            base = package[: len(package) - ascend] if node.level and ascend <= len(package) else []
+            module_parts = base + (node.module.split(".") if node.module else [])
+            module = ".".join(module_parts)
             if module:
                 names.add(module)
             names.update(f"{module}.{alias.name}".strip(".") for alias in node.names)
@@ -82,6 +87,27 @@ def _control_subjects(tree: ast.AST) -> list[ast.AST]:
     return subjects
 
 
+def _dynamic_source_dispatch(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Subscript) and _mentions_source(node.func.slice):
+            return True
+        is_getattr = isinstance(node.func, ast.Name) and node.func.id == "getattr"
+        if is_getattr and any(_mentions_source(argument) for argument in node.args[1:]):
+            return True
+    return False
+
+
+def _contract_builtin_io(tree: ast.AST) -> bool:
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in BUILTIN_IO
+        for node in ast.walk(tree)
+    )
+
+
 def _tree_violations(tree: ast.AST) -> set[str]:
     violations = set()
     functions = (ast.FunctionDef, ast.AsyncFunctionDef)
@@ -93,32 +119,38 @@ def _tree_violations(tree: ast.AST) -> set[str]:
         violations.add("function-lines")
     if any(_mentions_source(subject) for subject in _control_subjects(tree)):
         violations.add("source-branch")
+    if _dynamic_source_dispatch(tree):
+        violations.add("source-branch")
     return violations
 
 
 def _payload_schemas(tree: ast.Module) -> frozenset[str] | None:
+    assignments = []
     for node in tree.body:
         targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
         is_registry = any(
             isinstance(target, ast.Name) and target.id == "PAYLOAD_SCHEMAS"
             for target in targets
         )
-        if not is_registry:
-            continue
-        value = node.value
-        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
-            return None
-        if value.func.id != "frozenset" or len(value.args) != 1:
-            return None
-        members = value.args[0]
-        if not isinstance(members, (ast.Set, ast.List, ast.Tuple)):
-            return None
-        values = [item.value for item in members.elts if isinstance(item, ast.Constant)]
-        all_strings = all(isinstance(item, str) for item in values)
-        if len(values) != len(members.elts) or not values or not all_strings:
-            return None
-        return frozenset(values)
-    return None
+        if is_registry:
+            assignments.append(node)
+    if len(assignments) != 1 or not isinstance(assignments[0], (ast.Assign, ast.AnnAssign)):
+        return None
+    value = assignments[0].value
+    if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+        return None
+    if value.func.id != "frozenset" or len(value.args) != 1:
+        return None
+    members = value.args[0]
+    if not isinstance(members, (ast.Set, ast.List, ast.Tuple)):
+        return None
+    values = [item.value for item in members.elts if isinstance(item, ast.Constant)]
+    all_strings = all(isinstance(item, str) for item in values)
+    if len(values) != len(members.elts) or not values or not all_strings:
+        return None
+    return frozenset(values)
 
 
 def structural_violations(root: Path) -> set[str]:
@@ -130,7 +162,9 @@ def structural_violations(root: Path) -> set[str]:
         if relative == Path("data/contracts.py"):
             contracts_tree = tree
         if relative.parts[0] in RUNTIME_DIRS:
-            violations |= _import_violations(relative, _imports(tree))
+            violations |= _import_violations(relative, _imports(tree, relative))
+        if relative == Path("data/contracts.py") and _contract_builtin_io(tree):
+            violations.add("contracts-io")
         violations |= _tree_violations(tree)
     schemas = _payload_schemas(contracts_tree) if contracts_tree else None
     if schemas is None:
