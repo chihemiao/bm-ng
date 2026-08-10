@@ -6,9 +6,6 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 RUNTIME_DIRS = frozenset({"data", "execution", "strategy", "risk", "reconciliation", "ops"})
 IGNORED_DIRS = frozenset({".git", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__"})
-TEXT_SUFFIXES = frozenset(
-    {".env", ".ipynb", ".json", ".md", ".py", ".sh", ".toml", ".txt", ".yaml", ".yml"}
-)
 VERSIONED_NAME = re.compile(
     r"(?:^|[_-])(?:v\d+|new|fixed|final|copy|old|backup|retry\d+|attempt\d+)(?:[_\-.]|$)",
     re.IGNORECASE,
@@ -16,7 +13,7 @@ VERSIONED_NAME = re.compile(
 CREDENTIAL = re.compile(
     r"(?:0x[0-9a-f]{64}|-----BEGIN [A-Z ]*PRIVATE KEY-----|"
     r"(?:api[_-]?key|private[_-]?key|mnemonic|seed[_-]?phrase)\s*[:=]\s*"
-    r"[\"'][^\"'\n]{8,}[\"'])",
+    r"(?:[\"'][^\"'\n]{8,}[\"']|[^\s#\"']{8,}))",
     re.IGNORECASE,
 )
 VALID_CONFIG = """\
@@ -52,6 +49,13 @@ def _lines(path: Path) -> int:
     return len(path.read_text(errors="ignore").splitlines())
 
 
+def _text(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 def _dependency_count(config: dict) -> int:
     project = config.get("project", {})
     groups = config.get("dependency-groups", {})
@@ -60,6 +64,10 @@ def _dependency_count(config: dict) -> int:
         dependencies.extend(values)
     for values in groups.values():
         dependencies.extend(values)
+    uv = config.get("tool", {}).get("uv", {})
+    for key, values in uv.items():
+        if "dependenc" in key and isinstance(values, list):
+            dependencies.extend(values)
     return len(set(dependencies))
 
 
@@ -111,7 +119,7 @@ def _budget_violations(files: list[Path], relative: dict[Path, Path]) -> set[str
 
 def _path_violations(files: list[Path], relative: dict[Path, Path]) -> set[str]:
     violations = set()
-    if any(VERSIONED_NAME.search(path.name) for path in files):
+    if any(VERSIONED_NAME.search(part) for parts in relative.values() for part in parts.parts):
         violations.add("versioned-filename")
     invalid_tests = [
         path for path, parts in relative.items()
@@ -120,8 +128,8 @@ def _path_violations(files: list[Path], relative: dict[Path, Path]) -> set[str]:
     ]
     if invalid_tests:
         violations.add("test-filename")
-    text_files = [path for path in files if path.suffix.lower() in TEXT_SUFFIXES]
-    if any(CREDENTIAL.search(path.read_text(errors="ignore")) for path in text_files):
+    texts = (_text(path) for path in files)
+    if any(text is not None and CREDENTIAL.search(text) for text in texts):
         violations.add("credential")
     return violations
 
