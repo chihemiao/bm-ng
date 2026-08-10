@@ -4,8 +4,13 @@ import pytest
 
 from reconciliation.state import (
     CanonicalSet,
+    ExpectedSurface,
     StartupContractError,
     SurfaceEvidence,
+    ValidatedStartup,
+    VenueEvidence,
+    VenueExpectation,
+    validate_startup_structure,
     validate_surface_evidence,
 )
 
@@ -31,6 +36,36 @@ def _surface(**changes) -> SurfaceEvidence:
     }
     values.update(changes)
     return SurfaceEvidence(**values)
+
+
+def _venue() -> VenueEvidence:
+    names = ("orders", "fills", "positions", "balances")
+    return VenueEvidence(**{name: _surface() for name in names})
+
+
+def _expectation(**changes) -> VenueExpectation:
+    venue = _venue()
+    values = {
+        name: ExpectedSurface(
+            entities=getattr(venue, name).entities,
+            identities=getattr(venue, name).identities,
+        )
+        for name in ("orders", "fills", "positions", "balances")
+    }
+    values.update(frozen_intents=frozenset(), balance_ledger_available=True)
+    values.update(changes)
+    return VenueExpectation(**values)
+
+
+def _startup(**changes) -> ValidatedStartup:
+    values = {
+        "startup_started_ns": 100,
+        "now_ns": 200,
+        "venues": {"hyperliquid": _venue(), "bybit": _venue()},
+        "expectations": {"hyperliquid": _expectation(), "bybit": _expectation()},
+    }
+    values.update(changes)
+    return validate_startup_structure(**values)
 
 
 def test_valid_surface_evidence_is_returned_unchanged() -> None:
@@ -98,3 +133,59 @@ def test_canonical_sets_are_structurally_validated(canonical: CanonicalSet) -> N
 def test_validation_time_must_be_a_nonnegative_integer(now_ns: int) -> None:
     with pytest.raises(StartupContractError, match="now_ns"):
         validate_surface_evidence(_surface(), now_ns=now_ns)
+
+
+def test_structure_validation_returns_deterministic_data_without_an_action() -> None:
+    result = _startup(
+        venues={"bybit": _venue(), "hyperliquid": _venue()},
+        expectations={"bybit": _expectation(), "hyperliquid": _expectation()},
+    )
+
+    assert isinstance(result, ValidatedStartup)
+    assert tuple(name for name, _ in result.venues) == ("bybit", "hyperliquid")
+    assert not hasattr(result, "action")
+
+
+@pytest.mark.parametrize("target", ["venues", "expectations"])
+def test_structure_requires_exactly_both_venues(target: str) -> None:
+    with pytest.raises(StartupContractError, match="venues"):
+        _startup(**{target: {"hyperliquid": _venue()}})
+
+
+def test_venue_and_expectation_keys_must_match() -> None:
+    expectations = {"hyperliquid": _expectation(), "other": _expectation()}
+
+    with pytest.raises(StartupContractError, match="venues"):
+        _startup(expectations=expectations)
+
+
+@pytest.mark.parametrize(
+    ("startup_started_ns", "now_ns"),
+    [(100, 99), (True, 200), (100, True)],
+)
+def test_startup_clock_must_be_monotonic(startup_started_ns: int, now_ns: int) -> None:
+    with pytest.raises(StartupContractError, match="clock"):
+        _startup(startup_started_ns=startup_started_ns, now_ns=now_ns)
+
+
+def test_local_and_venue_canonicalization_contracts_must_match() -> None:
+    expected = _expectation()
+    entities = replace(expected.orders.entities, scheme_version=2)
+    changed = replace(expected, orders=replace(expected.orders, entities=entities))
+
+    with pytest.raises(StartupContractError, match="canonicalization"):
+        _startup(expectations={"hyperliquid": changed, "bybit": _expectation()})
+
+
+@pytest.mark.parametrize(
+    "expectation",
+    [
+        _expectation(frozen_intents={"not-frozen"}),
+        _expectation(balance_ledger_available=1),
+    ],
+)
+def test_expectation_control_fields_are_structurally_validated(
+    expectation: VenueExpectation,
+) -> None:
+    with pytest.raises(StartupContractError):
+        _startup(expectations={"hyperliquid": expectation, "bybit": _expectation()})
