@@ -132,7 +132,7 @@ def test_writer_decisions_append_to_the_real_durable_replay(tmp_path: Path) -> N
     assert acquired["account_digest"] == hashlib.sha256(_identity().account_id.encode()).hexdigest()
     path = WriterLease.path_for(lock_root, _identity().account_id)
     assert acquired["lock_path_digest"] == hashlib.sha256(str(path).encode()).hexdigest()
-    assert acquired["prior_epoch_valid"] is False
+    assert acquired["wallet_fingerprint"] == "a" * 64 and not acquired["prior_epoch_valid"]
 
 
 def test_acquire_and_deny_never_return_when_evidence_fails(tmp_path: Path) -> None:
