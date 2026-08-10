@@ -188,3 +188,23 @@ def test_notebook_output_with_a_credential_signature_is_rejected(tmp_path: Path)
     notebook = {"cells": [{"outputs": [{"text": [signature]}]}]}
     _write(root, "evidence.ipynb", json.dumps(notebook))
     assert repository_violations(root) == {"credential"}
+
+
+def test_unquoted_credential_in_dotenv_is_rejected(tmp_path: Path) -> None:
+    root = _configured(tmp_path)
+    signature = "api" + "_key=mainnet_" + "x" * 20
+    _write(root, ".env", signature)
+    assert repository_violations(root) == {"credential"}
+
+
+def test_tool_uv_dependencies_count_toward_the_budget(tmp_path: Path) -> None:
+    dependencies = ", ".join(f'"package-{index}"' for index in range(26))
+    config = VALID_CONFIG + f"\n[tool.uv]\ndev-dependencies = [{dependencies}]\n"
+    _write(tmp_path, "pyproject.toml", config)
+    assert repository_violations(tmp_path) == {"dependencies"}
+
+
+def test_version_marker_in_a_directory_name_is_rejected(tmp_path: Path) -> None:
+    root = _configured(tmp_path)
+    _write(root, "data/legacy_v2/module.py", "value = 1\n")
+    assert repository_violations(root) == {"versioned-filename"}
