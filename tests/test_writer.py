@@ -37,20 +37,13 @@ def _holder(root: Path, identity: WriterIdentity) -> subprocess.Popen[str]:
     return process
 
 
-def test_acquire_uses_account_derived_private_regular_file(tmp_path: Path) -> None:
-    assert AUTHORITY_MODES == frozenset({"pending_reconciliation", "cancel_only"})
-    lease = WriterLease.acquire(tmp_path, _identity())
-    assert (lease.authority.mode, lease.authority.lease_epoch) == ("pending_reconciliation", 1)
-    assert lease.path == WriterLease.path_for(tmp_path, _identity().account_id)
-    assert "test-account" not in lease.path.name
-    mode = lease.path.stat().st_mode
-    assert stat.S_ISREG(mode) and stat.S_IMODE(mode) == 0o600
-    lease.release()
-
-
 def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> None:
+    assert AUTHORITY_MODES == frozenset({"pending_reconciliation", "cancel_only"})
     owner = _holder(tmp_path, _identity())
     assert owner.stdout.readline().strip() == "pending_reconciliation:1"
+    path = WriterLease.path_for(tmp_path, _identity().account_id)
+    assert "test-account" not in path.name
+    assert stat.S_ISREG(path.stat().st_mode) and stat.S_IMODE(path.stat().st_mode) == 0o600
 
     observer = WriterLease.acquire(tmp_path, _identity("two", "b" * 64))
     assert observer.authority.mode == "cancel_only"
