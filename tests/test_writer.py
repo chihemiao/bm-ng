@@ -25,7 +25,7 @@ def _identity(instance="one", fingerprint="a" * 64):
 def _holder(root: Path, identity: WriterIdentity) -> subprocess.Popen[str]:
     fields = tuple(getattr(identity, name) for name in identity.__match_args__)
     process = subprocess.Popen(
-        [sys.executable, "-u", "-c", HOLDER, str(root), *fields],
+        [sys.executable, "-B", "-u", "-c", HOLDER, str(root), *fields],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
     ready, _, _ = select.select([process.stdout], [], [], 5)
