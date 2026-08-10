@@ -173,3 +173,28 @@ def test_dynamic_payload_schema_registry_is_rejected(tmp_path: Path) -> None:
 def test_more_than_twenty_payload_schemas_are_rejected(tmp_path: Path) -> None:
     _write(tmp_path, "data/contracts.py", _registry([f"event_{index}" for index in range(21)]))
     assert structural_violations(tmp_path) == {"event-types"}
+
+
+def test_relative_session_import_cannot_bypass_the_shard_boundary(tmp_path: Path) -> None:
+    _write(tmp_path, "data/contracts.py", _registry(["raw_frame"]))
+    _write(tmp_path, "data/session.py", "from . import shard\n")
+    assert structural_violations(tmp_path) == {"session-shard-import"}
+
+
+def test_contract_builtin_io_is_rejected_without_an_import(tmp_path: Path) -> None:
+    source = _registry(["raw_frame"]) + 'def load():\n    return open("evidence")\n'
+    _write(tmp_path, "data/contracts.py", source)
+    assert structural_violations(tmp_path) == {"contracts-io"}
+
+
+def test_payload_schema_registry_cannot_be_reassigned(tmp_path: Path) -> None:
+    source = _registry(["raw_frame"]) + 'PAYLOAD_SCHEMAS = PAYLOAD_SCHEMAS | {"extra"}\n'
+    _write(tmp_path, "data/contracts.py", source)
+    assert structural_violations(tmp_path) == {"payload-schema-registry"}
+
+
+def test_source_driven_dynamic_dispatch_is_rejected(tmp_path: Path) -> None:
+    _write(tmp_path, "data/contracts.py", _registry(["raw_frame"]))
+    source = "HANDLERS[event.source]()\ngetattr(handler, event.source)()\n"
+    _write(tmp_path, "data/dispatch.py", source)
+    assert structural_violations(tmp_path) == {"source-branch"}
