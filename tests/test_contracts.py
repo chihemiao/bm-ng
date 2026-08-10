@@ -1,9 +1,12 @@
+import ast
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
 from data import contracts
 from data.contracts import (
+    PAYLOAD_SCHEMAS,
     ContractError,
     bybit_update_gap,
     checksum_matches,
@@ -11,6 +14,44 @@ from data.contracts import (
     validate_envelope,
     validate_manifest,
 )
+
+FROZEN_PAYLOAD_SCHEMAS = frozenset(
+    {
+        "bybit_sequence_gap",
+        "collector_config",
+        "liveness_failure",
+        "order_observation",
+        "order_request",
+        "pre_ack_frame",
+        "raw_frame",
+        "raw_quarantine",
+        "subscription_ack",
+        "subscription_send",
+        "venue_down",
+        "venue_recovered",
+    }
+)
+ROOT = Path(__file__).parents[1]
+
+
+def _emitted_payload_schemas() -> set[str]:
+    emitted = set()
+    for relative in ("data/session.py", "data/collector.py"):
+        tree = ast.parse((ROOT / relative).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr in {"_emit", "_ops"}:
+                assert len(node.args) > 1 and isinstance(node.args[1], ast.Constant)
+                assert isinstance(node.args[1].value, str)
+                emitted.add(node.args[1].value)
+            elif node.func.attr == "_append":
+                for keyword in node.keywords:
+                    if keyword.arg == "schema":
+                        assert isinstance(keyword.value, ast.Constant)
+                        assert isinstance(keyword.value.value, str)
+                        emitted.add(keyword.value.value)
+    return emitted
 
 
 def market_event() -> dict:
@@ -44,6 +85,32 @@ def test_event_kind_set_is_frozen() -> None:
     event = market_event()
     event["event_kind"] = "fault"
     with pytest.raises(ContractError, match="event_kind"):
+        validate_envelope(event)
+
+
+def test_payload_schema_registry_is_frozen_complete_and_bounded() -> None:
+    emitted = {
+        "bybit_sequence_gap",
+        "collector_config",
+        "liveness_failure",
+        "pre_ack_frame",
+        "raw_frame",
+        "raw_quarantine",
+        "subscription_ack",
+        "subscription_send",
+        "venue_down",
+        "venue_recovered",
+    }
+    assert PAYLOAD_SCHEMAS == FROZEN_PAYLOAD_SCHEMAS
+    assert _emitted_payload_schemas() == emitted
+    assert emitted <= PAYLOAD_SCHEMAS
+    assert len(PAYLOAD_SCHEMAS) <= 20
+
+
+def test_unknown_payload_schema_is_rejected() -> None:
+    event = market_event()
+    event["payload_schema"] = "unregistered_type"
+    with pytest.raises(ContractError, match="payload_schema"):
         validate_envelope(event)
 
 
