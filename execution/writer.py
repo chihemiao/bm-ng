@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import stat
+import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -26,6 +28,22 @@ class WriterAuthority(NamedTuple):
     lease_epoch: int
 
 
+class WriterLeaseDecision(NamedTuple):
+    action: str
+    outcome: str
+    reason: str
+    account_digest: str
+    instance_id: str
+    wallet_fingerprint: str
+    boot_id: str
+    lease_epoch: int | None
+    lock_path_digest: str
+    prior_epoch_valid: bool
+
+
+Recorder = Callable[[WriterLeaseDecision], None]
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise WriterLeaseError(message)
@@ -44,9 +62,63 @@ def _same_inode(fd: int, path: Path) -> bool:
     return (opened.st_dev, opened.st_ino) == (named.st_dev, named.st_ino)
 
 
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _decision(
+    identity: WriterIdentity, path: Path, action: str, outcome: str,
+    reason: str, epoch: int | None, prior_epoch_valid: bool) -> WriterLeaseDecision:
+    return WriterLeaseDecision(
+        action, outcome, reason, _digest(identity.account_id), identity.instance_id,
+        identity.wallet_fingerprint, identity.boot_id, epoch, _digest(str(path)), prior_epoch_valid)
+
+
+def _record(recorder: Recorder, decision: WriterLeaseDecision, suppress: bool = False) -> None:
+    try:
+        recorder(decision)
+    except Exception as exc:
+        if not suppress:
+            raise WriterLeaseError("writer evidence recording failed") from exc
+        print("writer evidence recording failed", file=sys.stderr)
+
+
+def _contended(
+    fd: int, path: Path, identity: WriterIdentity, fingerprint: str,
+    recorder: Recorder) -> WriterAuthority:
+    metadata = _read_metadata(fd)
+    os.close(fd)
+    epoch = metadata.get("lease_epoch")
+    prior = type(epoch) is int and epoch > 0
+    same = metadata.get("wallet_fingerprint") == fingerprint
+    same |= metadata.get("instance_id") == identity.instance_id
+    if same:
+        value = epoch if prior else None
+        decision = _decision(
+            identity, path, "deny", "terminated", "shared_writer_identity", value, prior
+        )
+        _record(recorder, decision)
+        raise WriterLeaseError("shared writer identity") from None
+    known = metadata.get("account_id") == identity.account_id and prior
+    if not known:
+        decision = _decision(
+            identity, path, "deny", "terminated", "unknown_incumbent", None, prior
+        )
+        _record(recorder, decision)
+        raise WriterLeaseError("unknown incumbent") from None
+    decision = _decision(
+        identity, path, "deny", "cancel_only", "incumbent_other_wallet", epoch, True
+    )
+    _record(recorder, decision)
+    return WriterAuthority(identity, "cancel_only", epoch)
+
+
 class WriterLease:
-    def __init__(self, path: Path, authority: WriterAuthority, fd: int | None):
+    def __init__(
+        self, path: Path, authority: WriterAuthority, fd: int | None, recorder: Recorder,
+        prior_epoch_valid: bool):
         self.path, self._authority, self._fd = path, authority, fd
+        self._recorder, self._prior_epoch_valid = recorder, prior_epoch_valid
 
     @staticmethod
     def path_for(root: Path, account_id: str) -> Path:
@@ -55,8 +127,9 @@ class WriterLease:
         return base / f"{digest}.writer.lock"
 
     @classmethod
-    def acquire(cls, root: Path, identity: WriterIdentity) -> "WriterLease":
+    def acquire(cls, root: Path, identity: WriterIdentity, recorder: Recorder) -> "WriterLease":
         _require(isinstance(identity, WriterIdentity), "invalid writer identity")
+        _require(callable(recorder), "invalid writer recorder")
         metadata = identity._asdict()
         valid = all(isinstance(value, str) and value for value in metadata.values())
         fingerprint = metadata["wallet_fingerprint"]
@@ -65,35 +138,47 @@ class WriterLease:
         _require(valid, "invalid writer identity")
         path = cls.path_for(root, identity.account_id)
         flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
-        fd = os.open(path, flags, 0o600)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except OSError as exc:
+            decision = _decision(
+                identity, path, "deny", "terminated", "unsafe_lock_file", None, False
+            )
+            _record(recorder, decision)
+            raise WriterLeaseError("unsafe lock file") from exc
         try:
             _require(stat.S_ISREG(os.fstat(fd).st_mode), "unsafe lock file")
             os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             _require(_same_inode(fd, path), "lock inode changed")
         except BlockingIOError:
-            metadata = _read_metadata(fd)
-            os.close(fd)
-            same = metadata.get("wallet_fingerprint") == fingerprint
-            same |= metadata.get("instance_id") == identity.instance_id
-            _require(not same, "shared writer identity")
-            epoch = metadata.get("lease_epoch")
-            _require(metadata.get("account_id") == identity.account_id, "unknown incumbent")
-            _require(isinstance(epoch, int) and epoch > 0, "incumbent identity unavailable")
-            authority = WriterAuthority(identity, "cancel_only", epoch)
-            return cls(path, authority, None)
+            authority = _contended(fd, path, identity, fingerprint, recorder)
+            return cls(path, authority, None, recorder, True)
         except (OSError, WriterLeaseError) as exc:
             os.close(fd)
+            decision = _decision(
+                identity, path, "deny", "terminated", "unsafe_lock_file", None, False
+            )
+            _record(recorder, decision)
             raise WriterLeaseError("unsafe lock file") from exc
-        previous = _read_metadata(fd).get("lease_epoch", 0)
-        epoch = previous + 1 if isinstance(previous, int) and previous >= 0 else 1
+        previous = _read_metadata(fd).get("lease_epoch")
+        prior = type(previous) is int and previous >= 0
+        epoch = previous + 1 if prior else 1
         metadata["lease_epoch"] = epoch
         encoded = json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode()
         os.ftruncate(fd, 0)
         os.pwrite(fd, encoded, 0)
         os.fsync(fd)
         authority = WriterAuthority(identity, "pending_reconciliation", epoch)
-        return cls(path, authority, fd)
+        decision = _decision(
+            identity, path, "acquire", "pending_reconciliation", "lease_acquired", epoch, prior
+        )
+        try:
+            _record(recorder, decision)
+        except WriterLeaseError:
+            os.close(fd)
+            raise
+        return cls(path, authority, fd, recorder, prior)
 
     @property
     def authority(self) -> WriterAuthority:
@@ -102,6 +187,7 @@ class WriterLease:
 
     def revalidate(self) -> WriterAuthority:
         _require(self._fd is not None, "no held writer lease")
+        authority = self.authority
         try:
             valid = _same_inode(self._fd, self.path)
         except OSError:
@@ -109,11 +195,22 @@ class WriterLease:
         if not valid:
             os.close(self._fd)
             self._fd = self._authority = None
+            decision = _decision(
+                authority.identity, self.path, "revalidate", "invalidated",
+                "lock_inode_changed", authority.lease_epoch, self._prior_epoch_valid,
+            )
+            _record(self._recorder, decision, suppress=True)
             raise WriterLeaseError("lock inode changed")
-        return self.authority
+        return authority
 
     def release(self) -> None:
         if self._fd is not None:
-            self.revalidate()
+            authority = self.revalidate()
             os.close(self._fd)
+            self._fd = self._authority = None
+            decision = _decision(
+                authority.identity, self.path, "release", "released",
+                "lease_released", authority.lease_epoch, self._prior_epoch_valid,
+            )
+            _record(self._recorder, decision, suppress=True)
         self._fd = self._authority = None
