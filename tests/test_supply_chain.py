@@ -40,6 +40,10 @@ def _runtime_packages() -> list[str]:
     )
 
 
+def sbom_components_are_complete(components: list[dict]) -> bool:
+    return all({"name", "version"} <= component.keys() for component in components)
+
+
 def test_supply_chain_dependencies_and_tools_are_exactly_pinned() -> None:
     config = _config()
 
