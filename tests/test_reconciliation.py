@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import pytest
+
 from reconciliation.state import (
     CanonicalSet,
     StartupContractError,

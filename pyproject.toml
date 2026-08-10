@@ -28,7 +28,7 @@ line-length = 100
 select = ["B", "C90", "E", "F", "I"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["data", "execution"]
+known-first-party = ["data", "execution", "reconciliation"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
@@ -37,20 +37,20 @@ max-complexity = 10
 required-version = "==0.9.21"
 
 [tool.uv.build-backend]
-module-name = ["data", "execution"]
+module-name = ["data", "execution", "reconciliation"]
 module-root = ""
 namespace = true
 
 [tool.vulture]
 min_confidence = 80
-paths = ["data", "execution"]
+paths = ["data", "execution", "reconciliation"]
 
 [tool.importlinter]
-root_packages = ["data", "execution"]
+root_packages = ["data", "execution", "reconciliation"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Runtime cannot import tests or research"
 type = "forbidden"
-source_modules = ["data", "execution"]
+source_modules = ["data", "execution", "reconciliation"]
 forbidden_modules = ["tests", "research"]

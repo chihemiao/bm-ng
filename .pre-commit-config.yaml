@@ -15,7 +15,7 @@ repos:
         always_run: true
       - id: locked-ruff
         name: locked ruff
-        entry: uv run --locked ruff check data execution tests research
+        entry: uv run --locked ruff check data execution reconciliation tests research
         language: unsupported
         pass_filenames: false
         always_run: true
