@@ -35,6 +35,7 @@ FROZEN_PAYLOAD_SCHEMAS = LEGACY_PAYLOAD_SCHEMAS | {
     "account_ledger_entry",
     "reconciliation_decision",
     "reconciliation_surface",
+    "writer_lease_decision",
 }
 ROOT = Path(__file__).parents[1]
 
@@ -136,6 +137,60 @@ def _reconciliation_event(schema: str, payload: dict) -> dict:
     return event
 
 
+def _writer_event(**changes) -> dict:
+    payload = {
+        "action": "acquire", "outcome": "pending_reconciliation",
+        "reason": "lease_acquired", "account_digest": "a" * 64,
+        "instance_id": "writer-one", "wallet_fingerprint": "b" * 64,
+        "boot_id": "identity-boot", "lease_epoch": 1,
+        "lock_path_digest": "c" * 64, "prior_epoch_valid": False,
+    }
+    payload.update(changes)
+    event = market_event()
+    event.update(
+        event_kind="decision", payload_schema="writer_lease_decision",
+        seq_within_boot=8, payload=payload,
+    )
+    return event
+
+
+@pytest.mark.parametrize(
+    ("action", "outcome", "reason", "lease_epoch"),
+    [
+        ("acquire", "pending_reconciliation", "lease_acquired", 1),
+        ("deny", "cancel_only", "incumbent_other_wallet", 4),
+        ("deny", "terminated", "shared_writer_identity", 4),
+        ("deny", "terminated", "unknown_incumbent", None),
+        ("release", "released", "lease_released", 4),
+        ("revalidate", "invalidated", "lock_inode_changed", 4),
+    ],
+)
+def test_writer_lease_decision_has_a_closed_action_matrix(
+    action: str, outcome: str, reason: str, lease_epoch: int | None
+) -> None:
+    event = _writer_event(
+        action=action, outcome=outcome, reason=reason, lease_epoch=lease_epoch
+    )
+    assert validate_envelope(event) is event
+
+
+def test_writer_lease_decision_rejects_ambiguous_or_identifying_payloads() -> None:
+    with pytest.raises(ContractError, match="writer decision combination"):
+        validate_envelope(_writer_event(action="release", reason="lease_released"))
+    with pytest.raises(ContractError, match="account_digest"):
+        validate_envelope(_writer_event(account_digest="raw-account-id"))
+    with pytest.raises(ContractError, match="fields"):
+        validate_envelope(_writer_event(account_id="raw-account-id"))
+    event = _writer_event()
+    event["event_kind"] = "ops"
+    with pytest.raises(ContractError, match="event kind"):
+        validate_envelope(event)
+    event["event_kind"] = "decision"
+    del event["seq_within_boot"]
+    with pytest.raises(ContractError, match="seq_within_boot"):
+        validate_envelope(event)
+
+
 def test_versioned_reconciliation_payloads_are_structurally_validated() -> None:
     canonical = {
         "scheme_id": "balances.state",
@@ -180,6 +235,7 @@ def test_versioned_reconciliation_payloads_are_structurally_validated() -> None:
         ("account_ledger_entry", {"entry_id": "incomplete"}),
         ("reconciliation_decision", {"action": "ready"}),
         ("reconciliation_surface", {"surface": "balances"}),
+        ("writer_lease_decision", {"action": "acquire"}),
     ],
 )
 def test_incomplete_reconciliation_payloads_are_rejected(schema: str, payload: dict) -> None:
