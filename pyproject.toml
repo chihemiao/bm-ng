@@ -34,20 +34,20 @@ max-complexity = 10
 required-version = "==0.9.21"
 
 [tool.uv.build-backend]
-module-name = ["data"]
+module-name = ["data", "execution"]
 module-root = ""
 namespace = true
 
 [tool.vulture]
 min_confidence = 80
-paths = ["data"]
+paths = ["data", "execution"]
 
 [tool.importlinter]
-root_packages = ["data"]
+root_packages = ["data", "execution"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Runtime cannot import tests or research"
 type = "forbidden"
-source_modules = ["data"]
+source_modules = ["data", "execution"]
 forbidden_modules = ["tests", "research"]
