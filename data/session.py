@@ -149,7 +149,7 @@ class PublicSession:
                 try:
                     message = await asyncio.wait_for(websocket.recv(), timeout)
                 except TimeoutError as error:
-                    if pending:
+                    if pending and loop.time() >= deadline:
                         raise _HardLiveness("subscription_ack_timeout") from error
                     continue
                 self._handle_message(message, pending)
