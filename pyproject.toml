@@ -34,7 +34,7 @@ max-complexity = 10
 required-version = "==0.9.21"
 
 [tool.uv.build-backend]
-module-name = ["data"]
+module-name = ["data", "tests"]
 module-root = ""
 namespace = true
 
