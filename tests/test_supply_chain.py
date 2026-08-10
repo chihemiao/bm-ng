@@ -95,6 +95,7 @@ def test_build_and_import_roots_match_the_current_runtime_packages() -> None:
 
     expected_packages = ["data", "execution"]
     assert build["module-name"] == imports["root_packages"] == runtime_packages
+    assert tools["ruff"]["lint"]["isort"]["known-first-party"] == runtime_packages
     assert runtime_packages == expected_packages
     assert build["module-root"] == ""
     assert build["namespace"] is True
