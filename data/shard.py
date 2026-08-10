@@ -4,15 +4,30 @@ import gzip
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Iterator
+from typing import Any, BinaryIO, Iterator
 
-from data.contracts import ContractError, checksum_matches, validate_manifest
+from data.contracts import (
+    RECONCILIATION_SCHEMAS,
+    ContractError,
+    checksum_matches,
+    validate_envelope,
+    validate_manifest,
+)
 
 MANIFEST_NAME = "manifest.jsonl"
 SHARD_DIRECTORY = "shards"
 LENGTH_BYTES = 8
+
+
+@dataclass(frozen=True, slots=True)
+class EventReplay:
+    events: tuple[dict[str, Any], ...]
+    duplicate_digests: tuple[str, ...]
+    freeze_reasons: tuple[str, ...]
+    input_digest: str
 
 
 def _require(condition: bool, message: str) -> None:
@@ -28,6 +43,21 @@ def _hour_label(recv_wall_ns: int) -> str:
 
 def _safe_boot_id(boot_id: str) -> bool:
     return bool(boot_id) and all(character.isalnum() or character in "-_." for character in boot_id)
+
+
+def encode_event(event: dict[str, Any]) -> bytes:
+    """Validate and encode one event into its canonical JSON representation."""
+    validate_envelope(event)
+    try:
+        return json.dumps(
+            event, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode()
+    except (TypeError, ValueError) as error:
+        raise ContractError("event is not canonical JSON") from error
+
+
+def _event_key(event: dict[str, Any]) -> tuple[int, str, int]:
+    return event["recv_wall_ns"], event["boot_id"], event["seq_within_boot"]
 
 
 class ShardWriter:
@@ -49,6 +79,7 @@ class ShardWriter:
         self._records = 0
         self._first_ns: int | None = None
         self._last_ns: int | None = None
+        self._last_event_key: tuple[int, str, int] | None = None
         self._closed = False
 
     def append(self, record: bytes, recv_wall_ns: int) -> None:
@@ -71,6 +102,17 @@ class ShardWriter:
         if not self._closed:
             self._finalize()
             self._closed = True
+
+    def append_event(self, event: dict[str, Any]) -> None:
+        """Append one validated reconciliation event in strict event-key order."""
+        encoded = encode_event(event)
+        _require(event["payload_schema"] in RECONCILIATION_SCHEMAS, "not a reconciliation event")
+        _require(event["boot_id"] == self.boot_id, "event boot differs from writer")
+        key = _event_key(event)
+        if self._last_event_key is not None:
+            _require(key > self._last_event_key, "event order key did not advance")
+        self.append(encoded, event["recv_wall_ns"])
+        self._last_event_key = key
 
     def _open(self, hour: str) -> None:
         name = f"{hour}-{self.boot_id}.raw.gz"
@@ -157,3 +199,60 @@ def replay_records(root: Path) -> Iterator[bytes]:
                     yield record
         except OSError as error:
             raise ContractError("invalid gzip shard") from error
+
+
+def _reconciliation_events(root: Path) -> Iterator[dict[str, Any]]:
+    for raw in replay_records(root):
+        try:
+            event = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ContractError("invalid event JSON") from error
+        validate_envelope(event)
+        if event["payload_schema"] in RECONCILIATION_SCHEMAS:
+            yield event
+
+
+def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
+    """Replay canonical reconciliation events in an inclusive wall-time window."""
+    valid_window = type(start_ns) is int and start_ns >= 0
+    valid_window &= type(end_ns) is int and end_ns >= start_ns
+    _require(valid_window, "invalid replay window")
+    events: list[dict[str, Any]] = []
+    duplicate_digests = []
+    freeze_reasons = set()
+    seen_digests = set()
+    entry_digests: dict[str, str] = {}
+    previous_key: tuple[int, str, int] | None = None
+    for event in _reconciliation_events(root):
+        canonical = encode_event(event)
+        digest = hashlib.sha256(canonical).hexdigest()
+        if digest in seen_digests:
+            if start_ns <= event["recv_wall_ns"] <= end_ns:
+                duplicate_digests.append(digest)
+            continue
+        seen_digests.add(digest)
+        key = _event_key(event)
+        if previous_key is not None and key < previous_key:
+            raise ContractError("event order key moved backwards")
+        if key == previous_key:
+            freeze_reasons.add("replay:order_key_conflict")
+        previous_key = key
+        if not start_ns <= event["recv_wall_ns"] <= end_ns:
+            continue
+        if event["payload_schema"] == "account_ledger_entry":
+            entry_id = event["payload"]["entry_id"]
+            if entry_id in entry_digests and entry_digests[entry_id] != digest:
+                freeze_reasons.add(f"account_ledger_entry:entry_id_conflict:{entry_id}")
+            entry_digests.setdefault(entry_id, digest)
+        events.append(event)
+    input_hash = hashlib.sha256()
+    for event in events:
+        encoded = encode_event(event)
+        input_hash.update(len(encoded).to_bytes(LENGTH_BYTES, "big"))
+        input_hash.update(encoded)
+    return EventReplay(
+        tuple(events),
+        tuple(duplicate_digests),
+        tuple(sorted(freeze_reasons)),
+        input_hash.hexdigest(),
+    )
