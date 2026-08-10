@@ -17,7 +17,7 @@ EXACT_DEV_DEPENDENCIES = {
     "ruff==0.16.2",
     "vulture==2.16",
 }
-EXPECTED_PRE_COMMIT_CONFIG = """\
+EXPECTED_PRE_COMMIT_TEMPLATE = """\
 repos:
   - repo: local
     hooks:
@@ -35,7 +35,7 @@ repos:
         always_run: true
       - id: locked-ruff
         name: locked ruff
-        entry: uv run --locked ruff check data tests research
+        entry: uv run --locked ruff check {runtime} tests research
         language: unsupported
         pass_filenames: false
         always_run: true
@@ -65,6 +65,10 @@ def _runtime_packages() -> list[str]:
         for directory in RUNTIME_DIRS
         if (ROOT / directory).is_dir() and any((ROOT / directory).rglob("*.py"))
     )
+
+
+def _expected_pre_commit_config() -> str:
+    return EXPECTED_PRE_COMMIT_TEMPLATE.format(runtime=" ".join(_runtime_packages()))
 
 
 def sbom_components_are_complete(components: list[dict]) -> bool:
@@ -118,7 +122,7 @@ def test_lockfile_exists_and_is_current() -> None:
 def test_pre_commit_uses_only_the_three_locked_local_hooks() -> None:
     config = ROOT / ".pre-commit-config.yaml"
     assert config.is_file()
-    assert config.read_text() == EXPECTED_PRE_COMMIT_CONFIG
+    assert config.read_text() == _expected_pre_commit_config()
     _assert_success([sys.executable, "-m", "pre_commit", "validate-config", str(config)])
 
 
