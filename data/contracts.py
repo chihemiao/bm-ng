@@ -6,6 +6,22 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
+PAYLOAD_SCHEMAS = frozenset(
+    {
+        "bybit_sequence_gap",
+        "collector_config",
+        "liveness_failure",
+        "order_observation",
+        "order_request",
+        "pre_ack_frame",
+        "raw_frame",
+        "raw_quarantine",
+        "subscription_ack",
+        "subscription_send",
+        "venue_down",
+        "venue_recovered",
+    }
+)
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
 COMMON_FIELDS = (
     "schema_ver",
@@ -59,6 +75,7 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
     _require(event["event_kind"] in EVENT_KINDS, "invalid event_kind")
     for field in ("payload_schema", "venue", "conn_id", "boot_id", "source"):
         _require(_nonempty_text(event[field]), f"invalid {field}")
+    _require(event["payload_schema"] in PAYLOAD_SCHEMAS, "invalid payload_schema")
     for field in ("recv_wall_ns", "recv_mono_ns"):
         _require(_valid_ns(event[field]), f"invalid {field}")
     _require(isinstance(event["payload"], dict), "payload must be a mapping")
