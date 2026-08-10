@@ -3,12 +3,14 @@
 import hashlib
 import hmac
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 PAYLOAD_SCHEMAS = frozenset(
     {
         "bybit_sequence_gap",
+        "account_ledger_entry",
         "collector_config",
         "liveness_failure",
         "order_observation",
@@ -16,6 +18,8 @@ PAYLOAD_SCHEMAS = frozenset(
         "pre_ack_frame",
         "raw_frame",
         "raw_quarantine",
+        "reconciliation_decision",
+        "reconciliation_surface",
         "subscription_ack",
         "subscription_send",
         "venue_down",
@@ -23,6 +27,11 @@ PAYLOAD_SCHEMAS = frozenset(
     }
 )
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
+RECONCILIATION_SCHEMAS = frozenset(
+    {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
+)
+SURFACES = frozenset({"orders", "fills", "positions", "balances"})
+LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
 COMMON_FIELDS = (
     "schema_ver",
     "event_kind",
@@ -84,7 +93,108 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _validate_order_identity(event)
     if event["event_kind"] == "ops" and event["payload_schema"] == "raw_quarantine":
         _require(_nonempty_text(event["payload"].get("raw")), "raw quarantine requires raw frame")
+    if event["payload_schema"] in RECONCILIATION_SCHEMAS:
+        _validate_reconciliation(event)
     return event
+
+
+def _exact_fields(value: Any, fields: set[str], label: str) -> dict[str, Any]:
+    _require(isinstance(value, dict) and set(value) == fields, f"invalid {label} fields")
+    return value
+
+
+def _window(value: Any, nullable: bool = False) -> None:
+    if value is None and nullable:
+        return
+    window = _exact_fields(value, {"start_ns", "end_ns"}, "window")
+    _require(_valid_ns(window["start_ns"]) and _valid_ns(window["end_ns"]), "invalid window")
+    _require(window["start_ns"] <= window["end_ns"], "window moved backwards")
+
+
+def _canonical(value: Any) -> list[str]:
+    fields = {"scheme_id", "scheme_version", "fingerprints"}
+    canonical = _exact_fields(value, fields, "canonical set")
+    _require(_nonempty_text(canonical["scheme_id"]), "invalid scheme_id")
+    version = canonical["scheme_version"]
+    _require(type(version) is int and version > 0, "invalid scheme_version")
+    fingerprints = canonical["fingerprints"]
+    valid = isinstance(fingerprints, list) and all(_nonempty_text(item) for item in fingerprints)
+    _require(valid and len(fingerprints) == len(set(fingerprints)), "invalid fingerprints")
+    return fingerprints
+
+
+def _validate_reconciliation(event: dict[str, Any]) -> None:
+    _require(event["event_kind"] == "reconciliation", "invalid reconciliation event kind")
+    _require(event["schema_ver"] == 1, "unsupported reconciliation schema version")
+    _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
+    validators = {
+        "reconciliation_surface": _validate_surface,
+        "account_ledger_entry": _validate_ledger_entry,
+        "reconciliation_decision": _validate_decision,
+    }
+    validators[event["payload_schema"]](event)
+
+
+def _validate_surface(event: dict[str, Any]) -> None:
+    fields = {
+        "venue", "surface", "observed_ns", "fetched_count", "page_complete", "truncated",
+        "unknown_count", "mismatch_count", "entities", "identities", "query_window",
+    }
+    payload = _exact_fields(event["payload"], fields, "reconciliation surface")
+    _require(payload["venue"] == event["venue"], "surface venue differs from envelope")
+    _require(payload["surface"] in SURFACES, "invalid surface")
+    for field in ("observed_ns", "fetched_count", "unknown_count", "mismatch_count"):
+        _require(_valid_ns(payload[field]), f"invalid {field}")
+    _require(payload["observed_ns"] <= event["recv_wall_ns"], "surface observed in future")
+    _require(type(payload["page_complete"]) is bool, "invalid page_complete")
+    _require(type(payload["truncated"]) is bool, "invalid truncated")
+    entities = _canonical(payload["entities"])
+    identities = _canonical(payload["identities"])
+    _require(len(entities) == len(identities), "surface cardinality differs")
+    _require(payload["fetched_count"] == len(entities) + payload["unknown_count"], "fetched_count")
+    _window(payload["query_window"], nullable=True)
+
+
+def _validate_ledger_entry(event: dict[str, Any]) -> None:
+    fields = {
+        "venue", "entry_id", "entry_kind", "occurred_ns", "asset", "signed_amount_canonical",
+        "caused_by_order_id", "source_observed_ns",
+    }
+    payload = _exact_fields(event["payload"], fields, "account ledger entry")
+    _require(payload["venue"] == event["venue"], "ledger venue differs from envelope")
+    _require(_nonempty_text(payload["entry_id"]), "invalid entry_id")
+    _require(payload["entry_kind"] in LEDGER_KINDS, "invalid entry_kind")
+    _require(_valid_ns(payload["occurred_ns"]), "invalid occurred_ns")
+    _require(_valid_ns(payload["source_observed_ns"]), "invalid source_observed_ns")
+    _require(payload["occurred_ns"] <= payload["source_observed_ns"], "ledger time moved backwards")
+    _require(payload["source_observed_ns"] <= event["recv_wall_ns"], "ledger observed in future")
+    _require(_nonempty_text(payload["asset"]), "invalid asset")
+    amount = payload["signed_amount_canonical"]
+    try:
+        parsed = Decimal(amount) if isinstance(amount, str) else Decimal("NaN")
+    except InvalidOperation:
+        parsed = Decimal("NaN")
+    canonical = "0" if parsed.is_finite() and parsed == 0 else format(parsed.normalize(), "f")
+    _require(parsed.is_finite() and canonical == amount, "invalid canonical amount")
+    order_id = payload["caused_by_order_id"]
+    _require(order_id is None or _nonempty_text(order_id), "invalid caused_by_order_id")
+
+
+def _validate_decision(event: dict[str, Any]) -> None:
+    fields = set("action input_digest reasons schema_versions startup_started_ns window".split())
+    payload = _exact_fields(event["payload"], fields, "reconciliation decision")
+    _require(_valid_ns(payload["startup_started_ns"]), "invalid startup_started_ns")
+    _require(payload["action"] in {"ready", "cancel_only_freeze"}, "invalid action")
+    reasons = payload["reasons"]
+    valid_reasons = isinstance(reasons, list) and all(_nonempty_text(item) for item in reasons)
+    _require(valid_reasons and reasons == sorted(set(reasons)), "invalid reasons")
+    _require(_valid_digest(payload["input_digest"]), "invalid input_digest")
+    _window(payload["window"])
+    versions = payload["schema_versions"]
+    valid_versions = isinstance(versions, dict) and bool(versions)
+    valid_versions &= all(_nonempty_text(key) for key in versions)
+    valid_versions &= all(type(value) is int and value > 0 for value in versions.values())
+    _require(valid_versions, "invalid schema_versions")
 
 
 def _validate_order_identity(event: dict[str, Any]) -> None:
