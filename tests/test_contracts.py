@@ -15,7 +15,7 @@ from data.contracts import (
     validate_manifest,
 )
 
-FROZEN_PAYLOAD_SCHEMAS = frozenset(
+LEGACY_PAYLOAD_SCHEMAS = frozenset(
     {
         "bybit_sequence_gap",
         "collector_config",
@@ -31,6 +31,11 @@ FROZEN_PAYLOAD_SCHEMAS = frozenset(
         "venue_recovered",
     }
 )
+FROZEN_PAYLOAD_SCHEMAS = LEGACY_PAYLOAD_SCHEMAS | {
+    "account_ledger_entry",
+    "reconciliation_decision",
+    "reconciliation_surface",
+}
 ROOT = Path(__file__).parents[1]
 
 
@@ -105,6 +110,81 @@ def test_payload_schema_registry_is_frozen_complete_and_bounded() -> None:
     assert _emitted_payload_schemas() == emitted
     assert emitted <= PAYLOAD_SCHEMAS
     assert len(PAYLOAD_SCHEMAS) <= 20
+
+
+def test_legacy_schema_v1_envelopes_remain_replay_compatible() -> None:
+    for schema in LEGACY_PAYLOAD_SCHEMAS:
+        event = market_event()
+        event["payload_schema"] = schema
+        if schema in {"order_request", "order_observation"}:
+            event.update(
+                event_kind="order",
+                identity_status="known",
+                client_order_id="0xlegacy",
+                venue_order_id=None,
+            )
+        if schema == "raw_quarantine":
+            event.update(event_kind="ops", payload={"raw": "legacy"})
+        assert validate_envelope(event) is event
+
+
+def _reconciliation_event(schema: str, payload: dict) -> dict:
+    event = market_event()
+    event.update(
+        event_kind="reconciliation", payload_schema=schema, seq_within_boot=7, payload=payload
+    )
+    return event
+
+
+def test_versioned_reconciliation_payloads_are_structurally_validated() -> None:
+    canonical = {
+        "scheme_id": "balances.state",
+        "scheme_version": 1,
+        "fingerprints": ["sha256:a"],
+    }
+    surface = {
+        "venue": "hyperliquid", "surface": "balances", "observed_ns": 900,
+        "fetched_count": 1, "page_complete": True, "truncated": False,
+        "unknown_count": 0, "mismatch_count": 0, "entities": canonical,
+        "identities": {**canonical, "scheme_id": "balances.identity"},
+        "query_window": {"start_ns": 100, "end_ns": 900},
+    }
+    ledger = {
+        "venue": "hyperliquid", "entry_id": "funding-1", "entry_kind": "funding",
+        "occurred_ns": 800, "asset": "USDC", "signed_amount_canonical": "-0.125",
+        "caused_by_order_id": None, "source_observed_ns": 900,
+    }
+    decision = {
+        "startup_started_ns": 950, "action": "cancel_only_freeze",
+        "reasons": ["hyperliquid.balances:unknown_entry"], "input_digest": "a" * 64,
+        "window": {"start_ns": 100, "end_ns": 900},
+        "schema_versions": {"account_ledger_entry": 1},
+    }
+    for schema, payload in (
+        ("reconciliation_surface", surface),
+        ("account_ledger_entry", ledger),
+        ("reconciliation_decision", decision),
+    ):
+        assert validate_envelope(_reconciliation_event(schema, payload))["payload"] == payload
+    ledger["entry_kind"] = "fill"
+    with pytest.raises(ContractError, match="entry_kind"):
+        validate_envelope(_reconciliation_event("account_ledger_entry", ledger))
+    ledger.update(entry_kind="funding", signed_amount_canonical="1.00")
+    with pytest.raises(ContractError, match="canonical amount"):
+        validate_envelope(_reconciliation_event("account_ledger_entry", ledger))
+
+
+@pytest.mark.parametrize(
+    ("schema", "payload"),
+    [
+        ("account_ledger_entry", {"entry_id": "incomplete"}),
+        ("reconciliation_decision", {"action": "ready"}),
+        ("reconciliation_surface", {"surface": "balances"}),
+    ],
+)
+def test_incomplete_reconciliation_payloads_are_rejected(schema: str, payload: dict) -> None:
+    with pytest.raises(ContractError):
+        validate_envelope(_reconciliation_event(schema, payload))
 
 
 def test_unknown_payload_schema_is_rejected() -> None:
