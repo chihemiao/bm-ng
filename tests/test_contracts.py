@@ -1,11 +1,12 @@
 from copy import deepcopy
 
 import pytest
+
+from data import contracts
 from data.contracts import (
     ContractError,
     bybit_update_gap,
     checksum_matches,
-    hl_interval_gap,
     monotonic_elapsed_ns,
     validate_envelope,
     validate_manifest,
@@ -84,9 +85,24 @@ def test_bybit_delta_update_id_detects_discontinuity_but_snapshot_resets() -> No
     assert not bybit_update_gap(previous_u=40, current_u=1, message_type="snapshot")
 
 
-def test_hyperliquid_gap_uses_frozen_arrival_threshold() -> None:
-    assert not hl_interval_gap(previous_ns=100, current_ns=199, max_interval_ns=100)
-    assert hl_interval_gap(previous_ns=100, current_ns=201, max_interval_ns=100)
+def test_hyperliquid_arrival_interval_is_a_structured_soft_alert() -> None:
+    if hasattr(contracts, "hl_arrival_interval_alert"):
+        alert = contracts.hl_arrival_interval_alert(
+            stream="l2Book:BTC",
+            previous_ns=100,
+            current_ns=201,
+            soft_threshold_ns=100,
+        )
+    else:
+        alert = contracts.hl_interval_gap(previous_ns=100, current_ns=201, max_interval_ns=100)
+
+    assert type(alert) is not bool
+    assert alert.stream == "l2Book:BTC"
+    assert alert.observed_ns == 101
+    assert alert.soft_threshold_ns == 100
+    assert alert.exceeded is True
+    assert alert.severity == "soft"
+    assert not hasattr(contracts, "hl_interval_gap")
 
 
 def test_monotonic_elapsed_time_never_crosses_boots() -> None:
