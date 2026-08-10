@@ -2,6 +2,7 @@
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Literal
 
 VENUES = frozenset({"hyperliquid", "bybit"})
 SURFACES = ("orders", "fills", "positions", "balances")
@@ -60,6 +61,12 @@ class ValidatedStartup:
     now_ns: int
     venues: tuple[tuple[str, VenueEvidence], ...]
     expectations: tuple[tuple[str, VenueExpectation], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AdmissionDecision:
+    action: Literal["ready", "cancel_only_freeze"]
+    reasons: tuple[str, ...]
 
 
 def _require(condition: bool, message: str) -> None:
@@ -169,3 +176,47 @@ def validate_startup_structure(
         venues=tuple((name, venues[name]) for name in sorted(VENUES)),
         expectations=tuple((name, expectations[name]) for name in sorted(VENUES)),
     )
+
+
+def _surface_reasons(
+    venue: str, name: str, surface: SurfaceEvidence, startup_started_ns: int
+) -> list[str]:
+    reasons = []
+    if surface.observed_ns <= startup_started_ns:
+        reasons.append(f"{venue}.{name}:stale")
+    if not surface.page_complete:
+        reasons.append(f"{venue}.{name}:pagination_incomplete")
+    if surface.truncated:
+        reasons.append(f"{venue}.{name}:truncated")
+    if surface.unknown_count:
+        reasons.append(f"{venue}.{name}:unknown_entities")
+    if surface.mismatch_count:
+        reasons.append(f"{venue}.{name}:mismatch")
+    return reasons
+
+
+def decide_startup_admission(
+    *,
+    startup_started_ns: int,
+    now_ns: int,
+    venues: Mapping[str, VenueEvidence],
+    expectations: Mapping[str, VenueExpectation],
+) -> AdmissionDecision:
+    """Admit only complete, fresh, fully known four-surface evidence."""
+    validated = validate_startup_structure(
+        startup_started_ns=startup_started_ns,
+        now_ns=now_ns,
+        venues=venues,
+        expectations=expectations,
+    )
+    reasons = [
+        reason
+        for venue, evidence in validated.venues
+        for name in SURFACES
+        for reason in _surface_reasons(
+            venue, name, getattr(evidence, name), validated.startup_started_ns
+        )
+    ]
+    ordered = tuple(sorted(reasons))
+    action = "cancel_only_freeze" if ordered else "ready"
+    return AdmissionDecision(action=action, reasons=ordered)
