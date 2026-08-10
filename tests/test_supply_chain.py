@@ -147,6 +147,19 @@ def test_ci_workflow_enforces_only_the_locked_gate_semantics() -> None:
     assert "${{ github.event.pull_request.head.sha || github.sha }}" in workflow
     assert 'git fetch --depth=1 origin "$TARGET_SHA"' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$TARGET_SHA"' in workflow
+    assert workflow.count("Enforce the pull request net line budget") == 1
+    assert "EVENT_NAME: ${{ github.event_name }}" in workflow
+    assert "BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}" in workflow
+    assert "BASE_SHA: ${{ github.event.pull_request.base.sha }}" in workflow
+    assert 'if [ "$EVENT_NAME" != "pull_request" ]; then' in workflow
+    assert 'git fetch --unshallow origin "$HEAD_SHA"' in workflow
+    assert '"https://github.com/${BASE_REPOSITORY}.git" "$BASE_SHA"' in workflow
+    assert 'git diff --numstat "$BASE_SHA...$HEAD_SHA"' in workflow
+    assert '$1 == "-" || $2 == "-" { bad = 1; next }' in workflow
+    assert 'test "$NET_LINES" -le 200' in workflow
+
+    goal = (ROOT / "GOAL.md").read_text()
+    assert "**豁免规则**" not in goal
 
     uv_version = _config()["tool"]["uv"]["required-version"].removeprefix("==")
     assert f'UV_VERSION: "{uv_version}"' in workflow
