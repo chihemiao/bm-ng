@@ -126,6 +126,7 @@ async def _quarantine_scenario() -> None:
     stop = asyncio.Event()
 
     async def handler(websocket):
+        await asyncio.sleep(0.15)
         for _ in HL_STREAMS:
             stream = json.loads(await websocket.recv())["stream"]
             await websocket.send(json.dumps({"type": "ack", "stream": stream}))
@@ -139,15 +140,16 @@ async def _quarantine_scenario() -> None:
             stop.set()
 
     async with serve(handler, "127.0.0.1", 0, ping_interval=None) as server:
-        session = _session(_uri(server), on_record)
-        await asyncio.wait_for(session.run(stop), 2)
+        session = _session(_uri(server), on_record, ack_timeout=0.3)
+        report = await asyncio.wait_for(session.run(stop), 2)
 
     quarantined = [record for record in records if record.payload_schema == "raw_quarantine"]
+    assert report.liveness_failures == 0
     assert len(quarantined) == 1
     assert quarantined[0].raw == b"\xff\x00"
 
 
-def test_unparseable_real_frame_is_quarantined_with_original_bytes() -> None:
+def test_delayed_ack_and_unparseable_frame_preserve_liveness_and_bytes() -> None:
     asyncio.run(_quarantine_scenario())
 
 
