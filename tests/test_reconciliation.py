@@ -105,6 +105,13 @@ def _changed_expected(
     return replace(expectation, **{surface: updated})
 
 
+def _decision_with_expected(surface: str, **changes) -> AdmissionDecision:
+    expectations = _expectations()
+    current = expectations["hyperliquid"]
+    expectations["hyperliquid"] = _changed_expected(current, surface, **changes)
+    return _decision(expectations=expectations)
+
+
 def test_valid_surface_evidence_is_returned_unchanged() -> None:
     evidence = _surface()
 
@@ -345,3 +352,35 @@ def test_every_local_fill_identity_must_exist_at_the_venue() -> None:
     assert "hyperliquid.fills:missing_local_fill" in _decision(
         expectations=expectations
     ).reasons
+
+
+def test_matching_fill_identity_with_different_state_freezes() -> None:
+    expected = _expectation().fills
+    entities = replace(expected.entities, fingerprints=frozenset({"different-fill"}))
+
+    reasons = _decision_with_expected("fills", entities=entities).reasons
+
+    assert "hyperliquid.fills:fill_state_mismatch" in reasons
+    assert "hyperliquid.fills:missing_local_fill" not in reasons
+
+
+def test_balance_identity_mismatch_is_unknown() -> None:
+    expected = _expectation().balances
+    empty_entities = replace(expected.entities, fingerprints=frozenset())
+    empty_identities = replace(expected.identities, fingerprints=frozenset())
+
+    reasons = _decision_with_expected(
+        "balances", entities=empty_entities, identities=empty_identities
+    ).reasons
+
+    assert "hyperliquid.balances:balance_identity_mismatch" in reasons
+
+
+def test_matching_balance_identity_with_different_amount_freezes() -> None:
+    expected = _expectation().balances
+    entities = replace(expected.entities, fingerprints=frozenset({"different-amount"}))
+
+    reasons = _decision_with_expected("balances", entities=entities).reasons
+
+    assert "hyperliquid.balances:balance_state_mismatch" in reasons
+    assert "hyperliquid.balances:balance_identity_mismatch" not in reasons

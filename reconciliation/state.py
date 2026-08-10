@@ -240,6 +240,12 @@ def _state_reasons(
                 reasons.append(f"{venue}.{name}:state_mismatch")
         if not expected.fills.identities.fingerprints <= actual.fills.identities.fingerprints:
             reasons.append(f"{venue}.fills:missing_local_fill")
+        elif not expected.fills.entities.fingerprints <= actual.fills.entities.fingerprints:
+            reasons.append(f"{venue}.fills:fill_state_mismatch")
+        if actual.balances.identities.fingerprints != expected.balances.identities.fingerprints:
+            reasons.append(f"{venue}.balances:balance_identity_mismatch")
+        elif actual.balances.entities.fingerprints != expected.balances.entities.fingerprints:
+            reasons.append(f"{venue}.balances:balance_state_mismatch")
     return reasons
 
 
