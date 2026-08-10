@@ -37,17 +37,10 @@ def _holder(root: Path, identity: WriterIdentity) -> subprocess.Popen[str]:
     return process
 
 
-def _release(process: subprocess.Popen[str]) -> None:
-    process.stdin.write("\n")
-    process.stdin.flush()
-    assert process.wait(timeout=5) == 0, process.stderr.read()
-
-
 def test_acquire_uses_account_derived_private_regular_file(tmp_path: Path) -> None:
     assert AUTHORITY_MODES == frozenset({"pending_reconciliation", "cancel_only"})
     lease = WriterLease.acquire(tmp_path, _identity())
-    assert lease.authority.mode == "pending_reconciliation"
-    assert lease.authority.lease_epoch == 1
+    assert (lease.authority.mode, lease.authority.lease_epoch) == ("pending_reconciliation", 1)
     assert lease.path == WriterLease.path_for(tmp_path, _identity().account_id)
     assert "test-account" not in lease.path.name
     mode = lease.path.stat().st_mode
@@ -66,7 +59,8 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
     with pytest.raises(WriterLeaseError, match="shared writer identity"):
         WriterLease.acquire(tmp_path, _identity("one", "b" * 64))
     observer.release()
-    _release(owner)
+    owner.communicate("\n", timeout=5)
+    assert owner.returncode == 0, owner.stderr.read()
 
     lease = WriterLease.acquire(tmp_path, _identity("three", "c" * 64))
     assert lease.authority.lease_epoch == 2
@@ -82,9 +76,8 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
 
 def test_symlink_and_replaced_inode_fail_closed(tmp_path: Path) -> None:
     path = WriterLease.path_for(tmp_path, _identity().account_id)
-    target = tmp_path / "target"
-    target.write_text("not a lock")
-    path.symlink_to(target)
+    (tmp_path / "target").write_text("not a lock")
+    path.symlink_to(tmp_path / "target")
     with pytest.raises(WriterLeaseError, match="lock file"):
         WriterLease.acquire(tmp_path, _identity())
 
