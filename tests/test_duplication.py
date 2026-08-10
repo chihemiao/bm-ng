@@ -87,7 +87,11 @@ def _runtime_sources(root: Path) -> dict[str, str]:
 
 
 def duplication_violations(root: Path) -> set[str]:
-    return {"duplication"} if duplication_ratio(_runtime_sources(root)) > MAX_DUPLICATION_RATIO else set()
+    return (
+        {"duplication"}
+        if duplication_ratio(_runtime_sources(root)) > MAX_DUPLICATION_RATIO
+        else set()
+    )
 
 
 def _source(lines: list[str]) -> str:
