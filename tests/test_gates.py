@@ -212,6 +212,13 @@ def test_tool_uv_dependencies_count_toward_the_budget(tmp_path: Path) -> None:
     assert repository_violations(tmp_path) == {"dependencies"}
 
 
+def test_build_system_requirements_count_toward_the_budget(tmp_path: Path) -> None:
+    requirements = ", ".join(f'"pkg{index:02}"' for index in range(26))
+    config = VALID_CONFIG + f"\n[build-system]\nrequires = [{requirements}]\n"
+    _write(tmp_path, "pyproject.toml", config)
+    assert repository_violations(tmp_path) == {"dependencies"}
+
+
 def test_version_marker_in_a_directory_name_is_rejected(tmp_path: Path) -> None:
     root = _configured(tmp_path)
     _write(root, "data/legacy_v2/module.py", "value = 1\n")
