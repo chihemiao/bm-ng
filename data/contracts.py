@@ -2,7 +2,8 @@
 
 import hashlib
 import hmac
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
@@ -22,6 +23,17 @@ COMMON_FIELDS = (
 
 class ContractError(ValueError):
     """Raised when evidence cannot satisfy a frozen contract."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArrivalIntervalAlert:
+    """Descriptive market-arrival interval that cannot act as a hard gap verdict."""
+
+    stream: str
+    observed_ns: int
+    soft_threshold_ns: int
+    exceeded: bool
+    severity: Literal["soft"] = "soft"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -78,13 +90,28 @@ def bybit_update_gap(previous_u: int | None, current_u: int, message_type: str) 
     return current_u != previous_u + 1
 
 
-def hl_interval_gap(previous_ns: int, current_ns: int, max_interval_ns: int) -> bool:
-    """Apply the pilot-frozen arrival threshold to a Hyperliquid stream."""
+def hl_arrival_interval_alert(
+    stream: str,
+    previous_ns: int,
+    current_ns: int,
+    soft_threshold_ns: int,
+) -> ArrivalIntervalAlert:
+    """Describe a Hyperliquid arrival interval without issuing a hard gap verdict."""
+    _require(_nonempty_text(stream), "invalid stream")
     _require(_valid_ns(previous_ns), "invalid previous_ns")
     _require(_valid_ns(current_ns), "invalid current_ns")
-    _require(type(max_interval_ns) is int and max_interval_ns > 0, "invalid max_interval_ns")
+    _require(
+        type(soft_threshold_ns) is int and soft_threshold_ns > 0,
+        "invalid soft_threshold_ns",
+    )
     _require(current_ns >= previous_ns, "arrival time moved backwards")
-    return current_ns - previous_ns > max_interval_ns
+    observed_ns = current_ns - previous_ns
+    return ArrivalIntervalAlert(
+        stream=stream,
+        observed_ns=observed_ns,
+        soft_threshold_ns=soft_threshold_ns,
+        exceeded=observed_ns > soft_threshold_ns,
+    )
 
 
 def monotonic_elapsed_ns(previous: dict[str, Any], current: dict[str, Any]) -> int:
