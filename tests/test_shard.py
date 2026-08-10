@@ -51,6 +51,22 @@ def _ledger_event(sequence: int, *, entry_id: str | None = None) -> dict:
     }
 
 
+def _writer_decision(sequence: int) -> dict:
+    event = _ledger_event(sequence)
+    event.update(
+        event_kind="decision",
+        payload_schema="writer_lease_decision",
+        payload={
+            "action": "acquire", "outcome": "pending_reconciliation",
+            "reason": "lease_acquired", "account_digest": "a" * 64,
+            "instance_id": "writer-one", "wallet_fingerprint": "b" * 64,
+            "boot_id": "identity-boot", "lease_epoch": 1,
+            "lock_path_digest": "c" * 64, "prior_epoch_valid": False,
+        },
+    )
+    return event
+
+
 def test_hour_rotation_sidecars_append_only_manifest_and_replay(tmp_path: Path) -> None:
     records = [b'{"n":1}', b'{"n":2}']
     writer = ShardWriter(tmp_path, boot_id="boot-a")
@@ -132,6 +148,17 @@ def test_canonical_event_append_and_exact_window_replay(tmp_path: Path) -> None:
     assert replay.input_digest == shard_module.replay_event_window(
         tmp_path, start_ns=events[1]["recv_wall_ns"], end_ns=events[2]["recv_wall_ns"]
     ).input_digest
+
+
+def test_writer_decision_uses_the_same_durable_window_replay(tmp_path: Path) -> None:
+    event = _writer_decision(1)
+    writer = ShardWriter(tmp_path, boot_id="boot-a")
+    writer.append_event(event)
+    writer.close()
+
+    replay = shard_module.replay_event_window(tmp_path, _ns(4), _ns(5))
+    assert replay.events == (event,)
+    assert replay.freeze_reasons == ()
 
 
 def test_replay_deduplicates_exact_events_and_freezes_conflicts(tmp_path: Path) -> None:
