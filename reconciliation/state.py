@@ -195,12 +195,61 @@ def _surface_reasons(
     return reasons
 
 
+def _decision(reasons: list[str]) -> AdmissionDecision:
+    ordered = tuple(sorted(reasons))
+    action = "cancel_only_freeze" if ordered else "ready"
+    return AdmissionDecision(action=action, reasons=ordered)
+
+
+def _validate_previous_freeze(value: AdmissionDecision | None) -> None:
+    if value is None:
+        return
+    _require(isinstance(value, AdmissionDecision), "invalid previous freeze")
+    _require(value.action == "cancel_only_freeze", "previous decision is not a freeze")
+    _require(isinstance(value.reasons, tuple), "invalid previous freeze reasons")
+    _require(all(isinstance(reason, str) and reason for reason in value.reasons), "invalid reason")
+
+
+def _expectation_gate_reasons(
+    expectations: dict[str, VenueExpectation],
+) -> tuple[list[str], list[str]]:
+    frozen = []
+    ledger = []
+    for venue in sorted(VENUES):
+        expectation = expectations[venue]
+        if expectation.frozen_intents:
+            frozen.append(f"{venue}:frozen_intent")
+        if not expectation.balance_ledger_available:
+            ledger.append(f"{venue}.balances:ledger_unimplemented")
+    return frozen, ledger
+
+
+def _state_reasons(
+    venues: dict[str, VenueEvidence], expectations: dict[str, VenueExpectation]
+) -> list[str]:
+    reasons = []
+    for venue in sorted(VENUES):
+        actual = venues[venue]
+        expected = expectations[venue]
+        for name in ("orders", "positions"):
+            venue_surface = getattr(actual, name)
+            local_surface = getattr(expected, name)
+            if venue_surface.identities.fingerprints != local_surface.identities.fingerprints:
+                reasons.append(f"{venue}.{name}:identity_mismatch")
+            elif venue_surface.entities.fingerprints != local_surface.entities.fingerprints:
+                reasons.append(f"{venue}.{name}:state_mismatch")
+        if not expected.fills.identities.fingerprints <= actual.fills.identities.fingerprints:
+            reasons.append(f"{venue}.fills:missing_local_fill")
+    return reasons
+
+
 def decide_startup_admission(
     *,
     startup_started_ns: int,
     now_ns: int,
     venues: Mapping[str, VenueEvidence],
     expectations: Mapping[str, VenueExpectation],
+    previous_freeze: AdmissionDecision | None = None,
 ) -> AdmissionDecision:
     """Admit only complete, fresh, fully known four-surface evidence."""
     validated = validate_startup_structure(
@@ -209,7 +258,15 @@ def decide_startup_admission(
         venues=venues,
         expectations=expectations,
     )
-    reasons = [
+    validated_venues = dict(validated.venues)
+    validated_expectations = dict(validated.expectations)
+    _validate_previous_freeze(previous_freeze)
+    if previous_freeze is not None:
+        return _decision(["startup:previous_freeze"])
+    frozen, ledger = _expectation_gate_reasons(validated_expectations)
+    if frozen:
+        return _decision(frozen)
+    evidence_reasons = [
         reason
         for venue, evidence in validated.venues
         for name in SURFACES
@@ -217,6 +274,8 @@ def decide_startup_admission(
             venue, name, getattr(evidence, name), validated.startup_started_ns
         )
     ]
-    ordered = tuple(sorted(reasons))
-    action = "cancel_only_freeze" if ordered else "ready"
-    return AdmissionDecision(action=action, reasons=ordered)
+    if evidence_reasons:
+        return _decision(evidence_reasons)
+    if ledger:
+        return _decision(ledger)
+    return _decision(_state_reasons(validated_venues, validated_expectations))

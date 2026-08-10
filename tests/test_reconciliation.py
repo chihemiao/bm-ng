@@ -98,6 +98,13 @@ def _changed_venue(surface: str, **changes) -> VenueEvidence:
     return replace(venue, **{surface: current})
 
 
+def _changed_expected(
+    expectation: VenueExpectation, surface: str, **changes
+) -> VenueExpectation:
+    updated = replace(getattr(expectation, surface), **changes)
+    return replace(expectation, **{surface: updated})
+
+
 def test_valid_surface_evidence_is_returned_unchanged() -> None:
     evidence = _surface()
 
@@ -269,3 +276,72 @@ def test_reasons_are_sorted_and_deterministic() -> None:
     decision = _decision(venues=venues)
 
     assert decision.reasons == tuple(sorted(decision.reasons))
+
+
+def test_previous_freeze_is_absorbing() -> None:
+    previous = AdmissionDecision("cancel_only_freeze", ("earlier",))
+
+    assert _decision(previous_freeze=previous).reasons == ("startup:previous_freeze",)
+
+
+def test_replayed_frozen_intent_blocks_startup() -> None:
+    expectations = _expectations()
+    expectations["hyperliquid"] = _expectation(frozen_intents=frozenset({"0xfrozen"}))
+
+    assert "hyperliquid:frozen_intent" in _decision(expectations=expectations).reasons
+
+
+def test_missing_balance_ledger_capability_blocks_startup() -> None:
+    expectations = _expectations()
+    expectations["hyperliquid"] = _expectation(balance_ledger_available=False)
+
+    reason = "hyperliquid.balances:ledger_unimplemented"
+    assert reason in _decision(expectations=expectations).reasons
+
+
+@pytest.mark.parametrize("surface", ["orders", "positions"])
+def test_order_and_position_identity_mismatch_is_unknown(surface: str) -> None:
+    expected = _expectation()
+    empty = frozenset()
+    changed = _changed_expected(
+        expected,
+        surface,
+        entities=replace(getattr(expected, surface).entities, fingerprints=empty),
+        identities=replace(getattr(expected, surface).identities, fingerprints=empty),
+    )
+    expectations = {"hyperliquid": changed, "bybit": _expectation()}
+
+    assert f"hyperliquid.{surface}:identity_mismatch" in _decision(
+        expectations=expectations
+    ).reasons
+
+
+@pytest.mark.parametrize("surface", ["orders", "positions"])
+def test_matching_identity_with_different_state_is_distinct(surface: str) -> None:
+    expected = _expectation()
+    current = getattr(expected, surface)
+    changed = _changed_expected(
+        expected,
+        surface,
+        entities=replace(current.entities, fingerprints=frozenset({"different-state"})),
+    )
+    expectations = {"hyperliquid": changed, "bybit": _expectation()}
+    decision = _decision(expectations=expectations)
+
+    assert f"hyperliquid.{surface}:state_mismatch" in decision.reasons
+    assert f"hyperliquid.{surface}:identity_mismatch" not in decision.reasons
+
+
+def test_every_local_fill_identity_must_exist_at_the_venue() -> None:
+    expected = _expectation()
+    changed = _changed_expected(
+        expected,
+        "fills",
+        entities=replace(expected.fills.entities, fingerprints=frozenset({"missing-fill"})),
+        identities=replace(expected.fills.identities, fingerprints=frozenset({"missing-id"})),
+    )
+    expectations = {"hyperliquid": changed, "bybit": _expectation()}
+
+    assert "hyperliquid.fills:missing_local_fill" in _decision(
+        expectations=expectations
+    ).reasons
