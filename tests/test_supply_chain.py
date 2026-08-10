@@ -16,6 +16,29 @@ EXACT_DEV_DEPENDENCIES = {
     "ruff==0.16.2",
     "vulture==2.16",
 }
+EXPECTED_PRE_COMMIT_CONFIG = """\
+repos:
+  - repo: local
+    hooks:
+      - id: uv-lock-check
+        name: uv lock --check
+        entry: uv lock --check
+        language: unsupported
+        pass_filenames: false
+        always_run: true
+      - id: locked-pytest
+        name: locked pytest
+        entry: uv run --locked python -B -m pytest -q
+        language: unsupported
+        pass_filenames: false
+        always_run: true
+      - id: locked-ruff
+        name: locked ruff
+        entry: uv run --locked ruff check data tests research
+        language: unsupported
+        pass_filenames: false
+        always_run: true
+"""
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -80,6 +103,13 @@ def test_build_and_import_roots_match_the_current_runtime_packages() -> None:
 def test_lockfile_exists_and_is_current() -> None:
     assert (ROOT / "uv.lock").is_file()
     _assert_success(["uv", "lock", "--check"])
+
+
+def test_pre_commit_uses_only_the_three_locked_local_hooks() -> None:
+    config = ROOT / ".pre-commit-config.yaml"
+    assert config.is_file()
+    assert config.read_text() == EXPECTED_PRE_COMMIT_CONFIG
+    _assert_success([sys.executable, "-m", "pre_commit", "validate-config", str(config)])
 
 
 def test_dead_code_and_import_contract_tools_pass() -> None:
