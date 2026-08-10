@@ -60,6 +60,7 @@ def _dependency_count(config: dict) -> int:
     project = config.get("project", {})
     groups = config.get("dependency-groups", {})
     dependencies = list(project.get("dependencies", []))
+    dependencies.extend(config.get("build-system", {}).get("requires", []))
     for values in project.get("optional-dependencies", {}).values():
         dependencies.extend(values)
     for values in groups.values():
