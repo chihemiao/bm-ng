@@ -90,8 +90,6 @@ _v[0-9]|_new|_fixed|_final|_copy|_old|_backup|_retry[0-9]|_attempt[0-9]
 
 **棘轮规则**：行数、文件数、依赖数三项的阈值只能下调，不能上调。CI 记录历史最低值，超过历史最低值即 fail。
 
-**豁免规则**：单 PR 净增行数每月最多豁免 1 次，豁免次数由 CI 计数器强制，用尽即 fail。其余所有检查**无豁免**。
-
 **分支保护禁止 admin bypass。** 门禁必须是 required check。
 
 **架构边界**（`import-linter` contract，CI 强制）：
