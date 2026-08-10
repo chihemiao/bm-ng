@@ -1,11 +1,12 @@
+import ast
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 ROOT = Path(__file__).parents[1]
-
-if TYPE_CHECKING:
-
-    def structural_violations(root: Path) -> set[str]: ...
+RUNTIME_DIRS = frozenset({"data", "execution", "strategy", "risk", "reconciliation", "ops"})
+IO_MODULES = frozenset(
+    {"aiohttp", "asyncio", "httpx", "os", "pathlib", "requests", "socket", "subprocess", "urllib"}
+)
+EXCHANGE_SDKS = frozenset({"bybit", "ccxt", "hyperliquid", "hyperliquid_sdk", "pybit"})
 
 
 def _write(root: Path, relative: str, content: str) -> None:
@@ -17,6 +18,126 @@ def _write(root: Path, relative: str, content: str) -> None:
 def _registry(names: list[str]) -> str:
     members = ", ".join(repr(name) for name in names)
     return f"PAYLOAD_SCHEMAS = frozenset({{{members}}})\n"
+
+
+def _python_files(root: Path) -> list[Path]:
+    scopes = RUNTIME_DIRS | {"tests", "research"}
+    return [
+        path
+        for scope in scopes
+        if (root / scope).is_dir()
+        for path in (root / scope).rglob("*.py")
+        if "__pycache__" not in path.parts
+    ]
+
+
+def _imports(tree: ast.AST) -> set[str]:
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module:
+                names.add(module)
+            names.update(f"{module}.{alias.name}".strip(".") for alias in node.names)
+    return names
+
+
+def _import_violations(relative: Path, names: set[str]) -> set[str]:
+    violations = set()
+    package = relative.parts[0]
+    roots = {name.split(".")[0] for name in names}
+    if roots & {"tests", "research"}:
+        violations.add("runtime-test-import")
+    if package == "ops" and any(name.startswith("execution.orders") for name in names):
+        violations.add("ops-order-import")
+    if package == "strategy" and roots & EXCHANGE_SDKS:
+        violations.add("strategy-sdk-import")
+    if relative == Path("data/contracts.py") and roots & IO_MODULES:
+        violations.add("contracts-io")
+    if relative == Path("data/session.py") and any(name.startswith("data.shard") for name in names):
+        violations.add("session-shard-import")
+    return violations
+
+
+def _mentions_source(node: ast.AST) -> bool:
+    return any(
+        (isinstance(part, ast.Name) and part.id == "source")
+        or (isinstance(part, ast.Attribute) and part.attr == "source")
+        or (isinstance(part, ast.Constant) and part.value == "source")
+        for part in ast.walk(node)
+    )
+
+
+def _control_subjects(tree: ast.AST) -> list[ast.AST]:
+    subjects = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.If, ast.IfExp, ast.While)):
+            subjects.append(node.test)
+        elif isinstance(node, ast.Match):
+            subjects.append(node.subject)
+        elif isinstance(node, ast.comprehension):
+            subjects.extend(node.ifs)
+    return subjects
+
+
+def _tree_violations(tree: ast.AST) -> set[str]:
+    violations = set()
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    if any(
+        node.end_lineno - node.lineno + 1 > 60
+        for node in ast.walk(tree)
+        if isinstance(node, functions)
+    ):
+        violations.add("function-lines")
+    if any(_mentions_source(subject) for subject in _control_subjects(tree)):
+        violations.add("source-branch")
+    return violations
+
+
+def _payload_schemas(tree: ast.Module) -> frozenset[str] | None:
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        is_registry = any(
+            isinstance(target, ast.Name) and target.id == "PAYLOAD_SCHEMAS"
+            for target in targets
+        )
+        if not is_registry:
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+            return None
+        if value.func.id != "frozenset" or len(value.args) != 1:
+            return None
+        members = value.args[0]
+        if not isinstance(members, (ast.Set, ast.List, ast.Tuple)):
+            return None
+        values = [item.value for item in members.elts if isinstance(item, ast.Constant)]
+        all_strings = all(isinstance(item, str) for item in values)
+        if len(values) != len(members.elts) or not values or not all_strings:
+            return None
+        return frozenset(values)
+    return None
+
+
+def structural_violations(root: Path) -> set[str]:
+    violations = set()
+    contracts_tree = None
+    for path in _python_files(root):
+        tree = ast.parse(path.read_text())
+        relative = path.relative_to(root)
+        if relative == Path("data/contracts.py"):
+            contracts_tree = tree
+        if relative.parts[0] in RUNTIME_DIRS:
+            violations |= _import_violations(relative, _imports(tree))
+        violations |= _tree_violations(tree)
+    schemas = _payload_schemas(contracts_tree) if contracts_tree else None
+    if schemas is None:
+        violations.add("payload-schema-registry")
+    elif len(schemas) > 20:
+        violations.add("event-types")
+    return violations
 
 
 def test_current_repository_passes_structural_gates() -> None:
