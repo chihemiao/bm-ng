@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,9 @@ repos:
         pass_filenames: false
         always_run: true
 """
+UV_RELEASE_SHA256 = {
+    "0.9.21": "0a1ab27383c28ef1c041f85cbbc609d8e3752dfb4b238d2ad97b208a52232baf",
+}
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -110,6 +114,40 @@ def test_pre_commit_uses_only_the_three_locked_local_hooks() -> None:
     assert config.is_file()
     assert config.read_text() == EXPECTED_PRE_COMMIT_CONFIG
     _assert_success([sys.executable, "-m", "pre_commit", "validate-config", str(config)])
+
+
+def test_ci_workflow_enforces_only_the_locked_gate_semantics() -> None:
+    workflows = sorted((ROOT / ".github" / "workflows").glob("*.y*ml"))
+    assert [path.name for path in workflows] == ["gates.yml"]
+    workflow = workflows[0].read_text()
+
+    assert re.search(
+        r"(?m)^on:\n  pull_request:\n  push:\n    branches: \[main\]$", workflow
+    )
+    assert workflow.count("permissions:") == 1
+    assert "permissions:\n  contents: read\n" in workflow
+    jobs = workflow.partition("\njobs:\n")[2]
+    assert re.findall(r"(?m)^  ([a-z][a-z0-9_-]*):$", jobs) == ["gates"]
+    assert "\n    name: gates\n" in workflow
+    assert "\n    runs-on: ubuntu-24.04\n" in workflow
+    timeout = re.findall(r"(?m)^    timeout-minutes: (\d+)$", workflow)
+    assert len(timeout) == 1 and int(timeout[0]) <= 20
+
+    forbidden_keys = (
+        "uses:", "continue-on-error:", "if:", "paths:", "paths-ignore:", "concurrency:"
+    )
+    for forbidden in forbidden_keys:
+        assert forbidden not in workflow
+    assert "${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert 'git fetch --depth=1 origin "$TARGET_SHA"' in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$TARGET_SHA"' in workflow
+
+    uv_version = _config()["tool"]["uv"]["required-version"].removeprefix("==")
+    assert f'UV_VERSION: "{uv_version}"' in workflow
+    assert f'UV_SHA256: "{UV_RELEASE_SHA256[uv_version]}"' in workflow
+    assert "uv python install 3.14.2" in workflow
+    assert "uv sync --locked --python 3.14.2" in workflow
+    assert "uv run --locked pre-commit run --all-files" in workflow
 
 
 def test_dead_code_and_import_contract_tools_pass() -> None:
