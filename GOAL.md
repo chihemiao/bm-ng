@@ -115,13 +115,13 @@ SEALED 证据：`gate0_funding.ipynb` SHA-256 `88cb74296a62776c5f52ab4cfb5997052
 - 原始帧到达即打 wall/monotonic 时间并原样落盘，归一化只在重放时做。行情记录 exchange/recv 时间；连接订阅记录 send/ack；订单请求记录 send/ack/terminal；不存在的时间必须为空，不得复制伪造。
 - 记录重连、丢包、乱序、schema 变化、时钟漂移。
 - append-only 压缩文件 + 每文件 checksum + manifest。
-- 缺口检测按场所：Bybit 使用 venue sequence；HL 无 sequence，只能用连接闭合与 pilot 冻结的最大到达间隔，证据强度较弱且必须披露。
+- 缺口检测按场所：Bybit `orderbook.50` 用 `u` 连续性（snapshot 重置），所有连接用 ping/pong；HL 无 sequence，只有 ping/pong、订阅 ACK（重连后须重确认全部 14 条流）与文件完整性，不能证明单流仍在投递，证据弱且须披露。行情到达间隔只作 `(venue,channel,symbol)` 软告警，不参与“无未解释缺口”判定。
 - explained gap 单次 ≤4h、窗口累计 ≤2%、可用于延迟统计的小时覆盖率 ≥95%；unexplained gap 从恢复后的首个验证连续点重置计数，旧数据保留。
 - HL 官方 S3 requester-pays 仅作可选离线基线，不是在线补缺或连续性权威，不创建 AWS profile。
 
 **采集器归属**：进 `data/`，Gate 2 前最多 800 行 / 5 文件，触顶即暂停 Gate 1、先做 Gate 2；Gate 2 完成时必须一并通过全部门禁。
 
-**验收**：连续 7 天采集无未解释缺口且满足覆盖率，可确定性重放任一时间窗口；两所缺口证据强度差异已记录。单向延迟仅作含不可分离时钟偏差的描述性指标；到达间隔和同机 RTT 才是质量证据。
+**验收**：连续 7 天在上述可判定证据范围内无未解释缺口且满足覆盖率，可确定性重放任一时间窗口；HL 无法证明单流持续投递的限制及两所证据强度差异已记录。单向延迟仅作含不可分离时钟偏差的描述性指标；到达间隔和同机 RTT 只作质量描述。
 
 ---
 
