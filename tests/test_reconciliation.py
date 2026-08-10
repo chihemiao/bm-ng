@@ -2,6 +2,7 @@ from dataclasses import replace
 
 import pytest
 
+from reconciliation.ledger import BalanceLedger
 from reconciliation.state import (
     AdmissionDecision,
     CanonicalSet,
@@ -15,6 +16,8 @@ from reconciliation.state import (
     validate_startup_structure,
     validate_surface_evidence,
 )
+
+VALID_LEDGER = BalanceLedger(0, 150, (("USDC", "1"),), (("USDC", "1"),), (), frozenset(), True)
 
 
 def _canonical(kind: str, *fingerprints: str) -> CanonicalSet:
@@ -54,7 +57,7 @@ def _expectation(**changes) -> VenueExpectation:
         )
         for name in ("orders", "fills", "positions", "balances")
     }
-    values.update(frozen_intents=frozenset(), balance_ledger_available=True)
+    values.update(frozen_intents=frozenset(), balance_ledger=VALID_LEDGER)
     values.update(changes)
     return VenueExpectation(**values)
 
@@ -225,7 +228,7 @@ def test_local_and_venue_canonicalization_contracts_must_match() -> None:
     "expectation",
     [
         _expectation(frozen_intents={"not-frozen"}),
-        _expectation(balance_ledger_available=1),
+        _expectation(balance_ledger=object()),
     ],
 )
 def test_expectation_control_fields_are_structurally_validated(
@@ -298,12 +301,21 @@ def test_replayed_frozen_intent_blocks_startup() -> None:
     assert "hyperliquid:frozen_intent" in _decision(expectations=expectations).reasons
 
 
-def test_missing_balance_ledger_capability_blocks_startup() -> None:
+@pytest.mark.parametrize(
+    ("ledger", "reason"),
+    [
+        (None, "ledger_unavailable"),
+        (replace(VALID_LEDGER, unknown_entry_ids=frozenset({"unknown"})), "ledger_unknown_entry"),
+        (replace(VALID_LEDGER, self_consistent=False, snapshot_balances=(("USDC", "2"),)),
+         "ledger_inconsistent"),
+        (replace(VALID_LEDGER, end_ns=149), "ledger_coverage_mismatch"),
+    ],
+)
+def test_balance_ledger_failures_block_startup(ledger: BalanceLedger | None, reason: str) -> None:
     expectations = _expectations()
-    expectations["hyperliquid"] = _expectation(balance_ledger_available=False)
+    expectations["hyperliquid"] = _expectation(balance_ledger=ledger)
 
-    reason = "hyperliquid.balances:ledger_unimplemented"
-    assert reason in _decision(expectations=expectations).reasons
+    assert f"hyperliquid.balances:{reason}" in _decision(expectations=expectations).reasons
 
 
 @pytest.mark.parametrize("surface", ["orders", "positions"])
