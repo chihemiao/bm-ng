@@ -26,6 +26,40 @@ jobs:
           git checkout --detach "$TARGET_SHA"
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
 
+      - name: Enforce the pull request net line budget
+        env:
+          BASE_REPOSITORY: ${{ github.event.pull_request.base.repo.full_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            exit 0
+          fi
+          test -n "$BASE_REPOSITORY"
+          test -n "$BASE_SHA"
+          git fetch --unshallow origin "$HEAD_SHA"
+          git fetch --no-tags --filter=blob:none \
+            "https://github.com/${BASE_REPOSITORY}.git" "$BASE_SHA"
+          git merge-base "$BASE_SHA" "$HEAD_SHA" >/dev/null
+          NET_LINES="$(
+            git diff --numstat "$BASE_SHA...$HEAD_SHA" |
+              awk '
+                $1 == "-" || $2 == "-" { bad = 1; next }
+                { net += $1 - $2 }
+                END {
+                  if (bad) {
+                    print "binary diff cannot be counted" > "/dev/stderr"
+                    exit 2
+                  }
+                  print net
+                }
+              '
+          )"
+          printf 'pull request net increase: %s lines\n' "$NET_LINES"
+          test "$NET_LINES" -le 200
+
       - name: Install the checksum-locked uv release
         env:
           UV_VERSION: "0.9.21"
