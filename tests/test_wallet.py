@@ -28,6 +28,38 @@ def _registration(**changes: object) -> AgentWalletRegistration:
     return AgentWalletRegistration(**values)
 
 
+def _rotation_event(**changes: object) -> dict:
+    payload = {
+        "account_digest": "a" * 64,
+        "instance_id": "writer-one",
+        "boot_id": "identity-boot",
+        "old_wallet_fingerprint": "b" * 64,
+        "new_wallet_fingerprint": "c" * 64,
+        "old_issued_ns": ISSUED_NS,
+        "old_expires_ns": ISSUED_NS + VALIDITY_NS,
+        "new_issued_ns": ISSUED_NS + DAY_NS,
+        "new_expires_ns": ISSUED_NS + DAY_NS + VALIDITY_NS,
+        "assessment": "rotation_due",
+        "outcome": "rotated",
+        "reason": "rotation_completed",
+        "decided_ns": ISSUED_NS + VALIDITY_NS - ROTATION_LEAD_NS,
+    }
+    payload.update(changes)
+    return {
+        "schema_ver": 1,
+        "event_kind": "decision",
+        "payload_schema": "agent_wallet_rotation",
+        "venue": "local",
+        "conn_id": "wallet-lifecycle",
+        "boot_id": "recorder-boot",
+        "recv_wall_ns": payload["decided_ns"],
+        "recv_mono_ns": 1,
+        "source": "execution",
+        "seq_within_boot": 1,
+        "payload": payload,
+    }
+
+
 def test_wallet_timing_constants_are_owned_by_the_data_contract() -> None:
     assert contracts.VALIDITY_NS == VALIDITY_NS == 30 * DAY_NS
     assert contracts.ROTATION_LEAD_NS == ROTATION_LEAD_NS == 7 * DAY_NS
@@ -42,6 +74,57 @@ def test_wallet_timing_constants_are_owned_by_the_data_contract() -> None:
     }
     assert {"VALIDITY_NS", "ROTATION_LEAD_NS"}.isdisjoint(assigned)
     assert wallet_module.VALIDITY_NS == contracts.VALIDITY_NS
+
+
+def test_wallet_rotation_schema_is_registered_and_accepts_identity_boot_separation() -> None:
+    event = _rotation_event()
+
+    assert "agent_wallet_rotation" in contracts.PAYLOAD_SCHEMAS
+    assert len(contracts.PAYLOAD_SCHEMAS) == 18
+    assert event["boot_id"] != event["payload"]["boot_id"]
+    assert contracts.validate_envelope(event) is event
+
+
+def test_wallet_rotation_requires_versioned_durable_exact_fields() -> None:
+    event = _rotation_event()
+    event["event_kind"] = "ops"
+    with pytest.raises(contracts.ContractError, match="event kind"):
+        contracts.validate_envelope(event)
+    event = _rotation_event()
+    event["schema_ver"] = 2
+    with pytest.raises(contracts.ContractError, match="schema version"):
+        contracts.validate_envelope(event)
+    event = _rotation_event()
+    del event["seq_within_boot"]
+    with pytest.raises(contracts.ContractError, match="seq_within_boot"):
+        contracts.validate_envelope(event)
+    with pytest.raises(contracts.ContractError, match="fields"):
+        contracts.validate_envelope(_rotation_event(unexpected=True))
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"account_digest": "raw-account"}, "account_digest"),
+        ({"old_wallet_fingerprint": "B" * 64}, "old_wallet_fingerprint"),
+        ({"new_wallet_fingerprint": "c" * 63}, "new_wallet_fingerprint"),
+        ({"instance_id": ""}, "instance_id"),
+        ({"boot_id": ""}, "boot_id"),
+        ({"old_issued_ns": True}, "old_issued_ns"),
+        ({"old_expires_ns": 0}, "old_expires_ns"),
+        ({"new_issued_ns": 1.0}, "new_issued_ns"),
+        ({"new_expires_ns": -1}, "new_expires_ns"),
+        ({"decided_ns": 0}, "decided_ns"),
+        ({"assessment": "unknown"}, "assessment"),
+        ({"outcome": "unknown"}, "outcome"),
+        ({"reason": "unknown"}, "reason"),
+    ],
+)
+def test_wallet_rotation_rejects_invalid_field_formats(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(contracts.ContractError, match=message):
+        contracts.validate_envelope(_rotation_event(**changes))
 
 
 def test_registration_is_a_frozen_record_with_fixed_validity() -> None:

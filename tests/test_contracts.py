@@ -37,6 +37,7 @@ FROZEN_PAYLOAD_SCHEMAS = LEGACY_PAYLOAD_SCHEMAS | {
     "reconciliation_surface",
     "writer_lease_decision",
     "writer_authority_promotion",
+    "agent_wallet_rotation",
 }
 ROOT = Path(__file__).parents[1]
 
