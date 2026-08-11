@@ -17,8 +17,10 @@ class SignerFenceError(RuntimeError):
     pass
 
 
-class NonceAllocationError(RuntimeError):
-    pass
+class NonceFrozenError(RuntimeError):
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"signer nonce frozen: {reason}")
+        self.reason = reason
 
 
 def _validate_fingerprint(wallet_fingerprint: str) -> None:
@@ -177,7 +179,8 @@ class SignerFence:
 class NonceAllocator:
     def __init__(
         self, fence: SignerFence, *, account_digest: str, instance_id: str,
-        replayed_last: int, recorder: Callable[[Mapping[str, object]], None],
+        replayed_last: int, replayed_freeze_reason: str | None,
+        recorder: Callable[[Mapping[str, object]], None],
     ) -> None:
         if not isinstance(fence, SignerFence):
             raise TypeError("fence must be SignerFence")
@@ -187,26 +190,57 @@ class NonceAllocator:
             raise TypeError("replayed_last must be int")
         if replayed_last < 0:
             raise ValueError("replayed_last must be nonnegative")
+        if replayed_freeze_reason is not None:
+            if not isinstance(replayed_freeze_reason, str):
+                raise TypeError("replayed_freeze_reason must be str or None")
+            if replayed_freeze_reason not in FROZEN_REASONS:
+                raise ValueError("invalid freeze reason")
         if not callable(recorder):
             raise TypeError("recorder must be callable")
         self._fence = fence
         self._account_digest = account_digest
         self._instance_id = instance_id
         self._last = replayed_last
+        self._frozen_reason = replayed_freeze_reason
         self._recorder = recorder
 
     @property
     def last_nonce(self) -> int:
         return self._last
 
+    @property
+    def frozen_reason(self) -> str | None:
+        return self._frozen_reason
+
+    def _freeze(self, reason: str, *, now_ms: int, decided_ns: int) -> None:
+        self._frozen_reason = reason
+        payload = {
+            "wallet_fingerprint": self._fence.wallet_fingerprint,
+            "account_digest": self._account_digest,
+            "instance_id": self._instance_id,
+            "allocated_nonce": None,
+            "previous_nonce": self._last,
+            "now_ms": now_ms,
+            "outcome": "frozen",
+            "reason": reason,
+            "decided_ns": decided_ns,
+        }
+        self._recorder(payload)
+        raise NonceFrozenError(reason)
+
     def allocate(self, *, now_ms: int, decided_ns: int) -> int:
+        if self._frozen_reason is not None:
+            raise NonceFrozenError(self._frozen_reason)
         _validate_positive(now_ms, "now_ms")
         _validate_positive(decided_ns, "decided_ns")
-        self._fence.revalidate()
+        try:
+            self._fence.revalidate()
+        except SignerFenceError:
+            self._freeze("fence_invalidated", now_ms=now_ms, decided_ns=decided_ns)
         candidate = max(self._last, now_ms) + 1
-        if candidate >= now_ms + DAY_MS:
-            raise NonceAllocationError("candidate nonce exceeds Hyperliquid time window")
         assert candidate > now_ms - 2 * DAY_MS  # Unreachable lower bound by construction.
+        if candidate >= now_ms + DAY_MS:
+            self._freeze("clock_backward", now_ms=now_ms, decided_ns=decided_ns)
         payload = {
             "wallet_fingerprint": self._fence.wallet_fingerprint,
             "account_digest": self._account_digest,
