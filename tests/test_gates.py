@@ -147,6 +147,11 @@ def test_current_repository_passes_inventory_budget_and_secret_gates() -> None:
     assert repository_violations(ROOT) == set()
 
 
+def test_contract_schema_data_is_split_with_entrypoint_headroom() -> None:
+    assert (ROOT / "data/schema_dispatch.py").is_file()
+    assert _lines(ROOT / "data/contracts.py") <= 360
+
+
 def test_synthetic_tree_exposes_every_inventory_and_budget_violation(tmp_path: Path) -> None:
     root = _configured(tmp_path)
     for index in range(41):
