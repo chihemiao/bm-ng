@@ -147,14 +147,14 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
         raise WriterLeaseError("wallet rotation is not due")
     try:
         lease.release()
-    except BaseException:
+    except Exception:
         _record_abort(
             recorder, identity, old_registration, new_registration, assessment,
             "release_failed", now_ns)
         raise
     try:
         new_lease = reacquire(new_registration)
-    except BaseException:
+    except Exception:
         _record_abort(
             recorder, identity, old_registration, new_registration, assessment,
             "acquire_failed", now_ns)
@@ -165,7 +165,7 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
             recorder, identity, old_registration, new_registration, assessment,
             "acquire_failed", now_ns)
         new_lease.release()
-        raise WriterLeaseError("wallet rotation acquisition failed")
+        raise WriterLeaseError("rotation aborted: acquire_failed (contended)")
     expected = (identity.account_id, identity.instance_id, new_registration.wallet_fingerprint)
     observed_identity = new_authority.identity
     observed = (
@@ -177,7 +177,7 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
             recorder, identity, old_registration, new_registration, assessment,
             "identity_changed", now_ns)
         new_lease.release()
-        raise WriterLeaseError("wallet rotation identity changed")
+        raise WriterLeaseError("rotation aborted: identity_changed")
     decision = _rotation_decision(
         identity, old_registration, new_registration, assessment, "rotated",
         "rotation_completed", now_ns)
