@@ -60,6 +60,15 @@ def _rotation_event(**changes: object) -> dict:
     }
 
 
+def _decided_ns(assessment: str) -> int:
+    expiry = ISSUED_NS + VALIDITY_NS
+    return {
+        "active": expiry - ROTATION_LEAD_NS - 1,
+        "rotation_due": expiry - ROTATION_LEAD_NS,
+        "expired": expiry,
+    }[assessment]
+
+
 def test_wallet_timing_constants_are_owned_by_the_data_contract() -> None:
     assert contracts.VALIDITY_NS == VALIDITY_NS == 30 * DAY_NS
     assert contracts.ROTATION_LEAD_NS == ROTATION_LEAD_NS == 7 * DAY_NS
@@ -121,6 +130,90 @@ def test_wallet_rotation_requires_versioned_durable_exact_fields() -> None:
     ],
 )
 def test_wallet_rotation_rejects_invalid_field_formats(
+    changes: dict[str, object], message: str
+) -> None:
+    with pytest.raises(contracts.ContractError, match=message):
+        contracts.validate_envelope(_rotation_event(**changes))
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason", "assessment"),
+    [
+        ("rotated", "rotation_completed", "rotation_due"),
+        ("rotated", "rotation_completed", "expired"),
+        ("aborted", "not_due", "active"),
+        ("aborted", "same_wallet", "active"),
+        ("aborted", "same_wallet", "rotation_due"),
+        ("aborted", "same_wallet", "expired"),
+        ("aborted", "identity_changed", "active"),
+        ("aborted", "identity_changed", "rotation_due"),
+        ("aborted", "identity_changed", "expired"),
+        ("aborted", "release_failed", "rotation_due"),
+        ("aborted", "release_failed", "expired"),
+        ("aborted", "acquire_failed", "rotation_due"),
+        ("aborted", "acquire_failed", "expired"),
+    ],
+)
+def test_wallet_rotation_accepts_every_closed_semantic_combination(
+    outcome: str, reason: str, assessment: str
+) -> None:
+    changes = {
+        "outcome": outcome,
+        "reason": reason,
+        "assessment": assessment,
+        "decided_ns": _decided_ns(assessment),
+    }
+    if reason == "same_wallet":
+        changes["new_wallet_fingerprint"] = "b" * 64
+
+    event = _rotation_event(**changes)
+    assert contracts.validate_envelope(event) is event
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"old_expires_ns": ISSUED_NS + VALIDITY_NS - 1}, "old wallet validity"),
+        (
+            {"new_expires_ns": ISSUED_NS + DAY_NS + VALIDITY_NS - 1},
+            "new wallet validity",
+        ),
+        ({"decided_ns": ISSUED_NS - 1, "assessment": "active"}, "predates"),
+        (
+            {"assessment": "active", "decided_ns": _decided_ns("rotation_due")},
+            "assessment",
+        ),
+        ({"assessment": "rotation_due", "decided_ns": _decided_ns("expired")}, "assessment"),
+        (
+            {"assessment": "expired", "decided_ns": _decided_ns("expired") - 1},
+            "assessment",
+        ),
+        ({"outcome": "aborted", "reason": "same_wallet"}, "fingerprint"),
+        (
+            {
+                "outcome": "aborted",
+                "reason": "release_failed",
+                "new_wallet_fingerprint": "b" * 64,
+            },
+            "fingerprint",
+        ),
+        ({"outcome": "aborted", "reason": "not_due"}, "combination"),
+        (
+            {
+                "outcome": "aborted",
+                "reason": "release_failed",
+                "assessment": "active",
+                "decided_ns": _decided_ns("active"),
+            },
+            "combination",
+        ),
+        (
+            {"assessment": "active", "decided_ns": _decided_ns("active")},
+            "combination",
+        ),
+    ],
+)
+def test_wallet_rotation_rejects_semantic_contradictions(
     changes: dict[str, object], message: str
 ) -> None:
     with pytest.raises(contracts.ContractError, match=message):
