@@ -236,23 +236,29 @@ def _semantic_conflict(
 
 
 def _order_binding_conflicts(events: list[dict[str, Any]]) -> set[str]:
-    leases: dict[tuple[str, int], str] = {}
+    leases: dict[tuple[str, int], tuple[str, str]] = {}
     requests = []
     for event in events:
         payload = event["payload"]
         if event["payload_schema"] == "writer_lease_decision":
             if (payload["action"], payload["outcome"]) == ("acquire", "pending_reconciliation"):
                 leases.setdefault(
-                    (payload["account_digest"], payload["lease_epoch"]), payload["instance_id"]
+                    (payload["account_digest"], payload["lease_epoch"]),
+                    (payload["instance_id"], payload["wallet_fingerprint"]),
                 )
         elif event["payload_schema"] == "order_request" and not order_request_is_legacy(event):
             requests.append(payload)
     conflicts = set()
     for payload in requests:
         key = payload["account_digest"], payload["lease_epoch"]
-        if key in leases and leases[key] != payload["writer_instance_id"]:
-            account, epoch = key
+        if key not in leases:
+            continue
+        account, epoch = key
+        instance_id, wallet_fingerprint = leases[key]
+        if instance_id != payload["writer_instance_id"]:
             conflicts.add(f"order_request:lease_binding_mismatch:{account}:{epoch}")
+        if wallet_fingerprint != payload["wallet_fingerprint"]:
+            conflicts.add(f"order_request:lease_wallet_mismatch:{account}:{epoch}")
     return conflicts
 
 

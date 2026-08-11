@@ -73,6 +73,7 @@ def _order_request(sequence: int, **changes) -> dict:
         "account_digest": "a" * 64,
         "lease_epoch": 1,
         "writer_instance_id": "writer-one",
+        "wallet_fingerprint": "b" * 64,
     }
     payload.update(changes)
     event.update(
@@ -203,8 +204,10 @@ def test_replay_freezes_distinct_acquires_for_the_same_account_epoch(
 
 def test_order_request_replay_checks_only_matching_window_leases(tmp_path: Path) -> None:
     acquire = _writer_decision(1)
-    mismatch = _order_request(2, writer_instance_id="writer-two")
-    outside = _order_request(3, lease_epoch=2)
+    mismatch = _order_request(
+        2, writer_instance_id="writer-two", wallet_fingerprint="c" * 64
+    )
+    outside = _order_request(3, lease_epoch=2, wallet_fingerprint="c" * 64)
     legacy = _order_request(4)
     legacy.pop("seq_within_boot")
     legacy["payload"] = {}
@@ -219,6 +222,7 @@ def test_order_request_replay_checks_only_matching_window_leases(tmp_path: Path)
     assert replay.events == (acquire, mismatch, outside, legacy)
     assert replay.freeze_reasons == (
         "order_request:lease_binding_mismatch:" + "a" * 64 + ":1",
+        "order_request:lease_wallet_mismatch:" + "a" * 64 + ":1",
     )
     rejected = ShardWriter(tmp_path / "legacy", boot_id="boot-a")
     with pytest.raises(ContractError, match="legacy order request"):
