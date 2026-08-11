@@ -233,17 +233,17 @@ class WriterLease:
         self, *, promotion_ns: int,
         before_elevate: Callable[[WriterAuthority], None],
     ) -> WriterAuthority:
-        authority = self.revalidate()
-        _require(authority.mode == "pending_reconciliation", "writer lease not promotable")
         if type(promotion_ns) is not int:
             raise TypeError("promotion_ns must be an integer")
         if promotion_ns <= 0:
             raise ValueError("promotion_ns must be positive")
+        if not callable(before_elevate):
+            raise TypeError("before_elevate must be callable")
+        authority = self.revalidate()
+        _require(authority.mode == "pending_reconciliation", "writer lease not promotable")
         _require(self._acquired_ns is not None, "missing writer acquisition time")
         if promotion_ns < self._acquired_ns:
             raise ValueError("promotion_ns predates acquisition")
-        if not callable(before_elevate):
-            raise TypeError("before_elevate must be callable")
         before_elevate(authority)
         elevated = authority._replace(mode="risk_increasing")
         self._authority = elevated
