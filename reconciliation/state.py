@@ -1,9 +1,10 @@
 """Pure, fail-closed startup reconciliation contracts."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
+from execution.nonce import replay_freeze_reason, replay_signer_nonce_conflict
 from reconciliation.ledger import BalanceLedger, LedgerContractError, validate_balance_ledger
 
 VENUES = frozenset({"hyperliquid", "bybit"})
@@ -278,12 +279,29 @@ def _state_reasons(
     return reasons
 
 
+def _signer_nonce_reasons(
+    events: Iterable[Mapping[str, object]],
+    wallet_fingerprint: str,
+) -> tuple[str, ...]:
+    rows = tuple(events)
+    frozen = replay_freeze_reason(rows, wallet_fingerprint)
+    conflict = replay_signer_nonce_conflict(rows, wallet_fingerprint)
+    reasons = []
+    if frozen is not None:
+        reasons.append(f"signer_nonce_allocation:frozen:{frozen}")
+    if conflict is not None:
+        reasons.append(conflict)
+    return tuple(sorted(set(reasons)))
+
+
 def decide_startup_admission(
     *,
     startup_started_ns: int,
     now_ns: int,
     venues: Mapping[str, VenueEvidence],
     expectations: Mapping[str, VenueExpectation],
+    signer_nonce_events: Iterable[Mapping[str, object]],
+    signer_wallet_fingerprint: str,
     previous_freeze: AdmissionDecision | None = None,
 ) -> AdmissionDecision:
     """Admit only complete, fresh, fully known four-surface evidence."""
@@ -296,11 +314,15 @@ def decide_startup_admission(
     validated_venues = dict(validated.venues)
     validated_expectations = dict(validated.expectations)
     _validate_previous_freeze(previous_freeze)
+    nonce_reasons = list(
+        _signer_nonce_reasons(signer_nonce_events, signer_wallet_fingerprint)
+    )
+    reasons = nonce_reasons
     if previous_freeze is not None:
-        return _decision(["startup:previous_freeze"])
+        reasons.append("startup:previous_freeze")
     frozen, ledger = _expectation_gate_reasons(validated_expectations)
     if frozen:
-        return _decision(frozen)
+        return _decision([*reasons, *frozen])
     evidence_reasons = [
         reason
         for venue, evidence in validated.venues
@@ -310,7 +332,7 @@ def decide_startup_admission(
         )
     ]
     if evidence_reasons:
-        return _decision(evidence_reasons)
+        return _decision([*reasons, *evidence_reasons])
     if ledger:
-        return _decision(ledger)
-    return _decision(_state_reasons(validated_venues, validated_expectations))
+        return _decision([*reasons, *ledger])
+    return _decision([*reasons, *_state_reasons(validated_venues, validated_expectations)])
