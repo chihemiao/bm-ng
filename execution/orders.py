@@ -40,6 +40,7 @@ class OrderRequestRecord:
     lease_epoch: int
     writer_instance_id: str
     wallet_fingerprint: str
+    allocated_nonce: int | None
 
     def intent_fields(self) -> dict[str, str | int]:
         return {field: getattr(self, field) for field in INTENT_FIELDS}
@@ -84,6 +85,13 @@ def _validate_lease_snapshot(
     _require(isinstance(instance_id, str) and bool(instance_id), "invalid writer_instance_id")
 
 
+def _validate_allocated_nonce(leg: str, allocated_nonce: object) -> None:
+    if leg == "hyperliquid":
+        _require(allocated_nonce is not None, "order_request:hyperliquid_nonce_null")
+    else:
+        _require(allocated_nonce is None, "order_request:bybit_nonce_not_null")
+
+
 def _client_order_id(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str, ordinal: int
 ) -> str:
@@ -124,16 +132,18 @@ def _validate_intent(intent: OrderIntent) -> None:
 def order_request_record(
     intent: OrderIntent, recorded_ns: int, *, account_digest: str,
     lease_epoch: int, writer_instance_id: str, wallet_fingerprint: str,
+    allocated_nonce: int | None,
 ) -> OrderRequestRecord:
     _validate_intent(intent)
     _require(_valid_ns(recorded_ns) and recorded_ns >= intent.signal_ns, "invalid recorded_ns")
     _validate_lease_snapshot(
         account_digest, lease_epoch, writer_instance_id, wallet_fingerprint
     )
+    _validate_allocated_nonce(intent.leg, allocated_nonce)
     values = [getattr(intent, field) for field in INTENT_FIELDS]
     return OrderRequestRecord(
         *values, intent.client_order_id, recorded_ns,
-        account_digest, lease_epoch, writer_instance_id, wallet_fingerprint,
+        account_digest, lease_epoch, writer_instance_id, wallet_fingerprint, allocated_nonce,
     )
 
 
@@ -164,6 +174,7 @@ def _validate_request(intent: OrderIntent, request: OrderRequestRecord | None) -
         request.account_digest, request.lease_epoch,
         request.writer_instance_id, request.wallet_fingerprint,
     )
+    _validate_allocated_nonce(request.leg, request.allocated_nonce)
     intent_fields = {field: getattr(intent, field) for field in INTENT_FIELDS}
     matches = request.client_order_id == intent.client_order_id
     matches &= request.intent_fields() == intent_fields

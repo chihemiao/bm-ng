@@ -12,7 +12,6 @@ from data.schema_dispatch import (
     EVENT_KINDS,
     IDENTITY_STATUSES,
     LEDGER_KINDS,
-    ORDER_LEASE_FIELDS,
     PAYLOAD_SCHEMAS,
     PROMOTION_DECISIONS,
     RECONCILIATION_SCHEMAS,
@@ -22,6 +21,7 @@ from data.schema_dispatch import (
     WRITER_DECISIONS,
 )
 from data.schema_nonce import signer_nonce_allocation_errors as _nonce_errors
+from data.schema_order_request import order_request_binding_errors, order_request_binding_is_legacy
 from data.schema_wallet import wallet_rotation_semantic_errors as _wallet_errors
 
 
@@ -272,16 +272,12 @@ def _validate_order_identity(event: dict[str, Any]) -> None:
 
 def order_request_is_legacy(event: dict[str, Any]) -> bool:
     payload = event["payload"]
-    present = tuple(field in payload for field in ORDER_LEASE_FIELDS)
     has_sequence = "seq_within_boot" in event
-    if not has_sequence and not any(present):
-        return True
-    _require(has_sequence and all(present), "invalid order request lease binding")
-    account, epoch, instance, wallet = (payload[field] for field in ORDER_LEASE_FIELDS)
-    valid = _valid_digest(account) and type(epoch) is int and epoch > 0
-    valid &= _nonempty_text(instance) and _valid_digest(wallet)
-    _require(valid, "invalid order request lease binding")
-    return False
+    legacy = order_request_binding_is_legacy(payload, has_sequence=has_sequence)
+    errors = order_request_binding_errors(
+        payload, venue=event.get("venue"), has_sequence=has_sequence)
+    _require(not errors, errors[0] if errors else "")
+    return legacy
 
 
 def bybit_update_gap(previous_u: int | None, current_u: int, message_type: str) -> bool:

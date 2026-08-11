@@ -74,6 +74,7 @@ def _order_request(sequence: int, **changes) -> dict:
         "lease_epoch": 1,
         "writer_instance_id": "writer-one",
         "wallet_fingerprint": "b" * 64,
+        "allocated_nonce": 7,
     }
     payload.update(changes)
     event.update(
