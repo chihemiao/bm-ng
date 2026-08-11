@@ -37,9 +37,7 @@ def test_stale_or_future_rate_is_unknown(observed_ns):
 
 
 def test_rate_at_the_inclusive_age_limit_is_still_fresh():
-    assert _convert(rate=_rate(observed_ns=100), now_ns=110, max_age_ns=10) == Decimal(
-        "2.5025"
-    )
+    assert _convert(rate=_rate(observed_ns=100), now_ns=110, max_age_ns=10) == Decimal("2.5025")
 
 
 @pytest.mark.parametrize("value", ["0", "-0.01"])
@@ -86,9 +84,7 @@ def test_zero_and_negative_amounts_keep_their_sign_and_knownness():
 
 
 def test_conversion_does_not_round_or_quantize_the_decimal_product():
-    assert _convert("0.123456789", rate=_rate("0.9987654321")) == Decimal(
-        "0.12330437312482853269"
-    )
+    assert _convert("0.123456789", rate=_rate("0.9987654321")) == Decimal("0.1233043732112635269")
 
 
 @pytest.mark.parametrize(
