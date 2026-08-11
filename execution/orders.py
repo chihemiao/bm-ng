@@ -2,9 +2,12 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from data.schema_order_request import order_request_binding_errors
+from execution.nonce import NonceAllocator
+from execution.writer import WriterLease
 
 ORDER_STATUSES = frozenset(
     {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
@@ -228,6 +231,45 @@ def decide_submission(
     if now_ns - intent.signal_ns > max_signal_age_ns:
         return "reject_stale"
     return "persist" if request is None else "submit"
+
+
+def submit_order(
+    intent: OrderIntent,
+    evidence: ReconciliationEvidence,
+    request: OrderRequestRecord | None,
+    history: ReplayedDecisionHistory,
+    lease: WriterLease,
+    allocator: NonceAllocator,
+    transport: Callable[[OrderRequestRecord], object],
+    request_recorder: Callable[[OrderRequestRecord], None],
+    *,
+    now_ns: int,
+    max_signal_age_ns: int,
+    max_reconcile_attempts: int,
+    now_ms: int,
+    decided_ns: int,
+) -> tuple[str, object | None]:
+    decision = decide_submission(
+        intent, evidence, request, history, now_ns,
+        max_signal_age_ns, max_reconcile_attempts,
+    )
+    if decision not in {"persist", "submit"}:
+        return decision, None
+    authority = lease.authorize("submit")
+    if decision == "submit":
+        assert request is not None  # Guaranteed by decide_submission.
+        return decision, transport(request)
+    nonce = None
+    if intent.leg == "hyperliquid":
+        nonce = allocator.allocate(now_ms=now_ms, decided_ns=decided_ns)
+    identity = authority.identity
+    built = order_request_record(
+        intent, decided_ns, account_digest=allocator.account_digest,
+        lease_epoch=authority.lease_epoch, writer_instance_id=identity.instance_id,
+        wallet_fingerprint=identity.wallet_fingerprint, allocated_nonce=nonce,
+    )
+    request_recorder(built)
+    return decision, transport(built)
 
 
 def replacement_intent(
