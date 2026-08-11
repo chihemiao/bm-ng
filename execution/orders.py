@@ -233,6 +233,28 @@ def decide_submission(
     return "persist" if request is None else "submit"
 
 
+def _validate_submission_inputs(
+    lease: object,
+    allocator: object,
+    transport: object,
+    request_recorder: object,
+    scalars: tuple[tuple[str, object], ...],
+) -> None:
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be WriterLease")
+    if not isinstance(allocator, NonceAllocator):
+        raise TypeError("allocator must be NonceAllocator")
+    if not callable(transport):
+        raise TypeError("transport must be callable")
+    if not callable(request_recorder):
+        raise TypeError("request_recorder must be callable")
+    for name, value in scalars:
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+
+
 def submit_order(
     intent: OrderIntent,
     evidence: ReconciliationEvidence,
@@ -249,6 +271,14 @@ def submit_order(
     now_ms: int,
     decided_ns: int,
 ) -> tuple[str, object | None]:
+    _validate_submission_inputs(
+        lease, allocator, transport, request_recorder,
+        (
+            ("now_ns", now_ns), ("max_signal_age_ns", max_signal_age_ns),
+            ("max_reconcile_attempts", max_reconcile_attempts),
+            ("now_ms", now_ms), ("decided_ns", decided_ns),
+        ),
+    )
     decision = decide_submission(
         intent, evidence, request, history, now_ns,
         max_signal_age_ns, max_reconcile_attempts,
