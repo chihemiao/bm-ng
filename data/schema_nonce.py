@@ -2,7 +2,9 @@
 
 from collections.abc import Mapping
 
-DAY_MS = 86_400_000
+# Venue rule (retrieved 2026-08-11):
+# https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets
+DAY_MS = 86_400_000  # now_ms is the allocator's local pre-submit proxy for block T.
 FIELDS = frozenset(
     {
         "wallet_fingerprint",
@@ -18,7 +20,7 @@ FIELDS = frozenset(
 )
 OUTCOMES = frozenset({"allocated", "frozen"})
 REASONS = frozenset(
-    {"nonce_allocated", "clock_backward", "clock_forward", "fence_invalidated"}
+    {"nonce_allocated", "clock_backward", "fence_invalidated"}
 )
 
 
@@ -71,10 +73,10 @@ def signer_nonce_allocation_errors(payload: Mapping[str, object]) -> tuple[str, 
     if outcome == "allocated" and allocated is not None:
         bounds = (
             (allocated > previous, "allocated_nonce must exceed previous_nonce"),
-            (allocated >= now_ms - 2 * DAY_MS,
-             "allocated_nonce must be within now_ms minus two days"),
-            (allocated <= now_ms + DAY_MS,
-             "allocated_nonce must be within now_ms plus one day"),
+            (allocated > now_ms - 2 * DAY_MS,
+             "allocated_nonce must be strictly within now_ms minus two days"),
+            (allocated < now_ms + DAY_MS,
+             "allocated_nonce must be strictly within now_ms plus one day"),
         )
         errors.extend(message for valid, message in bounds if not valid)
     return tuple(errors)
