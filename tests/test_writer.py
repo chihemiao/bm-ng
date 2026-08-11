@@ -18,27 +18,27 @@ from execution.writer import (
 )
 
 AUTHORIZATION_MATRIX = (
-    ("pending_reconciliation", "cancel", True),
-    ("pending_reconciliation", "cancel_all", True),
-    ("pending_reconciliation", "submit", False),
-    ("pending_reconciliation", "reduce_only", False),
-    ("pending_reconciliation", "close", False),
-    ("pending_reconciliation", "market", False),
-    ("pending_reconciliation", "modify", False),
-    ("cancel_only", "cancel", True),
-    ("cancel_only", "cancel_all", True),
-    ("cancel_only", "submit", False),
-    ("cancel_only", "reduce_only", False),
-    ("cancel_only", "close", False),
-    ("cancel_only", "market", False),
-    ("cancel_only", "modify", False),
-    ("risk_increasing", "cancel", True),
-    ("risk_increasing", "cancel_all", True),
-    ("risk_increasing", "submit", True),
-    ("risk_increasing", "reduce_only", True),
-    ("risk_increasing", "close", True),
-    ("risk_increasing", "market", True),
-    ("risk_increasing", "modify", False),
+    ("pending_reconciliation", "cancel", True, None),
+    ("pending_reconciliation", "cancel_all", True, None),
+    ("pending_reconciliation", "submit", False, "action_not_authorized"),
+    ("pending_reconciliation", "reduce_only", False, "action_not_authorized"),
+    ("pending_reconciliation", "close", False, "action_not_authorized"),
+    ("pending_reconciliation", "market", False, "action_not_authorized"),
+    ("pending_reconciliation", "modify", False, "native_modify_disabled"),
+    ("cancel_only", "cancel", True, None),
+    ("cancel_only", "cancel_all", True, None),
+    ("cancel_only", "submit", False, "action_not_authorized"),
+    ("cancel_only", "reduce_only", False, "action_not_authorized"),
+    ("cancel_only", "close", False, "action_not_authorized"),
+    ("cancel_only", "market", False, "action_not_authorized"),
+    ("cancel_only", "modify", False, "native_modify_disabled"),
+    ("risk_increasing", "cancel", True, None),
+    ("risk_increasing", "cancel_all", True, None),
+    ("risk_increasing", "submit", True, None),
+    ("risk_increasing", "reduce_only", True, None),
+    ("risk_increasing", "close", True, None),
+    ("risk_increasing", "market", True, None),
+    ("risk_increasing", "modify", False, "native_modify_disabled"),
 )
 
 HOLDER = """
@@ -96,13 +96,13 @@ def _acquire(root: Path, identity: WriterIdentity):
     ), decisions
 
 
-def _lease_for_mode(root: Path, mode: str) -> WriterLease:
+def _lease_for_mode(root: Path, mode: str, recorder) -> WriterLease:
     identity = _identity()
     if mode == "cancel_only":
         authority = WriterAuthority(identity, mode, 1)
         path = WriterLease.path_for(root, identity.account_id)
-        return WriterLease(path, authority, None, [].append, True, acquired_ns=None)
-    lease, _ = _acquire(root, identity)
+        return WriterLease(path, authority, None, recorder, True, acquired_ns=None)
+    lease = WriterLease.acquire(root, identity, recorder, acquired_ns=100)
     if mode == "risk_increasing":
         lease._authority = lease.authority._replace(mode=mode)
     return lease
@@ -210,24 +210,31 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
     takeover.release()
 
 
-@pytest.mark.parametrize(("mode", "action", "allowed"), AUTHORIZATION_MATRIX)
+@pytest.mark.parametrize(("mode", "action", "allowed", "cause"), AUTHORIZATION_MATRIX)
 def test_writer_authorization_matrix(
-    tmp_path: Path, mode: str, action: str, allowed: bool
+    tmp_path: Path, mode: str, action: str, allowed: bool, cause: str | None
 ) -> None:
-    lease = _lease_for_mode(tmp_path, mode)
+    decisions = []
+    lease = _lease_for_mode(tmp_path, mode, decisions.append)
+    before = len(decisions)
     if allowed:
         assert lease.authorize(action).mode == mode
+        assert len(decisions) == before
     else:
         reason = "native_modify_disabled" if action == "modify" else "action not authorized"
         with pytest.raises(WriterLeaseError, match=reason):
             lease.authorize(action)
+        assert len(decisions) == before + 1
+        decision = decisions[-1]
+        assert (decision.action, decision.outcome) == ("authorize", "denied")
+        assert decision.reason == f"authorize_denied:{mode}:{action}:{cause}"
     lease.release()
 
 
 def test_pending_and_cancel_only_have_the_same_allowed_actions() -> None:
     def allowed(mode):
         return {
-            action for candidate, action, decision in AUTHORIZATION_MATRIX
+            action for candidate, action, decision, _ in AUTHORIZATION_MATRIX
             if candidate == mode and decision
         }
 
@@ -238,13 +245,31 @@ def test_pending_and_cancel_only_have_the_same_allowed_actions() -> None:
 def test_unknown_action_is_structurally_invalid_before_lease_revalidation(
     tmp_path: Path, action: object, error: type[Exception]
 ) -> None:
-    lease, _ = _acquire(tmp_path, _identity())
+    lease, decisions = _acquire(tmp_path, _identity())
     os.unlink(lease.path)
     lease.path.write_text("{}")
+    before = len(decisions)
     with pytest.raises(error):
         lease.authorize(action)  # type: ignore[arg-type]
+    assert len(decisions) == before
     with pytest.raises(WriterLeaseError, match="inode changed"):
         lease.authorize("cancel")
+
+
+def test_authorization_denial_preserves_reason_when_recording_fails(tmp_path: Path) -> None:
+    failure = OSError("decision stream unavailable")
+
+    def fail(_decision) -> None:
+        raise failure
+
+    identity = _identity()
+    authority = WriterAuthority(identity, "cancel_only", 1)
+    path = WriterLease.path_for(tmp_path, identity.account_id)
+    lease = WriterLease(path, authority, None, fail, True, acquired_ns=None)
+    with pytest.raises(WriterLeaseError) as caught:
+        lease.authorize("submit")
+    assert str(caught.value) == "writer action not authorized"
+    assert caught.value.__cause__ is failure
 
 
 def test_symlink_and_replaced_inode_fail_closed(tmp_path: Path) -> None:
