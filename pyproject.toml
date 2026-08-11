@@ -54,3 +54,8 @@ name = "Runtime cannot import tests or research"
 type = "forbidden"
 source_modules = ["data", "execution", "reconciliation"]
 forbidden_modules = ["tests", "research"]
+
+[[tool.importlinter.contracts]]
+name = "Runtime layering"
+type = "layers"
+layers = ["reconciliation", "execution", "data"]
