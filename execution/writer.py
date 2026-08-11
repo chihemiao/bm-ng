@@ -263,6 +263,32 @@ class WriterLease:
         self._authority = elevated
         return elevated
 
+    def demote_to_cancel_only(self, *, demotion_ns: int, reason: str) -> WriterAuthority:
+        if type(demotion_ns) is not int:
+            raise TypeError("demotion_ns must be an integer")
+        if demotion_ns <= 0:
+            raise ValueError("demotion_ns must be positive")
+        if type(reason) is not str:
+            raise TypeError("demotion reason must be text")
+        if not reason.startswith("writer_demoted:") or reason == "writer_demoted:":
+            raise ValueError("invalid demotion reason")
+        authority = self.authority
+        if authority.mode != "risk_increasing":
+            return authority
+        authority = self.revalidate()
+        demoted = authority._replace(mode="cancel_only")
+        self._authority = demoted
+        decision = _decision(
+            authority.identity, self.path, "demote", "cancel_only", reason,
+            authority.lease_epoch, self._prior_epoch_valid,
+        )
+        try:
+            self._recorder(decision)
+        except Exception as exc:
+            message = "writer demotion applied; evidence recording failed"
+            raise WriterLeaseError(message) from exc
+        return demoted
+
     def release(self) -> None:
         if self._fd is not None:
             authority = self.revalidate()
