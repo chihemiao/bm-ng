@@ -2,9 +2,18 @@ from decimal import Decimal
 
 import pytest
 
+import reconciliation.clock as clock_module
 import reconciliation.exposure as exposure_module
 import reconciliation.legs as legs_module
-from reconciliation.legs import LegOutcome, PairState, leg_completion, pair_state
+from reconciliation.clock import StateClock
+from reconciliation.legs import (
+    LegOutcome,
+    PairState,
+    advance_obligation_clock,
+    leg_completion,
+    obligation_state,
+    pair_state,
+)
 from reconciliation.state import CanonicalSet, SurfaceEvidence, surface_is_authoritative
 
 
@@ -223,3 +232,68 @@ def test_pair_rejects_non_outcome_or_non_string_fields(legs):
 def test_unresolved_order_is_deterministic_regardless_of_input_order():
     forward = _pair("unknown", "overfilled")
     assert pair_state(forward) == pair_state(list(reversed(forward)))
+
+
+def test_fully_resolved_pair_is_the_only_settled_obligation_state():
+    assert obligation_state(pair_state(_pair("complete", "complete"))) == "settled"
+
+
+@pytest.mark.parametrize(
+    ("hyperliquid", "bybit"),
+    [
+        ("none", "none"),
+        ("complete", "partial"),
+        ("overfilled", "complete"),
+        ("unknown", "complete"),
+    ],
+)
+def test_every_unresolved_pair_state_is_an_outstanding_obligation(hyperliquid, bybit):
+    assert obligation_state(pair_state(_pair(hyperliquid, bybit))) == "outstanding"
+
+
+def test_first_outstanding_observation_starts_the_pair_level_clock():
+    pair = pair_state(_pair("unknown", "complete"))
+    assert advance_obligation_clock(
+        None, pair=pair, observed_ns=100, max_outstanding_ns=0
+    ) == StateClock("active", 100, 100, False)
+
+
+@pytest.mark.parametrize(("observed_ns", "exceeded"), [(110, False), (111, True)])
+def test_outstanding_duration_exceeds_only_after_the_inclusive_limit(observed_ns, exceeded):
+    previous = StateClock("active", 100, 100, False)
+    pair = pair_state(_pair("complete", "partial"))
+    result = advance_obligation_clock(
+        previous, pair=pair, observed_ns=observed_ns, max_outstanding_ns=10
+    )
+    assert result.duration_exceeded is exceeded
+
+
+def test_settled_pair_clears_even_an_exceeded_obligation_clock():
+    previous = StateClock("active", 111, 100, True)
+    pair = pair_state(_pair("complete", "complete"))
+    assert advance_obligation_clock(
+        previous, pair=pair, observed_ns=112, max_outstanding_ns=10
+    ) == StateClock("inactive", 112, None, False)
+
+
+def test_obligation_clock_rejects_backward_observation_time():
+    previous = StateClock("active", 100, 100, False)
+    pair = pair_state(_pair("complete", "partial"))
+    with pytest.raises(ValueError, match="observed_ns"):
+        advance_obligation_clock(previous, pair=pair, observed_ns=99, max_outstanding_ns=10)
+
+
+def test_obligation_clock_rejects_different_state_at_the_same_time():
+    previous = StateClock("active", 100, 100, False)
+    settled = pair_state(_pair("complete", "complete"))
+    with pytest.raises(ValueError, match="same observed_ns"):
+        advance_obligation_clock(previous, pair=settled, observed_ns=100, max_outstanding_ns=10)
+
+
+def test_obligation_clock_rejects_untyped_pair_input():
+    with pytest.raises(TypeError, match="PairState"):
+        advance_obligation_clock(None, pair="outstanding", observed_ns=100, max_outstanding_ns=10)
+
+
+def test_obligation_wrapper_uses_the_shared_state_clock_function():
+    assert legs_module.advance_state_clock is clock_module.advance_state_clock
