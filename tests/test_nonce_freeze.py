@@ -149,3 +149,50 @@ def test_real_fence_invalidation_freezes_before_candidate_creation(tmp_path) -> 
     with pytest.raises(nonce.NonceFrozenError):
         allocator.allocate(now_ms=0, decided_ns=0)
     assert len(recorded) == 1
+
+
+def test_freeze_recorder_failure_leaves_memory_absorbed(tmp_path) -> None:
+    attempts = []
+
+    def fail_frozen(payload) -> None:
+        attempts.append(payload)
+        if payload["outcome"] == "frozen":
+            raise OSError("durable freeze write failed")
+
+    allocator, fence, _ = _allocator(
+        tmp_path, replayed_last=NOW_MS + DAY_MS - 2, recorder=fail_frozen,
+    )
+    allocated = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
+    with pytest.raises(OSError, match="durable freeze write failed"):
+        allocator.allocate(now_ms=NOW_MS, decided_ns=2)
+    assert allocator.frozen_reason == "clock_backward"
+    assert allocator.last_nonce == allocated
+    assert len(attempts) == 2 and attempts[-1]["outcome"] == "frozen"
+    with pytest.raises(nonce.NonceFrozenError) as raised:
+        allocator.allocate(now_ms=0, decided_ns=0)
+    assert raised.value.reason == "clock_backward" and len(attempts) == 2
+    fence.release()
+
+
+def test_non_fence_revalidation_error_propagates_without_freezing(tmp_path) -> None:
+    class ExplodingFence(nonce.SignerFence):
+        explode = False
+
+        def revalidate(self) -> None:
+            if self.explode:
+                raise OSError("unexpected revalidation failure")
+            super().revalidate()
+
+    fence = ExplodingFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    recorded = []
+    allocator = nonce.NonceAllocator(
+        fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
+        replayed_last=0, replayed_freeze_reason=None, recorder=recorded.append,
+    )
+    fence.explode = True
+    with pytest.raises(OSError, match="unexpected revalidation failure"):
+        allocator.allocate(now_ms=NOW_MS, decided_ns=1)
+    assert allocator.frozen_reason is None
+    assert allocator.last_nonce == 0 and recorded == []
+    fence.explode = False
+    fence.release()
