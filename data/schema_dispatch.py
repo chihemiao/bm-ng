@@ -54,6 +54,21 @@ DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
     "agent_wallet_rotation", "order_request", "writer_authority_promotion",
     "signer_nonce_allocation", "writer_lease_decision",
 }
+AUTHORIZATION_DENIAL_REASONS = frozenset(
+    {
+        "authorize_denied:pending_reconciliation:submit:action_not_authorized",
+        "authorize_denied:pending_reconciliation:reduce_only:action_not_authorized",
+        "authorize_denied:pending_reconciliation:close:action_not_authorized",
+        "authorize_denied:pending_reconciliation:market:action_not_authorized",
+        "authorize_denied:pending_reconciliation:modify:native_modify_disabled",
+        "authorize_denied:cancel_only:submit:action_not_authorized",
+        "authorize_denied:cancel_only:reduce_only:action_not_authorized",
+        "authorize_denied:cancel_only:close:action_not_authorized",
+        "authorize_denied:cancel_only:market:action_not_authorized",
+        "authorize_denied:cancel_only:modify:native_modify_disabled",
+        "authorize_denied:risk_increasing:modify:native_modify_disabled",
+    }
+)
 WRITER_DECISIONS = {
     ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
     ("deny", "cancel_only"): frozenset({"incumbent_other_wallet"}),
@@ -62,6 +77,7 @@ WRITER_DECISIONS = {
     ),
     ("release", "released"): frozenset({"lease_released"}),
     ("revalidate", "invalidated"): frozenset({"lock_inode_changed"}),
+    ("authorize", "denied"): AUTHORIZATION_DENIAL_REASONS,
 }
 PROMOTION_DECISIONS = {
     ("promoted", "pending_reconciliation", "risk_increasing", "admission_ready"):

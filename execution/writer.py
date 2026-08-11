@@ -222,12 +222,26 @@ class WriterLease:
         if action not in WRITER_ACTIONS:
             raise ValueError("unknown writer action")
         authority = self.revalidate()
+        cause = None
+        message = None
         if action == "modify":
-            raise WriterLeaseError("native_modify_disabled")
+            cause = message = "native_modify_disabled"
         allowed = CANCEL_ACTIONS if authority.mode != "risk_increasing" else WRITER_ACTIONS
-        if action not in allowed:
-            raise WriterLeaseError("writer action not authorized")
-        return authority
+        if action not in allowed and cause is None:
+            cause = "action_not_authorized"
+            message = "writer action not authorized"
+        if cause is None:
+            return authority
+        reason = f"authorize_denied:{authority.mode}:{action}:{cause}"
+        decision = _decision(
+            authority.identity, self.path, "authorize", "denied", reason,
+            authority.lease_epoch, self._prior_epoch_valid,
+        )
+        try:
+            self._recorder(decision)
+        except Exception as exc:
+            raise WriterLeaseError(message) from exc
+        raise WriterLeaseError(message)
 
     def elevate_to_risk_increasing(
         self, *, promotion_ns: int,

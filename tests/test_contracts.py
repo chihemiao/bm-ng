@@ -15,6 +15,9 @@ from data.contracts import (
     validate_manifest,
 )
 
+WRITER_MODES = ("pending_reconciliation", "cancel_only", "risk_increasing")
+WRITER_RISK_ACTIONS = ("submit", "reduce_only", "close", "market")
+
 LEGACY_PAYLOAD_SCHEMAS = frozenset(
     {
         "bybit_sequence_gap",
@@ -177,6 +180,23 @@ def test_writer_lease_decision_has_a_closed_action_matrix(
     assert validate_envelope(event) is event
 
 
+@pytest.mark.parametrize(
+    ("mode", "requested_action"),
+    [
+        *(("pending_reconciliation", action) for action in WRITER_RISK_ACTIONS),
+        *(("cancel_only", action) for action in WRITER_RISK_ACTIONS),
+        *((mode, "modify") for mode in WRITER_MODES),
+    ],
+)
+def test_writer_authorization_denial_has_a_closed_reason_matrix(
+    mode: str, requested_action: str
+) -> None:
+    cause = "native_modify_disabled" if requested_action == "modify" else "action_not_authorized"
+    reason = f"authorize_denied:{mode}:{requested_action}:{cause}"
+    event = _writer_event(action="authorize", outcome="denied", reason=reason)
+    assert validate_envelope(event) is event
+
+
 def test_writer_lease_decision_rejects_ambiguous_or_identifying_payloads() -> None:
     with pytest.raises(ContractError, match="writer decision combination"):
         validate_envelope(_writer_event(action="release", reason="lease_released"))
@@ -184,6 +204,13 @@ def test_writer_lease_decision_rejects_ambiguous_or_identifying_payloads() -> No
         validate_envelope(_writer_event(account_digest="raw-account-id"))
     with pytest.raises(ContractError, match="fields"):
         validate_envelope(_writer_event(account_id="raw-account-id"))
+    with pytest.raises(ContractError, match="writer decision combination"):
+        validate_envelope(
+            _writer_event(
+                action="authorize", outcome="denied",
+                reason="authorize_denied:risk_increasing:submit:action_not_authorized",
+            )
+        )
     event = _writer_event()
     event["event_kind"] = "ops"
     with pytest.raises(ContractError, match="event kind"):
