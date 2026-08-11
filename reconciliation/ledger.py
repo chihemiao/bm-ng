@@ -21,6 +21,14 @@ def _require(condition: bool, message: str) -> None:
         raise LedgerContractError(message)
 
 
+def _positive_int(value: object, name: str) -> int:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be an integer")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
+    return value
+
+
 def _amount(text: object) -> Decimal:
     _require(isinstance(text, str) and bool(text), "invalid canonical amount")
     try:
@@ -133,12 +141,13 @@ def reconcile_balance_ledger(
     return validate_balance_ledger(audit)
 
 
-def _known_collateral(
-    ledger: object, *, venue: str, asset: str
-) -> Decimal | None:
+def _validated_ledger(ledger: object, venue: str) -> BalanceLedger:
     if not isinstance(ledger, BalanceLedger):
         raise TypeError(f"{venue} must be a BalanceLedger")
-    validate_balance_ledger(ledger)
+    return validate_balance_ledger(ledger)
+
+
+def _known_collateral(ledger: BalanceLedger, asset: str) -> Decimal | None:
     if not ledger.self_consistent or ledger.unknown_entry_ids:
         return None
     return _balance_pairs(ledger.folded_balances).get(asset)
@@ -150,23 +159,30 @@ def total_collateral_usdc(
     bybit: BalanceLedger,
     rate: FxRate | None,
     now_ns: int,
-    max_age_ns: int,
+    max_fx_age_ns: int,
+    max_ledger_age_ns: int,
 ) -> Notional | None:
     """Aggregate replayable T0A collateral, or None when evidence is unknown."""
+    now = _positive_int(now_ns, "now_ns")
+    fx_age = _positive_int(max_fx_age_ns, "max_fx_age_ns")
+    ledger_age = _positive_int(max_ledger_age_ns, "max_ledger_age_ns")
+    hyperliquid_ledger = _validated_ledger(hyperliquid, "hyperliquid")
+    bybit_ledger = _validated_ledger(bybit, "bybit")
+    ledgers = (hyperliquid_ledger, bybit_ledger)
+    if not all(0 <= now - ledger.end_ns <= ledger_age for ledger in ledgers):
+        return None
     hyperliquid_amount = _known_collateral(
-        hyperliquid, venue="hyperliquid", asset=T0A_COLLATERAL_ASSETS[0][1]
+        hyperliquid_ledger, T0A_COLLATERAL_ASSETS[0][1]
     )
-    bybit_amount = _known_collateral(
-        bybit, venue="bybit", asset=T0A_COLLATERAL_ASSETS[1][1]
-    )
+    bybit_amount = _known_collateral(bybit_ledger, T0A_COLLATERAL_ASSETS[1][1])
     amounts = (hyperliquid_amount, bybit_amount)
     if any(amount is not None and amount < 0 for amount in amounts):
         raise ValueError("negative collateral cannot be represented as Notional")
     converted = convert_usdt_to_usdc(
         Decimal(0) if bybit_amount is None else bybit_amount,
         rate=rate,
-        now_ns=now_ns,
-        max_age_ns=max_age_ns,
+        now_ns=now,
+        max_age_ns=fx_age,
     )
     if hyperliquid_amount is None or bybit_amount is None or converted is None:
         return None
