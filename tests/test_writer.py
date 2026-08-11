@@ -46,7 +46,9 @@ import sys
 from pathlib import Path
 from execution.writer import WriterIdentity, WriterLease
 decisions = []
-lease = WriterLease.acquire(Path(sys.argv[1]), WriterIdentity(*sys.argv[2:]), decisions.append)
+lease = WriterLease.acquire(
+    Path(sys.argv[1]), WriterIdentity(*sys.argv[2:]), decisions.append, acquired_ns=100
+)
 print(f"{lease.authority.mode}:{lease.authority.lease_epoch}", flush=True)
 sys.stdin.readline(); lease.release()
 """
@@ -89,7 +91,9 @@ def _holder(root: Path, identity: WriterIdentity) -> subprocess.Popen[str]:
 
 def _acquire(root: Path, identity: WriterIdentity):
     decisions = []
-    return WriterLease.acquire(root, identity, decisions.append), decisions
+    return WriterLease.acquire(
+        root, identity, decisions.append, acquired_ns=100
+    ), decisions
 
 
 def _lease_for_mode(root: Path, mode: str) -> WriterLease:
@@ -97,7 +101,7 @@ def _lease_for_mode(root: Path, mode: str) -> WriterLease:
     if mode == "cancel_only":
         authority = WriterAuthority(identity, mode, 1)
         path = WriterLease.path_for(root, identity.account_id)
-        return WriterLease(path, authority, None, [].append, True)
+        return WriterLease(path, authority, None, [].append, True, acquired_ns=None)
     lease, _ = _acquire(root, identity)
     if mode == "risk_increasing":
         lease._authority = lease.authority._replace(mode=mode)
@@ -183,10 +187,12 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
     assert observer_events[-1].outcome == "cancel_only"
     denied = []
     with pytest.raises(WriterLeaseError, match="shared writer identity"):
-        WriterLease.acquire(tmp_path, _identity("two"), denied.append)
+        WriterLease.acquire(tmp_path, _identity("two"), denied.append, acquired_ns=100)
     assert denied[-1].reason == "shared_writer_identity"
     with pytest.raises(WriterLeaseError, match="shared writer identity"):
-        WriterLease.acquire(tmp_path, _identity("one", "b" * 64), denied.append)
+        WriterLease.acquire(
+            tmp_path, _identity("one", "b" * 64), denied.append, acquired_ns=100
+        )
     observer.release()
     assert len(observer_events) == 1
     owner.communicate("\n", timeout=5)
@@ -247,7 +253,7 @@ def test_symlink_and_replaced_inode_fail_closed(tmp_path: Path) -> None:
     path.symlink_to(tmp_path / "target")
     denied = []
     with pytest.raises(WriterLeaseError, match="unsafe lock file"):
-        WriterLease.acquire(tmp_path, _identity(), denied.append)
+        WriterLease.acquire(tmp_path, _identity(), denied.append, acquired_ns=100)
     assert denied[-1].reason == "unsafe_lock_file"
 
     path.unlink()
@@ -265,7 +271,7 @@ def test_writer_decisions_append_to_the_real_durable_replay(tmp_path: Path) -> N
     lock_root = tmp_path / "locks"
     lock_root.mkdir()
     writer, record = _shard_recorder(tmp_path / "events")
-    lease = WriterLease.acquire(lock_root, _identity(), record)
+    lease = WriterLease.acquire(lock_root, _identity(), record, acquired_ns=100)
     assert lease.revalidate() == lease.authority
     lease.release()
     writer.close()
@@ -285,12 +291,14 @@ def test_acquire_and_deny_never_return_when_evidence_fails(tmp_path: Path) -> No
     closed, record = _shard_recorder(tmp_path / "closed")
     closed.close()
     with pytest.raises(WriterLeaseError, match="evidence"):
-        WriterLease.acquire(lock_root, _identity(), record)
+        WriterLease.acquire(lock_root, _identity(), record, acquired_ns=100)
 
     owner, _ = _acquire(lock_root, _identity("owner", "b" * 64))
     assert owner.authority.lease_epoch == 2
     with pytest.raises(WriterLeaseError, match="evidence"):
-        WriterLease.acquire(lock_root, _identity("observer", "c" * 64), record)
+        WriterLease.acquire(
+            lock_root, _identity("observer", "c" * 64), record, acquired_ns=100
+        )
     owner.release()
 
 
@@ -300,7 +308,7 @@ def test_release_and_invalidation_preserve_primary_state_on_evidence_failure(
     lock_root = tmp_path / "locks"
     lock_root.mkdir()
     writer, record = _shard_recorder(tmp_path / "release-events")
-    lease = WriterLease.acquire(lock_root, _identity(), record)
+    lease = WriterLease.acquire(lock_root, _identity(), record, acquired_ns=100)
     writer.close()
     lease.release()
     assert "writer evidence recording failed" in capsys.readouterr().err
@@ -308,7 +316,9 @@ def test_release_and_invalidation_preserve_primary_state_on_evidence_failure(
     takeover.release()
 
     writer, record = _shard_recorder(tmp_path / "inode-events")
-    lease = WriterLease.acquire(lock_root, _identity("inode", "c" * 64), record)
+    lease = WriterLease.acquire(
+        lock_root, _identity("inode", "c" * 64), record, acquired_ns=100
+    )
     writer.close()
     os.unlink(lease.path)
     lease.path.write_text("{}")
