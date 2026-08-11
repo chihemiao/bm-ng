@@ -99,20 +99,15 @@ def _rotation_decision(
     )
 
 
-def rotate_agent_wallet(
-    lease: WriterLease,
-    old_registration: AgentWalletRegistration,
-    new_registration: AgentWalletRegistration,
-    recorder: Callable[[AgentWalletRotationDecision], None],
-    reacquire: Callable[[AgentWalletRegistration], WriterLease],
-    *,
-    now_ns: int,
-) -> WriterLease:
+def _validate_rotation_args(
+    lease: object, old: object, new: object,
+    recorder: object, reacquire: object, now_ns: object,
+) -> None:
     if not isinstance(lease, WriterLease):
         raise TypeError("lease must be a WriterLease")
-    if not isinstance(old_registration, AgentWalletRegistration):
+    if not isinstance(old, AgentWalletRegistration):
         raise TypeError("old_registration must be an AgentWalletRegistration")
-    if not isinstance(new_registration, AgentWalletRegistration):
+    if not isinstance(new, AgentWalletRegistration):
         raise TypeError("new_registration must be an AgentWalletRegistration")
     if not all((callable(recorder), callable(reacquire))):
         raise TypeError("rotation callbacks must be callable")
@@ -120,26 +115,72 @@ def rotate_agent_wallet(
         raise TypeError("now_ns must be an integer")
     if now_ns <= 0:
         raise ValueError("now_ns must be positive")
+
+
+def _record_abort(
+    recorder: Callable[[AgentWalletRotationDecision], None], identity: WriterIdentity,
+    old: AgentWalletRegistration, new: AgentWalletRegistration,
+    assessment: WalletAssessment, reason: str, now_ns: int,
+) -> None:
+    recorder(_rotation_decision(
+        identity, old, new, assessment, "aborted", reason, now_ns))
+
+
+def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistration,
+    new_registration: AgentWalletRegistration,
+    recorder: Callable[[AgentWalletRotationDecision], None],
+    reacquire: Callable[[AgentWalletRegistration], WriterLease], *, now_ns: int,
+) -> WriterLease:
+    _validate_rotation_args(
+        lease, old_registration, new_registration, recorder, reacquire, now_ns)
     assessment = assess(old_registration, now_ns)
     identity = lease.authority.identity
     if old_registration.wallet_fingerprint == new_registration.wallet_fingerprint:
-        recorder(_rotation_decision(
-            identity, old_registration, new_registration, assessment,
-            "aborted", "same_wallet", now_ns,
-        ))
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "same_wallet", now_ns)
         raise WriterLeaseError("wallet rotation uses the same wallet")
     if assessment == "active":
-        recorder(_rotation_decision(
-            identity, old_registration, new_registration, assessment,
-            "aborted", "not_due", now_ns,
-        ))
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "not_due", now_ns)
         raise WriterLeaseError("wallet rotation is not due")
-    lease.release()
-    new_lease = reacquire(new_registration)
-    decision = _rotation_decision(
-        identity, old_registration, new_registration, assessment,
-        "rotated", "rotation_completed", now_ns,
+    try:
+        lease.release()
+    except Exception:
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "release_failed", now_ns)
+        raise
+    try:
+        new_lease = reacquire(new_registration)
+    except Exception:
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "acquire_failed", now_ns)
+        raise
+    new_authority = new_lease.authority
+    if new_authority.mode == "cancel_only":
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "acquire_failed", now_ns)
+        new_lease.release()
+        raise WriterLeaseError("rotation aborted: acquire_failed (contended)")
+    expected = (identity.account_id, identity.instance_id, new_registration.wallet_fingerprint)
+    observed_identity = new_authority.identity
+    observed = (
+        observed_identity.account_id, observed_identity.instance_id,
+        observed_identity.wallet_fingerprint,
     )
+    if observed != expected:
+        _record_abort(
+            recorder, identity, old_registration, new_registration, assessment,
+            "identity_changed", now_ns)
+        new_lease.release()
+        raise WriterLeaseError("rotation aborted: identity_changed")
+    decision = _rotation_decision(
+        identity, old_registration, new_registration, assessment, "rotated",
+        "rotation_completed", now_ns)
     try:
         recorder(decision)
     except Exception as exc:
