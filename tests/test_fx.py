@@ -147,9 +147,7 @@ def test_stale_or_future_mark_is_unknown(observed_ns):
 
 
 def test_mark_at_the_inclusive_age_limit_is_still_fresh():
-    assert _notional(mark=_mark(observed_ns=100), now_ns=110, max_age_ns=10) == Decimal(
-        "1000.0050"
-    )
+    assert _notional(mark=_mark(observed_ns=100), now_ns=110, max_age_ns=10) == Decimal("1000.0050")
 
 
 @pytest.mark.parametrize(
@@ -197,9 +195,7 @@ def test_negative_delta_becomes_positive_notional_and_venue_is_only_evidence():
 
 
 def test_notional_does_not_round_or_quantize_the_decimal_product():
-    assert _notional("0.123456789", mark=_mark("65432.109876")) == Decimal(
-        "8078.038182786148164"
-    )
+    assert _notional("0.123456789", mark=_mark("65432.109876")) == Decimal("8078.038182786148164")
 
 
 @pytest.mark.parametrize(
