@@ -35,7 +35,9 @@ RECONCILIATION_SCHEMAS = frozenset(
 DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
     "order_request", "writer_authority_promotion", "writer_lease_decision",
 }
-ORDER_LEASE_FIELDS = ("account_digest", "lease_epoch", "writer_instance_id")
+ORDER_LEASE_FIELDS = (
+    "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
+)
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
 WRITER_DECISIONS = {
@@ -284,9 +286,9 @@ def order_request_is_legacy(event: dict[str, Any]) -> bool:
     if not has_sequence and not any(present):
         return True
     _require(has_sequence and all(present), "invalid order request lease binding")
-    account, epoch, instance = (payload[field] for field in ORDER_LEASE_FIELDS)
+    account, epoch, instance, wallet = (payload[field] for field in ORDER_LEASE_FIELDS)
     valid = _valid_digest(account) and type(epoch) is int and epoch > 0
-    valid &= _nonempty_text(instance)
+    valid &= _nonempty_text(instance) and _valid_digest(wallet)
     _require(valid, "invalid order request lease binding")
     return False
 
