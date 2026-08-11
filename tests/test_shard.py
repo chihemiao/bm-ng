@@ -13,6 +13,9 @@ shard_module = import_module("data.shard")
 ShardWriter = shard_module.ShardWriter
 load_manifest = shard_module.load_manifest
 replay_records = shard_module.replay_records
+ACCOUNT = "a" * 64
+WALLET = "b" * 64
+INSTANCE = "writer-one"
 
 
 def _ns(hour: int, minute: int = 0, second: int = 0) -> int:
@@ -58,8 +61,8 @@ def _writer_decision(sequence: int) -> dict:
         payload_schema="writer_lease_decision",
         payload={
             "action": "acquire", "outcome": "pending_reconciliation",
-            "reason": "lease_acquired", "account_digest": "a" * 64,
-            "instance_id": "writer-one", "wallet_fingerprint": "b" * 64,
+            "reason": "lease_acquired", "account_digest": ACCOUNT,
+            "instance_id": INSTANCE, "wallet_fingerprint": WALLET,
             "boot_id": "identity-boot", "lease_epoch": 1,
             "lock_path_digest": "c" * 64, "prior_epoch_valid": False,
         },
@@ -67,21 +70,50 @@ def _writer_decision(sequence: int) -> dict:
     return event
 
 
-def _order_request(sequence: int, **changes) -> dict:
-    event = _writer_decision(sequence)
+def _nonce_decision(sequence: int, allocated_nonce: int | None = 7, **changes) -> dict:
+    event = _ledger_event(sequence)
+    allocated = allocated_nonce is not None
     payload = {
-        "account_digest": "a" * 64,
-        "lease_epoch": 1,
-        "writer_instance_id": "writer-one",
-        "wallet_fingerprint": "b" * 64,
-        "allocated_nonce": 7,
+        "wallet_fingerprint": WALLET, "account_digest": ACCOUNT,
+        "instance_id": INSTANCE, "allocated_nonce": allocated_nonce,
+        "previous_nonce": allocated_nonce - 1 if allocated else 7,
+        "now_ms": allocated_nonce - 1 if allocated else 7,
+        "outcome": "allocated" if allocated else "frozen",
+        "reason": "nonce_allocated" if allocated else "clock_backward",
+        "decided_ns": sequence,
     }
     payload.update(changes)
     event.update(
-        event_kind="order", payload_schema="order_request", payload=payload,
-        identity_status="known", client_order_id="0xrequest", venue_order_id=None,
+        event_kind="decision", payload_schema="signer_nonce_allocation", payload=payload,
     )
     return event
+
+
+def _order_request(
+    sequence: int, *, client_order_id="0xrequest", venue="hyperliquid", **changes,
+) -> dict:
+    event = _writer_decision(sequence)
+    payload = {
+        "account_digest": ACCOUNT,
+        "lease_epoch": 1,
+        "writer_instance_id": INSTANCE,
+        "wallet_fingerprint": WALLET,
+        "allocated_nonce": None if venue == "bybit" else 7,
+    }
+    payload.update(changes)
+    event.update(
+        event_kind="order", payload_schema="order_request", payload=payload, venue=venue,
+        identity_status="known", client_order_id=client_order_id, venue_order_id=None,
+    )
+    return event
+
+
+def _replay_reasons(tmp_path: Path, *events: dict) -> tuple[str, ...]:
+    writer = ShardWriter(tmp_path, boot_id="boot-a")
+    for event in events:
+        writer.append_event(event)
+    writer.close()
+    return shard_module.replay_event_window(tmp_path, _ns(4), _ns(5)).freeze_reasons
 
 
 def test_hour_rotation_sidecars_append_only_manifest_and_replay(tmp_path: Path) -> None:
@@ -205,22 +237,23 @@ def test_replay_freezes_distinct_acquires_for_the_same_account_epoch(
 
 def test_order_request_replay_checks_only_matching_window_leases(tmp_path: Path) -> None:
     acquire = _writer_decision(1)
+    allocation = _nonce_decision(2)
     mismatch = _order_request(
-        2, writer_instance_id="writer-two", wallet_fingerprint="c" * 64
+        3, writer_instance_id="writer-two", wallet_fingerprint="c" * 64
     )
-    outside = _order_request(3, lease_epoch=2, wallet_fingerprint="c" * 64)
-    legacy = _order_request(4)
+    outside = _order_request(4, lease_epoch=2, wallet_fingerprint="c" * 64)
+    legacy = _order_request(5)
     legacy.pop("seq_within_boot")
     legacy["payload"] = {}
     writer = ShardWriter(tmp_path, boot_id="boot-a")
-    for event in (acquire, mismatch, outside):
+    for event in (acquire, allocation, mismatch, outside):
         writer.append_event(event)
     writer.append(shard_module.encode_event(legacy), legacy["recv_wall_ns"])
     writer.close()
 
     replay = shard_module.replay_event_window(tmp_path, _ns(4), _ns(5))
 
-    assert replay.events == (acquire, mismatch, outside, legacy)
+    assert replay.events == (acquire, allocation, mismatch, outside, legacy)
     assert replay.freeze_reasons == (
         "order_request:lease_binding_mismatch:" + "a" * 64 + ":1",
         "order_request:lease_wallet_mismatch:" + "a" * 64 + ":1",
@@ -229,6 +262,69 @@ def test_order_request_replay_checks_only_matching_window_leases(tmp_path: Path)
     with pytest.raises(ContractError, match="legacy order request"):
         rejected.append_event(legacy)
     rejected.close()
+
+
+@pytest.mark.parametrize(
+    "case", ["exact", "below_floor", "frozen_only", "same_client", "bybit"]
+)
+def test_order_nonce_join_accepts_safe_window_shapes(tmp_path: Path, case: str) -> None:
+    allocation = _nonce_decision(1)
+    request = _order_request(2)
+    events = {
+        "exact": (allocation, request),
+        "below_floor": (allocation, _order_request(2, allocated_nonce=5)),
+        "frozen_only": (_nonce_decision(1, None), _order_request(2, allocated_nonce=8)),
+        "same_client": (allocation, request, _order_request(3)),
+        "bybit": (allocation, _order_request(2, venue="bybit")),
+    }[case]
+    assert _replay_reasons(tmp_path, *events) == ()
+
+
+def test_order_nonce_join_reports_missing_allocation_above_floor(tmp_path: Path) -> None:
+    reasons = _replay_reasons(
+        tmp_path, _nonce_decision(1), _order_request(2, allocated_nonce=8)
+    )
+    assert reasons == (f"order_request:nonce_allocation_missing:{WALLET}:8",)
+
+
+def test_order_nonce_join_requires_allocation_to_precede_request(tmp_path: Path) -> None:
+    reasons = _replay_reasons(
+        tmp_path, _order_request(1, allocated_nonce=8), _nonce_decision(2, 8)
+    )
+    assert reasons == (f"order_request:nonce_allocation_not_prior:{WALLET}:8",)
+
+
+@pytest.mark.parametrize(
+    "changes", [{"account_digest": "d" * 64}, {"writer_instance_id": "writer-two"}]
+)
+def test_order_nonce_join_reports_signer_binding_mismatch(
+    tmp_path: Path, changes: dict,
+) -> None:
+    reasons = _replay_reasons(tmp_path, _nonce_decision(1), _order_request(2, **changes))
+    assert reasons == (f"order_request:nonce_allocation_binding_mismatch:{WALLET}:7",)
+
+
+def test_other_wallet_allocation_does_not_satisfy_request_join(tmp_path: Path) -> None:
+    reasons = _replay_reasons(
+        tmp_path, _nonce_decision(1), _nonce_decision(2, 8, wallet_fingerprint="c" * 64),
+        _order_request(3, allocated_nonce=8),
+    )
+    assert reasons == (f"order_request:nonce_allocation_missing:{WALLET}:8",)
+
+
+def test_nonce_reuse_across_client_order_ids_freezes_once(tmp_path: Path) -> None:
+    reasons = _replay_reasons(
+        tmp_path, _nonce_decision(1), _order_request(2, client_order_id="0xone"),
+        _order_request(3, client_order_id="0xtwo"),
+    )
+    assert reasons == (f"order_request:nonce_reuse:{WALLET}:7",)
+
+
+def test_binding_mismatch_precedes_not_prior_reason(tmp_path: Path) -> None:
+    reasons = _replay_reasons(
+        tmp_path, _order_request(1), _nonce_decision(2, account_digest="d" * 64)
+    )
+    assert reasons == (f"order_request:nonce_allocation_binding_mismatch:{WALLET}:7",)
 
 
 def test_replay_deduplicates_exact_events_and_freezes_conflicts(tmp_path: Path) -> None:
