@@ -89,3 +89,19 @@ def test_cancel_only_elevation_rejects_mode_before_time_comparison(tmp_path: Pat
     lease = WriterLease(path, authority, None, [].append, True, acquired_ns=None)
     with pytest.raises(WriterLeaseError, match="not promotable"):
         lease.elevate_to_risk_increasing(promotion_ns=1, before_elevate=lambda _: None)
+
+
+@pytest.mark.parametrize(
+    ("promotion_ns", "before_elevate", "message"),
+    [("100", lambda _: None, "promotion_ns"), (100, None, "before_elevate")],
+)
+def test_structural_elevation_errors_precede_inode_revalidation(
+    tmp_path: Path, promotion_ns: object, before_elevate: object, message: str
+) -> None:
+    lease = _acquire(tmp_path)
+    lease.path.unlink()
+    lease.path.touch()
+    with pytest.raises(TypeError, match=message):
+        lease.elevate_to_risk_increasing(
+            promotion_ns=promotion_ns, before_elevate=before_elevate
+        )
