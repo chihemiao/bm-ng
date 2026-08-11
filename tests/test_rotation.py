@@ -27,6 +27,10 @@ sys.stdin.readline(); lease.release()
 """
 
 
+class ProcessInterrupt(BaseException):
+    pass
+
+
 def _registration(fingerprint: str, issued_ns: int = ISSUED_NS):
     return AgentWalletRegistration(fingerprint, issued_ns, issued_ns + VALIDITY_NS)
 
@@ -182,7 +186,6 @@ def test_real_reacquire_exception_records_acquire_failed(tmp_path: Path) -> None
 def test_cancel_only_reacquire_is_recorded_then_released(tmp_path: Path) -> None:
     old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
     lease, decisions, acquired = _lease(tmp_path, old.wallet_fingerprint), [], []
-
     def reacquire(_):
         incumbent = _identity("c" * 64, instance="competitor")
         acquired.append(_under_contention(
@@ -193,7 +196,9 @@ def test_cancel_only_reacquire_is_recorded_then_released(tmp_path: Path) -> None
         assert acquired[-1].authority.mode == "cancel_only"
         decisions.append(decision)
 
-    with pytest.raises(WriterLeaseError, match="acquisition failed"):
+    with pytest.raises(
+        WriterLeaseError, match=r"^rotation aborted: acquire_failed \(contended\)$"
+    ):
         wallet_module.rotate_agent_wallet(lease, old, new, record, reacquire, now_ns=DUE_NS)
     assert decisions == [_expected(
         old, new, DUE_NS, "rotation_due", "aborted", "acquire_failed")]
@@ -221,7 +226,7 @@ def test_reacquired_identity_is_checked_before_recorded_cleanup(
         assert acquired[-1].authority.mode == "pending_reconciliation"
         decisions.append(decision)
 
-    with pytest.raises(WriterLeaseError, match="identity changed"):
+    with pytest.raises(WriterLeaseError, match=r"^rotation aborted: identity_changed$"):
         wallet_module.rotate_agent_wallet(lease, old, new, record, reacquire, now_ns=DUE_NS)
     assert decisions == [_expected(
         old, new, DUE_NS, "rotation_due", "aborted", "identity_changed")]
@@ -229,26 +234,26 @@ def test_reacquired_identity_is_checked_before_recorded_cleanup(
         _ = acquired[-1].authority
 
 
-def test_release_evidence_failure_is_suppressed_and_rotation_continues(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("stage", ["release", "reacquire"])
+def test_process_interrupt_is_not_recorded_as_rotation_failure(
+    tmp_path: Path, stage: str
 ) -> None:
     old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
-    closed = ShardWriter(tmp_path / "closed", "boot")
+    decisions = []
 
     def writer_record(decision):
-        if decision.action == "release":
-            closed.append(b"decision", DUE_NS)
+        if stage == "release" and decision.action == "release":
+            raise ProcessInterrupt
 
     lease = WriterLease.acquire(
         tmp_path, _identity(old.wallet_fingerprint), writer_record, acquired_ns=100)
-    closed.close()
-    decisions = []
-    result = wallet_module.rotate_agent_wallet(
-        lease, old, new, decisions.append,
-        lambda registration: _lease(tmp_path, registration.wallet_fingerprint),
-        now_ns=DUE_NS,
-    )
-    assert decisions == [_expected(
-        old, new, DUE_NS, "rotation_due", "rotated", "rotation_completed")]
-    assert "writer evidence recording failed" in capsys.readouterr().err
-    result.release()
+
+    def reacquire(_):
+        if stage == "reacquire":
+            raise ProcessInterrupt
+        pytest.fail("reacquired after release interrupt")
+
+    with pytest.raises(ProcessInterrupt):
+        wallet_module.rotate_agent_wallet(
+            lease, old, new, decisions.append, reacquire, now_ns=DUE_NS)
+    assert decisions == []
