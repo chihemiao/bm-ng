@@ -4,7 +4,6 @@ import pytest
 
 import research.venue_probe as venue_probe
 
-
 ASSEMBLY_PARAMETERS = (
     "probe_id",
     "attempt_ordinal",
