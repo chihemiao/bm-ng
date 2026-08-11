@@ -100,7 +100,7 @@ def test_clock_forward_is_not_an_allocatable_freeze_reason() -> None:
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
-        ({"reason": "clock_forward"}, "allocated requires reason"),
+        ({"reason": "clock_backward"}, "allocated requires reason"),
         ({"outcome": "frozen", "reason": "nonce_allocated", "allocated_nonce": None},
          "reason nonce_allocated requires outcome"),
         ({"outcome": "frozen", "reason": "clock_backward"}, "must be null"),
