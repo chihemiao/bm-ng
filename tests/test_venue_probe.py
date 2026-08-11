@@ -227,13 +227,17 @@ def test_failed_control_makes_single_probe_inconclusive(
     assert venue_probe.single_probe_verdicts(rows)[verdict_key] == "inconclusive"
 
 
-@pytest.mark.parametrize(
-    ("http_status", "code"), [(500, "rejected"), (200, None)]
-)
-def test_transport_failure_or_uncoded_error_is_inconclusive(http_status, code):
+def test_uncoded_application_rejection_confirms_single_probe():
     rows = _dataset()
     experimental = _probe_row(rows, "B1_duplicate", 2)
-    _set_outcome(experimental, "err", code, http_status)
+    _set_outcome(experimental, "err", None, 200)
+    assert venue_probe.single_probe_verdicts(rows)["B1_duplicate"] == "confirms"
+
+
+def test_transport_failure_is_inconclusive():
+    rows = _dataset()
+    experimental = _probe_row(rows, "B1_duplicate", 2)
+    _set_outcome(experimental, "err", "rejected", 500)
     assert venue_probe.single_probe_verdicts(rows)["B1_duplicate"] == "inconclusive"
 
 
