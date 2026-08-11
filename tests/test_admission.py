@@ -1,9 +1,16 @@
+from decimal import Decimal
+
 import pytest
 
-from reconciliation.admission import decide_continuous_admission
+from reconciliation.admission import (
+    CONTINUOUS_ADMISSION_REASON_KEYS,
+    decide_continuous_admission,
+)
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
 from reconciliation.legs import PairState
+from reconciliation.promotion import demotion_reason
 from reconciliation.state import AdmissionDecision, StartupContractError
 
 
@@ -39,6 +46,8 @@ def _continuous(**changes) -> AdmissionDecision:
         "pair": PairState("balanced", ()),
         "agent_wallet_status": "active",
         "nonce_freeze_reason": None,
+        "naked_notional": Notional(Decimal(0), "USDC"),
+        "max_naked_notional": Notional(Decimal("1000"), "USDC"),
     }
     values.update(changes)
     return decide_continuous_admission(**values)
@@ -125,3 +134,73 @@ def test_all_continuous_freeze_reasons_accumulate_canonically() -> None:
             }
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("amount", "maximum", "action", "reasons"),
+    [
+        ("999", "1000", "ready", ()),
+        ("1000", "1000", "ready", ()),
+        ("1001", "1000", "cancel_only_freeze", ("continuous_admission:notional_exceeded",)),
+        ("0", "0", "ready", ()),
+        ("0.01", "0", "cancel_only_freeze", ("continuous_admission:notional_exceeded",)),
+    ],
+)
+def test_notional_limit_has_an_inclusive_safe_boundary(amount, maximum, action, reasons):
+    decision = _continuous(
+        naked_notional=Notional(Decimal(amount), "USDC"),
+        max_naked_notional=Notional(Decimal(maximum), "USDC"),
+    )
+    assert decision == AdmissionDecision(action, reasons)
+
+
+def test_unknown_notional_freezes_with_exact_reason() -> None:
+    assert _continuous(naked_notional=None) == AdmissionDecision(
+        "cancel_only_freeze", ("continuous_admission:notional_unknown",)
+    )
+
+
+def test_notional_and_limit_quotes_must_match() -> None:
+    with pytest.raises(ValueError, match="quote"):
+        _continuous(naked_notional=Notional(Decimal("1"), "USDT"))
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"naked_notional": Decimal("1")}, "naked_notional"),
+        ({"max_naked_notional": Decimal("1")}, "max_naked_notional"),
+        ({"max_naked_notional": None}, "max_naked_notional"),
+    ],
+)
+def test_continuous_admission_requires_typed_notionals(changes, message) -> None:
+    with pytest.raises(TypeError, match=message):
+        _continuous(**changes)
+
+
+def test_notional_reason_accumulates_with_existing_freeze_reasons() -> None:
+    decision = _continuous(
+        exposure=None,
+        naked_notional=Notional(Decimal("1001"), "USDC"),
+    )
+    assert decision.reasons == (
+        "continuous_admission:exposure_unobserved",
+        "continuous_admission:notional_exceeded",
+    )
+
+
+def test_continuous_reason_key_set_has_twelve_members() -> None:
+    assert len(CONTINUOUS_ADMISSION_REASON_KEYS) == 12
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "continuous_admission:notional_exceeded",
+        "continuous_admission:notional_unknown",
+    ],
+)
+def test_notional_reason_keys_are_valid_demotion_evidence(reason: str) -> None:
+    assert reason in CONTINUOUS_ADMISSION_REASON_KEYS
+    admission = AdmissionDecision("cancel_only_freeze", (reason,))
+    assert demotion_reason(admission) == f"writer_demoted:{reason}"

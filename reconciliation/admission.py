@@ -2,6 +2,7 @@
 
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
 from reconciliation.legs import PairState
 from reconciliation.state import AdmissionDecision
 
@@ -21,6 +22,8 @@ CONTINUOUS_ADMISSION_REASONS = {
         "pair_unknown",
         "agent_wallet_expired",
         "nonce_frozen",
+        "notional_exceeded",
+        "notional_unknown",
     )
 }
 CONTINUOUS_ADMISSION_REASON_KEYS = frozenset(CONTINUOUS_ADMISSION_REASONS.values())
@@ -42,6 +45,8 @@ def _validate_inputs(
     pair: PairState,
     wallet_status: str,
     nonce_reason: str | None,
+    naked: Notional | None,
+    maximum: Notional,
 ) -> None:
     if exposure is not None:
         _validate_clock(exposure, ExposureClock, EXPOSURE_STATES, "exposure")
@@ -57,6 +62,16 @@ def _validate_inputs(
         raise ValueError("agent_wallet_status is invalid")
     if nonce_reason is not None and (type(nonce_reason) is not str or not nonce_reason):
         raise TypeError("nonce_freeze_reason must be a nonempty string or None")
+    _validate_notionals(naked, maximum)
+
+
+def _validate_notionals(naked: Notional | None, maximum: Notional) -> None:
+    if naked is not None and not isinstance(naked, Notional):
+        raise TypeError("naked_notional must be Notional or None")
+    if not isinstance(maximum, Notional):
+        raise TypeError("max_naked_notional must be Notional")
+    if naked is not None and naked.quote != maximum.quote:
+        raise ValueError("notional quote mismatch")
 
 
 def _exposure_reasons(exposure: ExposureClock | None) -> list[str]:
@@ -82,6 +97,14 @@ def _obligation_reasons(obligation: StateClock | None) -> list[str]:
     return []
 
 
+def _notional_reasons(naked: Notional | None, maximum: Notional) -> list[str]:
+    if naked is None:
+        return [CONTINUOUS_ADMISSION_REASONS["notional_unknown"]]
+    if naked.amount > maximum.amount:
+        return [CONTINUOUS_ADMISSION_REASONS["notional_exceeded"]]
+    return []
+
+
 def decide_continuous_admission(
     *,
     exposure: ExposureClock | None,
@@ -89,10 +112,24 @@ def decide_continuous_admission(
     pair: PairState,
     agent_wallet_status: str,
     nonce_freeze_reason: str | None,
+    naked_notional: Notional | None,
+    max_naked_notional: Notional,
 ) -> AdmissionDecision:
     """Allow new risk only when every observed runtime condition is safe."""
-    _validate_inputs(exposure, obligation, pair, agent_wallet_status, nonce_freeze_reason)
-    reasons = [*_exposure_reasons(exposure), *_obligation_reasons(obligation)]
+    _validate_inputs(
+        exposure,
+        obligation,
+        pair,
+        agent_wallet_status,
+        nonce_freeze_reason,
+        naked_notional,
+        max_naked_notional,
+    )
+    reasons = [
+        *_exposure_reasons(exposure),
+        *_obligation_reasons(obligation),
+        *_notional_reasons(naked_notional, max_naked_notional),
+    ]
     if pair.state == "unknown":
         reasons.append(CONTINUOUS_ADMISSION_REASONS["pair_unknown"])
     if agent_wallet_status == "expired":
