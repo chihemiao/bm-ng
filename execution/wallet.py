@@ -80,7 +80,7 @@ class AgentWalletRotationDecision:
 
 
 class RotationRecordError(RuntimeError):
-    def __init__(self, lease: WriterLease, cause: Exception):
+    def __init__(self, lease: WriterLease, cause: BaseException):
         super().__init__("wallet rotation evidence recording failed")
         self.lease, self.cause = lease, cause
 
@@ -126,6 +126,17 @@ def _record_abort(
         identity, old, new, assessment, "aborted", reason, now_ns))
 
 
+def _record_lease_abort(
+    recorder: Callable[[AgentWalletRotationDecision], None], lease: WriterLease,
+    identity: WriterIdentity, old: AgentWalletRegistration,
+    new: AgentWalletRegistration, assessment: WalletAssessment, reason: str, now_ns: int,
+) -> None:
+    try:
+        _record_abort(recorder, identity, old, new, assessment, reason, now_ns)
+    except BaseException as exc:
+        raise RotationRecordError(lease, exc) from exc
+
+
 def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistration,
     new_registration: AgentWalletRegistration,
     recorder: Callable[[AgentWalletRotationDecision], None],
@@ -161,9 +172,9 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
         raise
     new_authority = new_lease.authority
     if new_authority.mode == "cancel_only":
-        _record_abort(
-            recorder, identity, old_registration, new_registration, assessment,
-            "acquire_failed", now_ns)
+        _record_lease_abort(
+            recorder, new_lease, identity, old_registration, new_registration,
+            assessment, "acquire_failed", now_ns)
         new_lease.release()
         raise WriterLeaseError("rotation aborted: acquire_failed (contended)")
     expected = (identity.account_id, identity.instance_id, new_registration.wallet_fingerprint)
@@ -173,9 +184,9 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
         observed_identity.wallet_fingerprint,
     )
     if observed != expected:
-        _record_abort(
-            recorder, identity, old_registration, new_registration, assessment,
-            "identity_changed", now_ns)
+        _record_lease_abort(
+            recorder, new_lease, identity, old_registration, new_registration,
+            assessment, "identity_changed", now_ns)
         new_lease.release()
         raise WriterLeaseError("rotation aborted: identity_changed")
     decision = _rotation_decision(
@@ -183,7 +194,7 @@ def rotate_agent_wallet(lease: WriterLease, old_registration: AgentWalletRegistr
         "rotation_completed", now_ns)
     try:
         recorder(decision)
-    except Exception as exc:
+    except BaseException as exc:
         raise RotationRecordError(new_lease, exc) from exc
     return new_lease
 
