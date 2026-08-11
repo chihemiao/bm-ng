@@ -24,11 +24,15 @@ class AgentWalletRegistration:
             raise TypeError("issued_ns must be an integer")
         if self.issued_ns <= 0:
             raise ValueError("issued_ns must be positive")
+        if type(self.expires_ns) is not int:
+            raise TypeError("expires_ns must be an integer")
         if self.expires_ns != self.issued_ns + VALIDITY_NS:
             raise ValueError("expires_ns must equal issued_ns plus validity")
 
 
 def assess(registration: AgentWalletRegistration, now_ns: int) -> WalletAssessment:
+    if not isinstance(registration, AgentWalletRegistration):
+        raise TypeError("registration must be an AgentWalletRegistration")
     if type(now_ns) is not int:
         raise TypeError("now_ns must be an integer")
     if now_ns < registration.issued_ns:
