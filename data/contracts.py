@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+DAY_NS = 86_400 * 1_000_000_000
+VALIDITY_NS = 30 * DAY_NS
+ROTATION_LEAD_NS = 7 * DAY_NS
+
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 PAYLOAD_SCHEMAS = frozenset(
     {
