@@ -1,8 +1,11 @@
+import hashlib
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Literal
 
 from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
 from data.schema_wallet import wallet_rotation_semantic_errors
+from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 
 WalletAssessment = Literal["active", "rotation_due", "expired"]
 
@@ -74,6 +77,74 @@ class AgentWalletRotationDecision:
             asdict(self), validity_ns=VALIDITY_NS, rotation_lead_ns=ROTATION_LEAD_NS
         )
         _decision_require(not errors, errors[0] if errors else "")
+
+
+class RotationRecordError(RuntimeError):
+    def __init__(self, lease: WriterLease, cause: Exception):
+        super().__init__("wallet rotation evidence recording failed")
+        self.lease, self.cause = lease, cause
+
+
+def _rotation_decision(
+    identity: WriterIdentity, old: AgentWalletRegistration, new: AgentWalletRegistration,
+    assessment: WalletAssessment,
+    outcome: str, reason: str, now_ns: int,
+) -> AgentWalletRotationDecision:
+    return AgentWalletRotationDecision(
+        hashlib.sha256(identity.account_id.encode()).hexdigest(),
+        identity.instance_id, identity.boot_id,
+        old.wallet_fingerprint, new.wallet_fingerprint,
+        old.issued_ns, old.expires_ns, new.issued_ns, new.expires_ns,
+        assessment, outcome, reason, now_ns,
+    )
+
+
+def rotate_agent_wallet(
+    lease: WriterLease,
+    old_registration: AgentWalletRegistration,
+    new_registration: AgentWalletRegistration,
+    recorder: Callable[[AgentWalletRotationDecision], None],
+    reacquire: Callable[[AgentWalletRegistration], WriterLease],
+    *,
+    now_ns: int,
+) -> WriterLease:
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be a WriterLease")
+    if not isinstance(old_registration, AgentWalletRegistration):
+        raise TypeError("old_registration must be an AgentWalletRegistration")
+    if not isinstance(new_registration, AgentWalletRegistration):
+        raise TypeError("new_registration must be an AgentWalletRegistration")
+    if not all((callable(recorder), callable(reacquire))):
+        raise TypeError("rotation callbacks must be callable")
+    if type(now_ns) is not int:
+        raise TypeError("now_ns must be an integer")
+    if now_ns <= 0:
+        raise ValueError("now_ns must be positive")
+    assessment = assess(old_registration, now_ns)
+    identity = lease.authority.identity
+    if old_registration.wallet_fingerprint == new_registration.wallet_fingerprint:
+        recorder(_rotation_decision(
+            identity, old_registration, new_registration, assessment,
+            "aborted", "same_wallet", now_ns,
+        ))
+        raise WriterLeaseError("wallet rotation uses the same wallet")
+    if assessment == "active":
+        recorder(_rotation_decision(
+            identity, old_registration, new_registration, assessment,
+            "aborted", "not_due", now_ns,
+        ))
+        raise WriterLeaseError("wallet rotation is not due")
+    lease.release()
+    new_lease = reacquire(new_registration)
+    decision = _rotation_decision(
+        identity, old_registration, new_registration, assessment,
+        "rotated", "rotation_completed", now_ns,
+    )
+    try:
+        recorder(decision)
+    except Exception as exc:
+        raise RotationRecordError(new_lease, exc) from exc
+    return new_lease
 
 
 def assess(registration: AgentWalletRegistration, now_ns: int) -> WalletAssessment:
