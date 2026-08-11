@@ -1,9 +1,9 @@
 import pytest
 
+from reconciliation.admission import decide_continuous_admission
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock
 from reconciliation.legs import PairState
-from reconciliation.admission import decide_continuous_admission
 from reconciliation.state import AdmissionDecision, StartupContractError
 
 
@@ -20,7 +20,8 @@ from reconciliation.state import AdmissionDecision, StartupContractError
     ],
 )
 def test_admission_decision_rejects_inconsistent_direct_construction(
-    action: object, reasons: object,
+    action: object,
+    reasons: object,
 ) -> None:
     with pytest.raises(StartupContractError):
         AdmissionDecision(action, reasons)  # type: ignore[arg-type]
