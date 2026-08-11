@@ -5,6 +5,19 @@ from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
+class Notional:
+    amount: Decimal
+    quote: str
+
+    def __post_init__(self) -> None:
+        if type(self.amount) is not Decimal:
+            raise TypeError("notional amount must be Decimal")
+        if not self.amount.is_finite() or self.amount < 0:
+            raise ValueError("notional amount must be finite and nonnegative")
+        _nonempty_text(self.quote, "notional quote")
+
+
+@dataclass(frozen=True, slots=True)
 class FxRate:
     base: str
     quote: str
@@ -99,7 +112,7 @@ def naked_notional(
     expected_quote: str,
     now_ns: int,
     max_age_ns: int,
-) -> Decimal | None:
+) -> Notional | None:
     """Value absolute base exposure, or None when quantity or price is unknown."""
     if delta is not None and type(delta) is not Decimal:
         raise TypeError("delta must be Decimal or None")
@@ -119,4 +132,4 @@ def naked_notional(
     age_ns = now - mark.observed_ns
     if not 0 <= age_ns <= max_age:
         return None
-    return abs(delta) * mark.price
+    return Notional(abs(delta) * mark.price, mark.quote)
