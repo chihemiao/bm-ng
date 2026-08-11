@@ -235,30 +235,83 @@ def _semantic_conflict(
     return None
 
 
+def _nonce_request_conflict(
+    index: int,
+    event: dict[str, Any],
+    allocations: dict[tuple[str, int], tuple[int, dict[str, Any]]],
+    floors: dict[str, int],
+) -> str | None:
+    if event["venue"] != "hyperliquid":
+        return None
+    request = event["payload"]
+    wallet, nonce = request["wallet_fingerprint"], request["allocated_nonce"]
+    floor = floors.get(wallet)
+    if floor is None or nonce < floor:
+        return None
+    suffix = f"{wallet}:{nonce}"
+    allocation = allocations.get((wallet, nonce))
+    if allocation is None:
+        return f"order_request:nonce_allocation_missing:{suffix}"
+    allocation_index, payload = allocation
+    matches = payload["account_digest"] == request["account_digest"]
+    matches &= payload["instance_id"] == request["writer_instance_id"]
+    if not matches:
+        return f"order_request:nonce_allocation_binding_mismatch:{suffix}"
+    if allocation_index >= index:
+        return f"order_request:nonce_allocation_not_prior:{suffix}"
+    return None
+
+
+def _lease_request_conflicts(
+    payload: dict[str, Any], leases: dict[tuple[str, int], tuple[str, str]],
+) -> set[str]:
+    conflicts = set()
+    key = payload["account_digest"], payload["lease_epoch"]
+    if key not in leases:
+        return conflicts
+    account, epoch = key
+    instance_id, wallet_fingerprint = leases[key]
+    if instance_id != payload["writer_instance_id"]:
+        conflicts.add(f"order_request:lease_binding_mismatch:{account}:{epoch}")
+    if wallet_fingerprint != payload["wallet_fingerprint"]:
+        conflicts.add(f"order_request:lease_wallet_mismatch:{account}:{epoch}")
+    return conflicts
+
+
 def _order_binding_conflicts(events: list[dict[str, Any]]) -> set[str]:
     leases: dict[tuple[str, int], tuple[str, str]] = {}
+    allocations: dict[tuple[str, int], tuple[int, dict[str, Any]]] = {}
+    floors: dict[str, int] = {}
+    clients: dict[tuple[str, int], set[str]] = {}
     requests = []
-    for event in events:
+    for index, event in enumerate(events):
         payload = event["payload"]
-        if event["payload_schema"] == "writer_lease_decision":
-            if (payload["action"], payload["outcome"]) == ("acquire", "pending_reconciliation"):
-                leases.setdefault(
-                    (payload["account_digest"], payload["lease_epoch"]),
-                    (payload["instance_id"], payload["wallet_fingerprint"]),
-                )
-        elif event["payload_schema"] == "order_request" and not order_request_is_legacy(event):
-            requests.append(payload)
+        schema = event["payload_schema"]
+        if schema == "writer_lease_decision" and (
+            payload["action"], payload["outcome"]
+        ) == ("acquire", "pending_reconciliation"):
+            leases.setdefault(
+                (payload["account_digest"], payload["lease_epoch"]),
+                (payload["instance_id"], payload["wallet_fingerprint"]),
+            )
+        elif schema == "signer_nonce_allocation" and payload["outcome"] == "allocated":
+            wallet, nonce = payload["wallet_fingerprint"], payload["allocated_nonce"]
+            allocations.setdefault((wallet, nonce), (index, payload))
+            floors[wallet] = min(nonce, floors.get(wallet, nonce))
+        elif schema == "order_request" and not order_request_is_legacy(event):
+            requests.append((index, event))
+            if event["venue"] == "hyperliquid":
+                key = payload["wallet_fingerprint"], payload["allocated_nonce"]
+                clients.setdefault(key, set()).add(event["client_order_id"])
     conflicts = set()
-    for payload in requests:
-        key = payload["account_digest"], payload["lease_epoch"]
-        if key not in leases:
-            continue
-        account, epoch = key
-        instance_id, wallet_fingerprint = leases[key]
-        if instance_id != payload["writer_instance_id"]:
-            conflicts.add(f"order_request:lease_binding_mismatch:{account}:{epoch}")
-        if wallet_fingerprint != payload["wallet_fingerprint"]:
-            conflicts.add(f"order_request:lease_wallet_mismatch:{account}:{epoch}")
+    for index, event in requests:
+        reason = _nonce_request_conflict(index, event, allocations, floors)
+        if reason is not None:
+            conflicts.add(reason)
+        conflicts.update(_lease_request_conflicts(event["payload"], leases))
+    for (wallet, nonce), client_ids in clients.items():
+        if len(client_ids) > 1:
+            conflicts.add(f"order_request:nonce_reuse:{wallet}:{nonce}")
     return conflicts
 
 
