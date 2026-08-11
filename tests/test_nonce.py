@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from data import schema_nonce
 from data.contracts import PAYLOAD_SCHEMAS, ContractError, validate_envelope
 from execution import nonce
 from execution.nonce import SignerFence, SignerFenceError, path_for
@@ -149,6 +150,23 @@ def test_consecutive_allocations_are_strictly_increasing(make_nonce_allocator) -
     allocator, fence, _ = make_nonce_allocator(replayed_last=NOW_MS)
     first = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
     assert allocator.allocate(now_ms=NOW_MS, decided_ns=2) == first + 1
+    fence.release()
+
+
+def test_nonce_window_rule_has_one_owner_and_shared_boundary(
+    make_nonce_allocator,
+) -> None:
+    from execution import orders
+
+    assert nonce.signer_nonce_window_bounds is schema_nonce.signer_nonce_window_bounds
+    assert orders.signer_nonce_window_bounds is schema_nonce.signer_nonce_window_bounds
+    allocator, fence, recorded = make_nonce_allocator(
+        replayed_last=NOW_MS + DAY_MS - 2,
+    )
+    assert allocator.allocate(now_ms=NOW_MS, decided_ns=7) == NOW_MS + DAY_MS - 1
+    event = _nonce_event()
+    event["payload"] = recorded[0]
+    assert validate_envelope(event) is event
     fence.release()
 
 

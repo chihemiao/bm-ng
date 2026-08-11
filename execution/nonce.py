@@ -7,7 +7,7 @@ import stat
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
-from data.schema_nonce import DAY_MS
+from data.schema_nonce import signer_nonce_window_bounds
 from execution.writer import WriterLease
 
 NONCE_EVENT_SCHEMA = "signer_nonce_allocation"
@@ -315,8 +315,9 @@ class NonceAllocator:
         except SignerFenceError:
             self._freeze("fence_invalidated", now_ms=now_ms, decided_ns=decided_ns)
         candidate = max(self._last, now_ms) + 1
-        assert candidate > now_ms - 2 * DAY_MS  # Unreachable lower bound by construction.
-        if candidate >= now_ms + DAY_MS:
+        window = signer_nonce_window_bounds(nonce=candidate, now_ms=now_ms)
+        assert window.lower_ok  # Unreachable lower bound by construction.
+        if not window.upper_ok:
             self._freeze("clock_backward", now_ms=now_ms, decided_ns=decided_ns)
         payload = {
             "wallet_fingerprint": self._fence.wallet_fingerprint,
