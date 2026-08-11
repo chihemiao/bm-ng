@@ -7,35 +7,21 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from data.schema_dispatch import (
+    COMMON_FIELDS,
     DURABLE_EVENT_SCHEMAS,
     EVENT_KINDS,
+    IDENTITY_STATUSES,
+    LEDGER_KINDS,
+    ORDER_LEASE_FIELDS,
     PAYLOAD_SCHEMAS,
     PROMOTION_DECISIONS,
     RECONCILIATION_SCHEMAS,
     ROTATION_LEAD_NS,
+    SURFACES,
     VALIDITY_NS,
     WRITER_DECISIONS,
 )
 from data.schema_wallet import wallet_rotation_semantic_errors as _wallet_errors
-
-IDENTITY_STATUSES = frozenset({"known", "unknown"})
-ORDER_LEASE_FIELDS = (
-    "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
-)
-SURFACES = frozenset({"orders", "fills", "positions", "balances"})
-LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
-COMMON_FIELDS = (
-    "schema_ver",
-    "event_kind",
-    "payload_schema",
-    "venue",
-    "conn_id",
-    "boot_id",
-    "recv_wall_ns",
-    "recv_mono_ns",
-    "source",
-    "payload",
-)
 
 
 class ContractError(ValueError):
