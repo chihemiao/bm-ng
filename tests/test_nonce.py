@@ -7,9 +7,12 @@ from pathlib import Path
 import pytest
 
 from data.contracts import PAYLOAD_SCHEMAS, ContractError, validate_envelope
+from execution import nonce
 from execution.nonce import SignerFence, SignerFenceError, path_for
 
 FINGERPRINT = "a" * 64
+ACCOUNT_DIGEST = "b" * 64
+INSTANCE_ID = "writer-one"
 DAY_MS = 86_400_000
 NOW_MS = 5 * DAY_MS
 HOLDER = """
@@ -36,8 +39,8 @@ def _holder(root: Path, fingerprint: str = FINGERPRINT) -> subprocess.Popen[str]
 def _nonce_event(**changes) -> dict:
     payload = {
         "wallet_fingerprint": FINGERPRINT,
-        "account_digest": "b" * 64,
-        "instance_id": "writer-one",
+        "account_digest": ACCOUNT_DIGEST,
+        "instance_id": INSTANCE_ID,
         "allocated_nonce": NOW_MS,
         "previous_nonce": 1,
         "now_ms": NOW_MS,
@@ -53,6 +56,29 @@ def _nonce_event(**changes) -> dict:
         "recv_wall_ns": 1, "recv_mono_ns": 1, "source": "nonce_allocator",
         "seq_within_boot": 1, "payload": payload,
     }
+
+
+def test_replay_empty_or_frozen_nonce_rows_returns_zero() -> None:
+    frozen = _nonce_event(outcome="frozen", reason="clock_backward", allocated_nonce=None)
+    assert nonce.replay_last_allocated_nonce([], FINGERPRINT) == 0
+    assert nonce.replay_last_allocated_nonce([frozen], FINGERPRINT) == 0
+
+
+def test_replay_returns_largest_allocated_nonce_across_frozen_rows() -> None:
+    events = [
+        _nonce_event(allocated_nonce=10),
+        _nonce_event(outcome="frozen", reason="clock_backward", allocated_nonce=None),
+        _nonce_event(allocated_nonce=12),
+    ]
+    assert nonce.replay_last_allocated_nonce(events, FINGERPRINT) == 12
+
+
+def test_replay_ignores_other_signers_but_not_malformed_matching_rows() -> None:
+    other = _nonce_event(wallet_fingerprint="c" * 64, allocated_nonce=99)
+    assert nonce.replay_last_allocated_nonce([other], FINGERPRINT) == 0
+    malformed = _nonce_event(allocated_nonce=True)
+    with pytest.raises(ValueError, match="allocated_nonce"):
+        nonce.replay_last_allocated_nonce([malformed], FINGERPRINT)
 
 
 def test_signer_nonce_schema_is_registered_durable_and_bounded() -> None:
