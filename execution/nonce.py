@@ -10,6 +10,7 @@ from pathlib import Path
 from data.schema_nonce import DAY_MS
 
 NONCE_EVENT_SCHEMA = "signer_nonce_allocation"
+FROZEN_REASONS = frozenset({"clock_backward", "fence_invalidated"})
 
 
 class SignerFenceError(RuntimeError):
@@ -79,6 +80,31 @@ def replay_last_allocated_nonce(
             raise ValueError("allocated_nonce must be int")
         last = max(last, allocated)
     return last
+
+
+def replay_freeze_reason(
+    events: Iterable[Mapping[str, object]], wallet_fingerprint: str,
+) -> str | None:
+    """Return one durable signer freeze, rejecting duplicate or invalid rows."""
+    _validate_fingerprint(wallet_fingerprint)
+    reason = None
+    for event in events:
+        if event.get("payload_schema") != NONCE_EVENT_SCHEMA:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("signer nonce payload must be a mapping")
+        if payload.get("wallet_fingerprint") != wallet_fingerprint:
+            continue
+        if payload.get("outcome") != "frozen":
+            continue
+        found = payload.get("reason")
+        if not isinstance(found, str) or found not in FROZEN_REASONS:
+            raise ValueError("invalid freeze reason")
+        if reason is not None:
+            raise ValueError("multiple signer nonce freeze rows")
+        reason = found
+    return reason
 
 
 class SignerFence:
