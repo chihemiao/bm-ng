@@ -259,9 +259,7 @@ def test_first_outstanding_observation_starts_the_pair_level_clock():
 
 
 @pytest.mark.parametrize(("observed_ns", "exceeded"), [(110, False), (111, True)])
-def test_outstanding_duration_exceeds_only_after_the_inclusive_limit(
-    observed_ns, exceeded
-):
+def test_outstanding_duration_exceeds_only_after_the_inclusive_limit(observed_ns, exceeded):
     previous = StateClock("active", 100, 100, False)
     pair = pair_state(_pair("complete", "partial"))
     result = advance_obligation_clock(
@@ -282,25 +280,19 @@ def test_obligation_clock_rejects_backward_observation_time():
     previous = StateClock("active", 100, 100, False)
     pair = pair_state(_pair("complete", "partial"))
     with pytest.raises(ValueError, match="observed_ns"):
-        advance_obligation_clock(
-            previous, pair=pair, observed_ns=99, max_outstanding_ns=10
-        )
+        advance_obligation_clock(previous, pair=pair, observed_ns=99, max_outstanding_ns=10)
 
 
 def test_obligation_clock_rejects_different_state_at_the_same_time():
     previous = StateClock("active", 100, 100, False)
     settled = pair_state(_pair("complete", "complete"))
     with pytest.raises(ValueError, match="same observed_ns"):
-        advance_obligation_clock(
-            previous, pair=settled, observed_ns=100, max_outstanding_ns=10
-        )
+        advance_obligation_clock(previous, pair=settled, observed_ns=100, max_outstanding_ns=10)
 
 
 def test_obligation_clock_rejects_untyped_pair_input():
     with pytest.raises(TypeError, match="PairState"):
-        advance_obligation_clock(
-            None, pair="outstanding", observed_ns=100, max_outstanding_ns=10
-        )
+        advance_obligation_clock(None, pair="outstanding", observed_ns=100, max_outstanding_ns=10)
 
 
 def test_obligation_wrapper_uses_the_shared_state_clock_function():

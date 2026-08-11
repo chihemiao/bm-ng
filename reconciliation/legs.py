@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from reconciliation.clock import StateClock, advance_state_clock
 from reconciliation.state import (
     VENUES,
     SurfaceEvidence,
@@ -116,3 +117,27 @@ def pair_state(legs: Sequence[LegOutcome]) -> PairState:
     else:
         state = "balanced"
     return PairState(state, unresolved)
+
+
+def obligation_state(pair: PairState) -> str:
+    """Return whether both venue completion obligations are confirmed settled."""
+    if not isinstance(pair, PairState):
+        raise TypeError("pair must be PairState")
+    return "outstanding" if pair.unresolved else "settled"
+
+
+def advance_obligation_clock(
+    previous: StateClock | None,
+    *,
+    pair: PairState,
+    observed_ns: int,
+    max_outstanding_ns: int,
+) -> StateClock:
+    """Advance pair-level unresolved obligation duration."""
+    state = "active" if obligation_state(pair) == "outstanding" else "inactive"
+    return advance_state_clock(
+        previous,
+        state=state,
+        observed_ns=observed_ns,
+        max_active_ns=max_outstanding_ns,
+    )
