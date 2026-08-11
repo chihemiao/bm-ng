@@ -1,5 +1,6 @@
 import pytest
 
+import research.venue_probe as venue_probe
 from research.venue_probe import DAY_MS, venue_probe_row_errors
 
 
@@ -22,6 +23,28 @@ def _row(**changes):
 
 def _assert_error(message, **changes):
     assert message in venue_probe_row_errors(_row(**changes))
+
+
+def _dataset():
+    identities = [
+        ("B1_stale", 1, None),
+        ("B1_duplicate", 1, None),
+        ("B1_duplicate", 2, None),
+        ("B2_revoked", 1, None),
+        ("B2_revoked", 2, None),
+        ("B3_concurrent", 1, "A"),
+        ("B3_concurrent", 1, "B"),
+    ]
+    return [
+        _row(
+            probe_id=probe_id,
+            attempt_ordinal=ordinal,
+            signer_slot=slot,
+            venue_status="ok",
+            venue_error_code=None,
+        )
+        for probe_id, ordinal, slot in identities
+    ]
 
 
 @pytest.mark.parametrize(
@@ -80,3 +103,51 @@ def test_relative_time_fields_reject_invalid_or_epoch_shaped_values(field, value
 def test_all_string_values_reject_identifying_or_oversized_shapes():
     _assert_error("sensitive string shape", venue_error_code="0x" + "a" * 38)
     _assert_error("string too long", venue_error_code="x" * 65)
+
+
+def test_exact_probe_dataset_is_valid():
+    assert venue_probe.validate_probe_dataset(_dataset()) == ()
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "duplicate"])
+def test_probe_dataset_requires_exactly_one_of_each_identity(change):
+    rows = _dataset()
+    if change == "missing":
+        rows.pop()
+    elif change == "extra":
+        rows.append(dict(rows[0]))
+    else:
+        rows[-1] = dict(rows[-2])
+    assert "invalid probe row set" in venue_probe.validate_probe_dataset(rows)
+
+
+def test_probe_dataset_rejects_mixed_run_digests():
+    rows = _dataset()
+    rows[-1]["run_digest"] = "def01234"
+    assert "mixed run_digest" in venue_probe.validate_probe_dataset(rows)
+
+
+def test_probe_dataset_requires_one_concurrent_row_per_slot():
+    rows = _dataset()
+    rows[-1]["signer_slot"] = "A"
+    assert "invalid probe row set" in venue_probe.validate_probe_dataset(rows)
+
+
+def test_probe_dataset_identity_set_rejects_newly_allowed_ordinal(monkeypatch):
+    monkeypatch.setitem(venue_probe.PROBE_ORDINALS, "B1_stale", frozenset({1, 2}))
+    rows = _dataset()
+    rows[0]["attempt_ordinal"] = 2
+    errors = venue_probe.validate_probe_dataset(rows)
+    assert all(not error.endswith("invalid attempt_ordinal") for error in errors)
+    assert "invalid probe row set" in errors
+
+
+def test_probe_dataset_delegates_to_the_pinned_row_validator():
+    rows = _dataset()
+    rows[0]["http_status"] = 600
+    errors = venue_probe.validate_probe_dataset(rows)
+    assert "row 0: invalid http_status" in errors
+    assert (
+        venue_probe.validate_probe_dataset.__globals__["venue_probe_row_errors"]
+        is venue_probe.venue_probe_row_errors
+    )
