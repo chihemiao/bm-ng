@@ -4,7 +4,10 @@ import fcntl
 import hashlib
 import os
 import stat
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+
+NONCE_EVENT_SCHEMA = "signer_nonce_allocation"
 
 
 class SignerFenceError(RuntimeError):
@@ -32,6 +35,29 @@ def path_for(root: Path, wallet_fingerprint: str) -> Path:
     base = Path(root).resolve(strict=True)
     digest = hashlib.sha256(wallet_fingerprint.encode()).hexdigest()
     return base / f"{digest}.signer.lock"
+
+
+def replay_last_allocated_nonce(
+    events: Iterable[Mapping[str, object]], wallet_fingerprint: str,
+) -> int:
+    """Replay the durable maximum for one signer without revalidating envelopes."""
+    _validate_fingerprint(wallet_fingerprint)
+    last = 0
+    for event in events:
+        if event.get("payload_schema") != NONCE_EVENT_SCHEMA:
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("signer nonce payload must be a mapping")
+        if payload.get("wallet_fingerprint") != wallet_fingerprint:
+            continue
+        if payload.get("outcome") != "allocated":
+            continue
+        allocated = payload.get("allocated_nonce")
+        if type(allocated) is not int:
+            raise ValueError("allocated_nonce must be int")
+        last = max(last, allocated)
+    return last
 
 
 class SignerFence:
