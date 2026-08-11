@@ -1,12 +1,29 @@
 """Fail-closed completion states for one execution leg."""
 
+from collections.abc import Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 
 from reconciliation.state import (
+    VENUES,
     SurfaceEvidence,
     surface_is_authoritative,
     validate_surface_evidence,
 )
+
+COMPLETIONS = frozenset({"none", "partial", "complete", "overfilled", "unknown"})
+
+
+@dataclass(frozen=True, slots=True)
+class LegOutcome:
+    venue: str
+    completion: str
+
+
+@dataclass(frozen=True, slots=True)
+class PairState:
+    state: str
+    unresolved: tuple[tuple[str, str], ...]
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -57,3 +74,45 @@ def leg_completion(
     if filled_quantity == intended_quantity:
         return "complete"
     return "overfilled"
+
+
+def _validated_outcomes(legs: Sequence[LegOutcome]) -> tuple[LegOutcome, ...]:
+    outcomes = tuple(legs)
+    if len(outcomes) != len(VENUES):
+        raise ValueError("pair venue set must contain exactly two venues")
+    for outcome in outcomes:
+        if not isinstance(outcome, LegOutcome):
+            raise TypeError("pair member must be LegOutcome")
+        if type(outcome.venue) is not str:
+            raise TypeError("venue must be a string")
+        if type(outcome.completion) is not str:
+            raise TypeError("completion must be a string")
+        if outcome.completion not in COMPLETIONS:
+            raise ValueError("completion is invalid")
+    if {outcome.venue for outcome in outcomes} != VENUES:
+        raise ValueError("pair venue set is invalid")
+    return outcomes
+
+
+def pair_state(legs: Sequence[LegOutcome]) -> PairState:
+    """Combine exactly two venue leg outcomes without discarding obligations."""
+    outcomes = _validated_outcomes(legs)
+    unresolved = tuple(
+        sorted(
+            (outcome.venue, outcome.completion)
+            for outcome in outcomes
+            if outcome.completion != "complete"
+        )
+    )
+    completions = {outcome.completion for outcome in outcomes}
+    if "unknown" in completions:
+        state = "unknown"
+    elif "overfilled" in completions:
+        state = "overfilled"
+    elif completions == {"none"}:
+        state = "unfilled"
+    elif unresolved:
+        state = "imbalanced"
+    else:
+        state = "balanced"
+    return PairState(state, unresolved)
