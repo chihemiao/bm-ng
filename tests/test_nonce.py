@@ -6,9 +6,12 @@ from pathlib import Path
 
 import pytest
 
+from data.contracts import PAYLOAD_SCHEMAS, ContractError, validate_envelope
 from execution.nonce import SignerFence, SignerFenceError, path_for
 
 FINGERPRINT = "a" * 64
+DAY_MS = 86_400_000
+NOW_MS = 5 * DAY_MS
 HOLDER = """
 import sys
 from pathlib import Path
@@ -28,6 +31,97 @@ def _holder(root: Path, fingerprint: str = FINGERPRINT) -> subprocess.Popen[str]
     assert ready and process.stdout.readline().strip() == "held"
     assert process.poll() is None
     return process
+
+
+def _nonce_event(**changes) -> dict:
+    payload = {
+        "wallet_fingerprint": FINGERPRINT,
+        "account_digest": "b" * 64,
+        "instance_id": "writer-one",
+        "allocated_nonce": NOW_MS,
+        "previous_nonce": 1,
+        "now_ms": NOW_MS,
+        "outcome": "allocated",
+        "reason": "nonce_allocated",
+        "decided_ns": 1,
+    }
+    payload.update(changes)
+    return {
+        "schema_ver": 1, "event_kind": "decision",
+        "payload_schema": "signer_nonce_allocation", "venue": "hyperliquid",
+        "conn_id": "writer-one", "boot_id": "boot-one",
+        "recv_wall_ns": 1, "recv_mono_ns": 1, "source": "nonce_allocator",
+        "seq_within_boot": 1, "payload": payload,
+    }
+
+
+def test_signer_nonce_schema_is_registered_durable_and_bounded() -> None:
+    event = _nonce_event()
+    assert validate_envelope(event) is event
+    assert "signer_nonce_allocation" in PAYLOAD_SCHEMAS and len(PAYLOAD_SCHEMAS) == 19
+    event.pop("seq_within_boot")
+    with pytest.raises(ContractError, match="seq_within_boot"):
+        validate_envelope(event)
+
+
+@pytest.mark.parametrize("reason", ["clock_backward", "clock_forward", "fence_invalidated"])
+def test_frozen_nonce_decisions_have_no_allocated_value_or_time_relation(reason: str) -> None:
+    event = _nonce_event(outcome="frozen", reason=reason, allocated_nonce=None, now_ms=1)
+    assert validate_envelope(event)["payload"]["allocated_nonce"] is None
+
+
+@pytest.mark.parametrize(
+    ("allocated_nonce", "message"),
+    [
+        (NOW_MS - 2 * DAY_MS, None),
+        (NOW_MS - 2 * DAY_MS - 1, "minus two days"),
+        (NOW_MS + DAY_MS, None),
+        (NOW_MS + DAY_MS + 1, "plus one day"),
+    ],
+)
+def test_allocated_nonce_time_window_is_closed(
+    allocated_nonce: int, message: str | None,
+) -> None:
+    event = _nonce_event(allocated_nonce=allocated_nonce)
+    if message is None:
+        assert validate_envelope(event) is event
+    else:
+        with pytest.raises(ContractError, match=message):
+            validate_envelope(event)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"reason": "clock_forward"}, "allocated requires reason"),
+        ({"outcome": "frozen", "reason": "nonce_allocated", "allocated_nonce": None},
+         "reason nonce_allocated requires outcome"),
+        ({"outcome": "frozen", "reason": "clock_backward"}, "must be null"),
+        ({"allocated_nonce": None}, "positive integer"),
+        ({"allocated_nonce": 1}, "exceed previous_nonce"),
+        ({"allocated_nonce": 1, "previous_nonce": 2}, "exceed previous_nonce"),
+    ],
+)
+def test_nonce_outcome_value_and_reason_form_a_closed_matrix(
+    changes: dict, message: str,
+) -> None:
+    with pytest.raises(ContractError, match=message):
+        validate_envelope(_nonce_event(**changes))
+    assert validate_envelope(_nonce_event(previous_nonce=0))["payload"]["previous_nonce"] == 0
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"wallet_fingerprint": "A" * 64}, {"account_digest": "account"},
+        {"instance_id": ""}, {"allocated_nonce": True}, {"previous_nonce": -1},
+        {"now_ms": 0}, {"outcome": "unknown"}, {"reason": "unknown"},
+        {"decided_ns": 0}, {"extra": "field"},
+    ],
+)
+def test_signer_nonce_format_rejects_invalid_or_extra_fields(changes: dict) -> None:
+    with pytest.raises(ContractError):
+        validate_envelope(_nonce_event(**changes))
 
 
 @pytest.mark.parametrize(
