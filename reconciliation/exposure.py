@@ -30,6 +30,8 @@ def _validate_leg(leg: LegPosition, symbol: str) -> None:
         raise ValueError("position symbol does not match requested symbol")
     if type(leg.signed_quantity) is not Decimal:
         raise TypeError("signed_quantity must be Decimal")
+    if not leg.signed_quantity.is_finite():
+        raise ValueError("signed_quantity must be finite")
     evidence = leg.evidence
     observed_ns = evidence.observed_ns if isinstance(evidence, SurfaceEvidence) else 0
     validate_surface_evidence(evidence, now_ns=observed_ns)
@@ -44,6 +46,23 @@ def _authoritative(evidence: SurfaceEvidence, now_ns: int, max_age_ns: int) -> b
         and evidence.mismatch_count == 0
         and 0 <= age_ns <= max_age_ns
     )
+
+
+def delta_state(delta: Decimal | None, *, tolerance: Decimal) -> str:
+    """Classify exact cross-leg exposure with a closed fail-safe state set."""
+    if type(tolerance) is not Decimal:
+        raise TypeError("tolerance must be Decimal")
+    if not tolerance.is_finite():
+        raise ValueError("tolerance must be finite")
+    if tolerance < 0:
+        raise ValueError("tolerance must be non-negative")
+    if delta is None:
+        return "unknown"
+    if type(delta) is not Decimal:
+        raise TypeError("delta must be Decimal or None")
+    if not delta.is_finite():
+        raise ValueError("delta must be finite")
+    return "flat" if abs(delta) <= tolerance else "naked"
 
 
 def net_delta(
