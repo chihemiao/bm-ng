@@ -261,7 +261,11 @@ def test_rotation_decision_is_frozen_and_matches_all_thirteen_schema_fields() ->
         {"new_wallet_fingerprint": "c" * 63},
         {"instance_id": ""},
         {"boot_id": ""},
-        {"old_issued_ns": True},
+        {
+            "old_issued_ns": True,
+            "old_expires_ns": 1 + VALIDITY_NS,
+            "decided_ns": 1 + VALIDITY_NS - ROTATION_LEAD_NS,
+        },
         {"old_expires_ns": 0},
         {"new_issued_ns": 1.0},
         {"new_expires_ns": 0},
