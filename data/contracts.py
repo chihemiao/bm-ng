@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-DAY_NS = 86_400 * 1_000_000_000
-VALIDITY_NS = 30 * DAY_NS
-ROTATION_LEAD_NS = 7 * DAY_NS
+from data.schema_wallet import wallet_rotation_semantic_errors as _wallet_errors
+
+VALIDITY_NS = 30 * 86_400 * 1_000_000_000
+ROTATION_LEAD_NS = 7 * 86_400 * 1_000_000_000
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 PAYLOAD_SCHEMAS = frozenset(
@@ -129,12 +130,11 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     if event["payload_schema"] in RECONCILIATION_SCHEMAS:
         _validate_reconciliation(event)
-    decision_validators = {
+    validator = {
         "agent_wallet_rotation": _validate_wallet_rotation,
         "writer_authority_promotion": _validate_writer_promotion,
         "writer_lease_decision": _validate_writer_decision,
-    }
-    validator = decision_validators.get(event["payload_schema"])
+    }.get(event["payload_schema"])
     if validator is not None:
         validator(event)
     return event
@@ -235,11 +235,12 @@ def _validate_wallet_rotation(event: dict[str, Any]) -> None:
         _require(type(payload[field]) is int and payload[field] > 0, f"invalid {field}")
     _require(payload["assessment"] in {"active", "rotation_due", "expired"}, "invalid assessment")
     _require(payload["outcome"] in {"rotated", "aborted"}, "invalid outcome")
-    reasons = {
-        "rotation_completed", "release_failed", "acquire_failed", "same_wallet",
-        "identity_changed", "not_due",
-    }
+    reasons = set(
+        "rotation_completed release_failed acquire_failed same_wallet "
+        "identity_changed not_due".split())
     _require(payload["reason"] in reasons, "invalid reason")
+    errors = _wallet_errors(payload, validity_ns=VALIDITY_NS, rotation_lead_ns=ROTATION_LEAD_NS)
+    _require(not errors, errors[0] if errors else "")
 
 
 def _validate_surface(event: dict[str, Any]) -> None:
