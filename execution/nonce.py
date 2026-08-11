@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 
 from data.schema_nonce import DAY_MS
+from execution.writer import WriterLease
 
 NONCE_EVENT_SCHEMA = "signer_nonce_allocation"
 FROZEN_REASONS = frozenset({"clock_backward", "fence_invalidated"})
@@ -235,16 +236,29 @@ class SignerFence:
         self._fd = None
 
 
+def _bound_instance_id(fence: SignerFence, lease: WriterLease) -> str:
+    if not isinstance(fence, SignerFence):
+        raise TypeError("fence must be SignerFence")
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be WriterLease")
+    identity = lease.revalidate().identity
+    if fence.wallet_fingerprint != identity.wallet_fingerprint:
+        raise ValueError(
+            "signer fence wallet_fingerprint does not match writer lease identity"
+        )
+    if fence.instance_id != identity.instance_id:
+        raise ValueError("signer fence instance_id does not match writer lease identity")
+    return identity.instance_id
+
+
 class NonceAllocator:
     def __init__(
-        self, fence: SignerFence, *, account_digest: str, instance_id: str,
+        self, fence: SignerFence, lease: WriterLease, *, account_digest: str,
         replayed_last: int, replayed_freeze_reason: str | None,
         recorder: Callable[[Mapping[str, object]], None],
     ) -> None:
-        if not isinstance(fence, SignerFence):
-            raise TypeError("fence must be SignerFence")
+        instance_id = _bound_instance_id(fence, lease)
         _validate_account_digest(account_digest)
-        _validate_instance(instance_id)
         if type(replayed_last) is not int:
             raise TypeError("replayed_last must be int")
         if replayed_last < 0:
