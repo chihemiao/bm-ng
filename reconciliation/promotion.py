@@ -85,6 +85,22 @@ def demotion_reason(admission: AdmissionDecision) -> str:
     return DEMOTION_PREFIX + ",".join(keys)
 
 
+def demote_writer(
+    lease: WriterLease, admission: AdmissionDecision, *, now_ns: int
+) -> WriterAuthority:
+    """Revoke risk-increasing authority before recording the demotion."""
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be a WriterLease")
+    if not isinstance(admission, AdmissionDecision):
+        raise TypeError("admission must be an AdmissionDecision")
+    if type(now_ns) is not int:
+        raise TypeError("now_ns must be an integer")
+    if now_ns <= 0:
+        raise ValueError("now_ns must be positive")
+    reason = demotion_reason(admission)
+    return lease.demote_to_cancel_only(demotion_ns=now_ns, reason=reason)
+
+
 def _decision(
     authority: WriterAuthority, admission: AdmissionDecision, decided_ns: int,
     *, to_mode: str, outcome: str, reason: str,

@@ -138,9 +138,7 @@ def test_freeze_demotes_and_emits_schema_valid_decision(tmp_path: Path) -> None:
     recorded = []
     lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
     recorded.clear()
-    authority = demote_writer(
-        lease, _freeze("continuous_admission:pair_unknown"), now_ns=101
-    )
+    authority = demote_writer(lease, _freeze("continuous_admission:pair_unknown"), now_ns=101)
     assert authority == lease.authority and authority.mode == "cancel_only"
     assert len(recorded) == 1
     assert (recorded[0].action, recorded[0].outcome) == ("demote", "cancel_only")
@@ -164,6 +162,20 @@ def test_demotion_records_only_after_mode_is_cancel_only(tmp_path: Path) -> None
     holder["lease"] = lease
     demote_writer(lease, _freeze("continuous_admission:exposure_unknown"), now_ns=101)
     assert observed_modes == ["cancel_only"]
+    lease.release()
+
+
+def test_demote_writer_records_every_encoded_reason(tmp_path: Path) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    admission = _freeze(
+        "continuous_admission:exposure_unknown",
+        "continuous_admission:nonce_frozen:nonce-conflict",
+        "continuous_admission:pair_unknown",
+    )
+    demote_writer(lease, admission, now_ns=101)
+    assert recorded[0].reason == demotion_reason(admission)
     lease.release()
 
 
@@ -197,9 +209,7 @@ def test_non_risk_modes_are_idempotent_without_recording(tmp_path: Path, mode: s
     recorded = []
     lease = _lease_for_mode(tmp_path, mode, recorded.append)
     recorded.clear()
-    authority = demote_writer(
-        lease, _freeze("continuous_admission:pair_unknown"), now_ns=101
-    )
+    authority = demote_writer(lease, _freeze("continuous_admission:pair_unknown"), now_ns=101)
     assert authority.mode == mode and recorded == []
     lease.release()
 
@@ -225,9 +235,7 @@ def test_demotion_rejects_invalid_time_before_state_change(
     lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
     recorded.clear()
     with pytest.raises(error):
-        demote_writer(
-            lease, _freeze("continuous_admission:pair_unknown"), now_ns=now_ns
-        )
+        demote_writer(lease, _freeze("continuous_admission:pair_unknown"), now_ns=now_ns)
     assert lease.authority.mode == "risk_increasing" and recorded == []
     lease.release()
 
