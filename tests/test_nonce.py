@@ -137,6 +137,14 @@ def test_allocator_uses_the_larger_of_replay_and_time(
     fence.release()
 
 
+def test_allocator_exposes_a_read_only_account_digest(make_nonce_allocator) -> None:
+    allocator, fence, _ = make_nonce_allocator()
+    assert allocator.account_digest == ACCOUNT_DIGEST
+    with pytest.raises(AttributeError):
+        allocator.account_digest = "c" * 64
+    fence.release()
+
+
 def test_consecutive_allocations_are_strictly_increasing(make_nonce_allocator) -> None:
     allocator, fence, _ = make_nonce_allocator(replayed_last=NOW_MS)
     first = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
