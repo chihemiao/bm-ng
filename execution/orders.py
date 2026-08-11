@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from data.schema_nonce import DAY_MS
 from data.schema_order_request import order_request_binding_errors
 from execution.nonce import NonceAllocator
 from execution.writer import WriterLease
@@ -296,6 +297,13 @@ def submit_order(
             request.wallet_fingerprint == authority.identity.wallet_fingerprint,
             "resume request wallet_fingerprint mismatch",
         )
+        if intent.leg == "hyperliquid":
+            nonce = request.allocated_nonce
+            _require(
+                nonce is not None
+                and now_ms - 2 * DAY_MS < nonce < now_ms + DAY_MS,
+                "resume request allocated_nonce outside time window",
+            )
         return decision, transport(request)
     nonce = None
     if intent.leg == "hyperliquid":
