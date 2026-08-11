@@ -1,9 +1,7 @@
 from dataclasses import dataclass
 from typing import Literal
 
-DAY_NS = 86_400 * 1_000_000_000
-VALIDITY_NS = 30 * DAY_NS
-ROTATION_LEAD_NS = 7 * DAY_NS
+from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
 
 WalletAssessment = Literal["active", "rotation_due", "expired"]
 

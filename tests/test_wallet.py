@@ -1,7 +1,11 @@
+import ast
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 
 import pytest
 
+from data import contracts
+from execution import wallet as wallet_module
 from execution.wallet import (
     ROTATION_LEAD_NS,
     VALIDITY_NS,
@@ -11,6 +15,7 @@ from execution.wallet import (
 
 DAY_NS = 86_400 * 1_000_000_000
 ISSUED_NS = 1_000_000_000
+ROOT = Path(__file__).parents[1]
 
 
 def _registration(**changes: object) -> AgentWalletRegistration:
@@ -21,6 +26,22 @@ def _registration(**changes: object) -> AgentWalletRegistration:
     }
     values.update(changes)
     return AgentWalletRegistration(**values)
+
+
+def test_wallet_timing_constants_are_owned_by_the_data_contract() -> None:
+    assert contracts.VALIDITY_NS == VALIDITY_NS == 30 * DAY_NS
+    assert contracts.ROTATION_LEAD_NS == ROTATION_LEAD_NS == 7 * DAY_NS
+
+    tree = ast.parse((ROOT / "execution" / "wallet.py").read_text())
+    assigned = {
+        target.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert {"VALIDITY_NS", "ROTATION_LEAD_NS"}.isdisjoint(assigned)
+    assert wallet_module.VALIDITY_NS == contracts.VALIDITY_NS
 
 
 def test_registration_is_a_frozen_record_with_fixed_validity() -> None:
