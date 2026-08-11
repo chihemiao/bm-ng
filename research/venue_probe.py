@@ -27,6 +27,17 @@ PROBE_ORDINALS = {
 VENUE_STATUSES = frozenset({"ok", "err", "absent"})
 SIGNER_SLOTS = frozenset({"A", "B"})
 HEX_SHAPE = re.compile(r"0x[0-9a-fA-F]{38,}")
+EXPECTED_PROBE_ROWS = frozenset(
+    {
+        ("B1_stale", 1, None),
+        ("B1_duplicate", 1, None),
+        ("B1_duplicate", 2, None),
+        ("B2_revoked", 1, None),
+        ("B2_revoked", 2, None),
+        ("B3_concurrent", 1, "A"),
+        ("B3_concurrent", 1, "B"),
+    }
+)
 
 
 def _exact_int(value: object) -> bool:
@@ -113,4 +124,30 @@ def venue_probe_row_errors(row: object) -> tuple[str, ...]:
     errors.extend(_venue_errors(row))
     errors.extend(_timing_errors(row))
     errors.extend(_metadata_errors(row))
+    return tuple(errors)
+
+
+def _probe_row_identity(row: object) -> tuple[object, object, object]:
+    if not isinstance(row, Mapping):
+        return (None, None, None)
+    return row.get("probe_id"), row.get("attempt_ordinal"), row.get("signer_slot")
+
+
+def validate_probe_dataset(rows: object) -> tuple[str, ...]:
+    """Validate the complete seven-row, single-run probe evidence set."""
+    if not isinstance(rows, list):
+        return ("dataset must be a list",)
+    errors = [
+        f"row {index}: {error}"
+        for index, row in enumerate(rows)
+        for error in venue_probe_row_errors(row)
+    ]
+    identities = {_probe_row_identity(row) for row in rows}
+    if len(rows) != len(EXPECTED_PROBE_ROWS) or identities != EXPECTED_PROBE_ROWS:
+        errors.append("invalid probe row set")
+    digests = {
+        row.get("run_digest") for row in rows if isinstance(row, Mapping)
+    }
+    if len(digests) != 1:
+        errors.append("mixed run_digest")
     return tuple(errors)
