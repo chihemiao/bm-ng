@@ -8,6 +8,8 @@ IDENTITY_STATUSES = frozenset({"known", "unknown"})
 ORDER_LEASE_FIELDS = (
     "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
 )
+ORDER_SIGNER_FIELDS = ("allocated_nonce",)
+ORDER_BOUND_FIELDS = ORDER_LEASE_FIELDS + ORDER_SIGNER_FIELDS
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
 COMMON_FIELDS = (

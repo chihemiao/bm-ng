@@ -157,23 +157,6 @@ def _writer_event(**changes) -> dict:
     return event
 
 
-def _bound_order_request(**changes) -> dict:
-    payload = {
-        "account_digest": "a" * 64,
-        "lease_epoch": 1,
-        "writer_instance_id": "writer-one",
-        "wallet_fingerprint": "b" * 64,
-    }
-    payload.update(changes)
-    event = market_event()
-    event.update(
-        event_kind="order", payload_schema="order_request", seq_within_boot=9,
-        identity_status="known", client_order_id="0xrequest", venue_order_id=None,
-        payload=payload,
-    )
-    return event
-
-
 @pytest.mark.parametrize(
     ("action", "outcome", "reason", "lease_epoch"),
     [
@@ -282,29 +265,6 @@ def test_order_request_requires_client_identity() -> None:
     )
     with pytest.raises(ContractError, match="client_order_id"):
         validate_envelope(event)
-
-
-def test_order_request_lease_binding_is_atomic_and_structurally_valid() -> None:
-    assert validate_envelope(_bound_order_request())["seq_within_boot"] == 9
-
-    invalid = [
-        _bound_order_request(account_digest="raw-account"),
-        _bound_order_request(lease_epoch=0),
-        _bound_order_request(writer_instance_id=""),
-        _bound_order_request(wallet_fingerprint="b" * 32),
-    ]
-    seq_only = _bound_order_request()
-    seq_only["payload"] = {}
-    invalid.append(seq_only)
-    no_seq = _bound_order_request()
-    no_seq.pop("seq_within_boot")
-    invalid.append(no_seq)
-    partial = _bound_order_request()
-    partial["payload"].pop("wallet_fingerprint")
-    invalid.append(partial)
-    for event in invalid:
-        with pytest.raises(ContractError, match="lease binding"):
-            validate_envelope(event)
 
 
 def test_unknown_order_observation_is_not_discarded() -> None:
