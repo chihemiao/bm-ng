@@ -288,6 +288,14 @@ def submit_order(
     authority = lease.authorize("submit")
     if decision == "submit":
         assert request is not None  # Guaranteed by decide_submission.
+        _require(
+            request.account_digest == allocator.account_digest,
+            "resume request account_digest mismatch",
+        )
+        _require(
+            request.wallet_fingerprint == authority.identity.wallet_fingerprint,
+            "resume request wallet_fingerprint mismatch",
+        )
         return decision, transport(request)
     nonce = None
     if intent.leg == "hyperliquid":
