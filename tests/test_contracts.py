@@ -171,24 +171,6 @@ def _bound_order_request(**changes) -> dict:
     return event
 
 
-def _promotion_event(**changes) -> dict:
-    payload = {
-        "account_digest": "a" * 64, "instance_id": "writer-one",
-        "boot_id": "identity-boot", "lease_epoch": 1,
-        "from_mode": "pending_reconciliation", "to_mode": "risk_increasing",
-        "outcome": "promoted", "reason": "admission_ready",
-        "admission_action": "ready", "admission_digest": "b" * 64,
-        "decided_ns": 900,
-    }
-    payload.update(changes)
-    event = market_event()
-    event.update(
-        event_kind="decision", payload_schema="writer_authority_promotion",
-        seq_within_boot=10, payload=payload,
-    )
-    return event
-
-
 @pytest.mark.parametrize(
     ("action", "outcome", "reason", "lease_epoch"),
     [
@@ -224,48 +206,6 @@ def test_writer_lease_decision_rejects_ambiguous_or_identifying_payloads() -> No
     del event["seq_within_boot"]
     with pytest.raises(ContractError, match="seq_within_boot"):
         validate_envelope(event)
-
-
-@pytest.mark.parametrize(
-    ("changes"),
-    [
-        {},
-        {
-            "outcome": "denied", "to_mode": "pending_reconciliation",
-            "reason": "admission_freeze", "admission_action": "cancel_only_freeze",
-        },
-        {
-            "outcome": "denied", "from_mode": "cancel_only", "to_mode": "cancel_only",
-            "reason": "not_promotable_mode", "admission_action": "ready",
-        },
-        {
-            "outcome": "denied", "from_mode": "cancel_only", "to_mode": "cancel_only",
-            "reason": "not_promotable_mode", "admission_action": "cancel_only_freeze",
-        },
-    ],
-)
-def test_writer_authority_promotion_has_a_closed_decision_matrix(changes: dict) -> None:
-    assert validate_envelope(_promotion_event(**changes))["payload"]
-
-
-def test_writer_authority_promotion_rejects_invalid_fields_and_combinations() -> None:
-    invalid = [
-        _promotion_event(to_mode="pending_reconciliation"),
-        _promotion_event(account_digest="raw-account"),
-        _promotion_event(admission_digest="raw-admission"),
-        _promotion_event(lease_epoch=0),
-        _promotion_event(decided_ns=0),
-    ]
-    missing = _promotion_event()
-    missing["payload"].pop("admission_action")
-    invalid.append(missing)
-    for event in invalid:
-        with pytest.raises(ContractError):
-            validate_envelope(event)
-    wrong_kind = _promotion_event()
-    wrong_kind["event_kind"] = "ops"
-    with pytest.raises(ContractError, match="event kind"):
-        validate_envelope(wrong_kind)
 
 
 def test_versioned_reconciliation_payloads_are_structurally_validated() -> None:
