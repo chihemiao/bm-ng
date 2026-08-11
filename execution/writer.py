@@ -8,7 +8,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-AUTHORITY_MODES = frozenset({"pending_reconciliation", "cancel_only"})
+AUTHORITY_MODES = frozenset({"pending_reconciliation", "cancel_only", "risk_increasing"})
+WRITER_ACTIONS = frozenset(
+    {"cancel", "cancel_all", "submit", "reduce_only", "close", "market", "modify"}
+)
+CANCEL_ACTIONS = frozenset({"cancel", "cancel_all"})
 
 
 class WriterLeaseError(RuntimeError):
@@ -186,8 +190,10 @@ class WriterLease:
         return self._authority
 
     def revalidate(self) -> WriterAuthority:
-        _require(self._fd is not None, "no held writer lease")
         authority = self.authority
+        if authority.mode == "cancel_only":
+            return authority
+        _require(self._fd is not None, "no held writer lease")
         try:
             valid = _same_inode(self._fd, self.path)
         except OSError:
@@ -201,6 +207,19 @@ class WriterLease:
             )
             _record(self._recorder, decision, suppress=True)
             raise WriterLeaseError("lock inode changed")
+        return authority
+
+    def authorize(self, action: str) -> WriterAuthority:
+        if not isinstance(action, str):
+            raise TypeError("writer action must be text")
+        if action not in WRITER_ACTIONS:
+            raise ValueError("unknown writer action")
+        authority = self.revalidate()
+        if action == "modify":
+            raise WriterLeaseError("native_modify_disabled")
+        allowed = CANCEL_ACTIONS if authority.mode != "risk_increasing" else WRITER_ACTIONS
+        if action not in allowed:
+            raise WriterLeaseError("writer action not authorized")
         return authority
 
     def release(self) -> None:

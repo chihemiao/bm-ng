@@ -8,7 +8,37 @@ from pathlib import Path
 import pytest
 
 from data.shard import ShardWriter, replay_event_window
-from execution.writer import AUTHORITY_MODES, WriterIdentity, WriterLease, WriterLeaseError
+from execution.writer import (
+    AUTHORITY_MODES,
+    WriterAuthority,
+    WriterIdentity,
+    WriterLease,
+    WriterLeaseError,
+)
+
+AUTHORIZATION_MATRIX = (
+    ("pending_reconciliation", "cancel", True),
+    ("pending_reconciliation", "cancel_all", True),
+    ("pending_reconciliation", "submit", False),
+    ("pending_reconciliation", "reduce_only", False),
+    ("pending_reconciliation", "close", False),
+    ("pending_reconciliation", "market", False),
+    ("pending_reconciliation", "modify", False),
+    ("cancel_only", "cancel", True),
+    ("cancel_only", "cancel_all", True),
+    ("cancel_only", "submit", False),
+    ("cancel_only", "reduce_only", False),
+    ("cancel_only", "close", False),
+    ("cancel_only", "market", False),
+    ("cancel_only", "modify", False),
+    ("risk_increasing", "cancel", True),
+    ("risk_increasing", "cancel_all", True),
+    ("risk_increasing", "submit", True),
+    ("risk_increasing", "reduce_only", True),
+    ("risk_increasing", "close", True),
+    ("risk_increasing", "market", True),
+    ("risk_increasing", "modify", False),
+)
 
 HOLDER = """
 import sys
@@ -42,6 +72,18 @@ def _acquire(root: Path, identity: WriterIdentity):
     return WriterLease.acquire(root, identity, decisions.append), decisions
 
 
+def _lease_for_mode(root: Path, mode: str) -> WriterLease:
+    identity = _identity()
+    if mode == "cancel_only":
+        authority = WriterAuthority(identity, mode, 1)
+        path = WriterLease.path_for(root, identity.account_id)
+        return WriterLease(path, authority, None, [].append, True)
+    lease, _ = _acquire(root, identity)
+    if mode == "risk_increasing":
+        lease._authority = lease.authority._replace(mode=mode)
+    return lease
+
+
 def _shard_recorder(root: Path):
     writer = ShardWriter(root, boot_id="boot-one")
     sequence = 0
@@ -64,7 +106,9 @@ def _shard_recorder(root: Path):
 
 
 def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> None:
-    assert AUTHORITY_MODES == frozenset({"pending_reconciliation", "cancel_only"})
+    assert AUTHORITY_MODES == frozenset(
+        {"pending_reconciliation", "cancel_only", "risk_increasing"}
+    )
     owner = _holder(tmp_path, _identity())
     assert owner.stdout.readline().strip() == "pending_reconciliation:1"
     path = WriterLease.path_for(tmp_path, _identity().account_id)
@@ -73,6 +117,7 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
 
     observer, observer_events = _acquire(tmp_path, _identity("two", "b" * 64))
     assert observer.authority.mode == "cancel_only"
+    assert observer.authorize("cancel") == observer.authority
     assert observer_events[-1].outcome == "cancel_only"
     denied = []
     with pytest.raises(WriterLeaseError, match="shared writer identity"):
@@ -95,6 +140,43 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
     takeover, _ = _acquire(tmp_path, _identity("five", "e" * 64))
     assert takeover.authority.lease_epoch == 4
     takeover.release()
+
+
+@pytest.mark.parametrize(("mode", "action", "allowed"), AUTHORIZATION_MATRIX)
+def test_writer_authorization_matrix(
+    tmp_path: Path, mode: str, action: str, allowed: bool
+) -> None:
+    lease = _lease_for_mode(tmp_path, mode)
+    if allowed:
+        assert lease.authorize(action).mode == mode
+    else:
+        reason = "native_modify_disabled" if action == "modify" else "action not authorized"
+        with pytest.raises(WriterLeaseError, match=reason):
+            lease.authorize(action)
+    lease.release()
+
+
+def test_pending_and_cancel_only_have_the_same_allowed_actions() -> None:
+    def allowed(mode):
+        return {
+            action for candidate, action, decision in AUTHORIZATION_MATRIX
+            if candidate == mode and decision
+        }
+
+    assert allowed("pending_reconciliation") == allowed("cancel_only") == {"cancel", "cancel_all"}
+
+
+@pytest.mark.parametrize(("action", "error"), (("typo", ValueError), (None, TypeError)))
+def test_unknown_action_is_structurally_invalid_before_lease_revalidation(
+    tmp_path: Path, action: object, error: type[Exception]
+) -> None:
+    lease, _ = _acquire(tmp_path, _identity())
+    os.unlink(lease.path)
+    lease.path.write_text("{}")
+    with pytest.raises(error):
+        lease.authorize(action)  # type: ignore[arg-type]
+    with pytest.raises(WriterLeaseError, match="inode changed"):
+        lease.authorize("cancel")
 
 
 def test_symlink_and_replaced_inode_fail_closed(tmp_path: Path) -> None:
