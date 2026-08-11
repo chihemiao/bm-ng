@@ -24,6 +24,19 @@ def _event(reason: str = "clock_backward", fingerprint: str = FINGERPRINT) -> di
     }
 
 
+def _allocator(
+    tmp_path, *, replayed_last: int = 0, replayed_freeze_reason=None, recorder=None,
+):
+    fence = nonce.SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    recorded = []
+    allocator = nonce.NonceAllocator(
+        fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
+        replayed_last=replayed_last, replayed_freeze_reason=replayed_freeze_reason,
+        recorder=recorded.append if recorder is None else recorder,
+    )
+    return allocator, fence, recorded
+
+
 def test_replay_freeze_reason_filters_signer_and_returns_one_reason() -> None:
     other = _event(fingerprint="c" * 64)
     allocated = _event(reason="nonce_allocated")
@@ -46,3 +59,93 @@ def test_replay_rejects_multiple_matching_freeze_rows(reasons: tuple[str, str]) 
 def test_replay_rejects_unknown_freeze_reason() -> None:
     with pytest.raises(ValueError, match="reason"):
         nonce.replay_freeze_reason([_event("unknown")], FINGERPRINT)
+
+
+def test_allocator_requires_replayed_freeze_reason_keyword(tmp_path) -> None:
+    fence = nonce.SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    try:
+        with pytest.raises(TypeError, match="replayed_freeze_reason"):
+            nonce.NonceAllocator(
+                fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
+                replayed_last=0, recorder=lambda payload: None,
+            )
+    finally:
+        fence.release()
+
+
+@pytest.mark.parametrize(
+    ("value", "error", "message"),
+    [(False, TypeError, "replayed_freeze_reason"),
+     ("unknown", ValueError, "freeze reason")],
+)
+def test_allocator_rejects_invalid_replayed_freeze_reason(
+    tmp_path, value, error, message,
+) -> None:
+    fence = nonce.SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    try:
+        with pytest.raises(error, match=message):
+            nonce.NonceAllocator(
+                fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
+                replayed_last=0, replayed_freeze_reason=value,
+                recorder=lambda payload: None,
+            )
+    finally:
+        fence.release()
+
+
+def test_replayed_freeze_is_readonly_and_absorbs_before_time_validation(tmp_path) -> None:
+    allocator, fence, recorded = _allocator(
+        tmp_path, replayed_freeze_reason="clock_backward",
+    )
+    assert issubclass(nonce.NonceFrozenError, RuntimeError)
+    assert not hasattr(nonce, "NonceAllocationError")
+    assert allocator.frozen_reason == "clock_backward"
+    with pytest.raises(AttributeError):
+        allocator.frozen_reason = None
+    for now_ms, decided_ns in [(0, 0), (NOW_MS, 1)]:
+        with pytest.raises(nonce.NonceFrozenError) as raised:
+            allocator.allocate(now_ms=now_ms, decided_ns=decided_ns)
+        assert raised.value.reason == "clock_backward"
+    assert recorded == [] and allocator.last_nonce == 0
+    fence.release()
+
+
+def test_clock_backward_freeze_records_advanced_previous_nonce_once(tmp_path) -> None:
+    allocator, fence, recorded = _allocator(
+        tmp_path, replayed_last=NOW_MS + DAY_MS - 2,
+    )
+    allocated = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
+    assert allocated == NOW_MS + DAY_MS - 1
+    with pytest.raises(nonce.NonceFrozenError) as raised:
+        allocator.allocate(now_ms=NOW_MS, decided_ns=2)
+    assert raised.value.reason == allocator.frozen_reason == "clock_backward"
+    assert recorded[1] == {
+        "wallet_fingerprint": FINGERPRINT, "account_digest": ACCOUNT_DIGEST,
+        "instance_id": INSTANCE_ID, "allocated_nonce": None,
+        "previous_nonce": allocated, "now_ms": NOW_MS, "outcome": "frozen",
+        "reason": "clock_backward", "decided_ns": 2,
+    }
+    assert len(recorded) == 2 and allocator.last_nonce == allocated
+    with pytest.raises(nonce.NonceFrozenError):
+        allocator.allocate(now_ms=NOW_MS, decided_ns=3)
+    assert len(recorded) == 2
+    fence.release()
+
+
+def test_real_fence_invalidation_freezes_before_candidate_creation(tmp_path) -> None:
+    allocator, fence, recorded = _allocator(tmp_path, replayed_last=NOW_MS)
+    fence.path.unlink()
+    fence.path.touch()
+    with pytest.raises(nonce.NonceFrozenError) as raised:
+        allocator.allocate(now_ms=NOW_MS, decided_ns=9)
+    assert raised.value.reason == allocator.frozen_reason == "fence_invalidated"
+    assert recorded == [{
+        "wallet_fingerprint": FINGERPRINT, "account_digest": ACCOUNT_DIGEST,
+        "instance_id": INSTANCE_ID, "allocated_nonce": None,
+        "previous_nonce": NOW_MS, "now_ms": NOW_MS, "outcome": "frozen",
+        "reason": "fence_invalidated", "decided_ns": 9,
+    }]
+    assert allocator.last_nonce == NOW_MS
+    with pytest.raises(nonce.NonceFrozenError):
+        allocator.allocate(now_ms=0, decided_ns=0)
+    assert len(recorded) == 1

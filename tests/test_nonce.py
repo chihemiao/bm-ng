@@ -81,13 +81,15 @@ def test_replay_ignores_other_signers_but_not_malformed_matching_rows() -> None:
         nonce.replay_last_allocated_nonce([malformed], FINGERPRINT)
 
 
-def _allocator(tmp_path: Path, *, replayed_last: int = 0, recorder=None):
+def _allocator(
+    tmp_path: Path, *, replayed_last: int = 0, replayed_freeze_reason=None, recorder=None,
+):
     tmp_path.mkdir(parents=True, exist_ok=True)
     fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
     recorded = []
     allocator = nonce.NonceAllocator(
         fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
-        replayed_last=replayed_last,
+        replayed_last=replayed_last, replayed_freeze_reason=replayed_freeze_reason,
         recorder=recorded.append if recorder is None else recorder,
     )
     return allocator, fence, recorded
@@ -108,7 +110,8 @@ def test_allocator_rejects_invalid_bound_inputs(
     fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
     values = {
         "fence": fence, "account_digest": ACCOUNT_DIGEST, "instance_id": INSTANCE_ID,
-        "replayed_last": 0, "recorder": lambda payload: None,
+        "replayed_last": 0, "replayed_freeze_reason": None,
+        "recorder": lambda payload: None,
     }
     values[field] = value
     with pytest.raises(error):
@@ -135,21 +138,6 @@ def test_consecutive_allocations_are_strictly_increasing(tmp_path: Path) -> None
     first = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
     assert allocator.allocate(now_ms=NOW_MS, decided_ns=2) == first + 1
     fence.release()
-
-
-def test_allocator_enforces_the_strict_upper_window(tmp_path: Path) -> None:
-    allowed, allowed_fence, _ = _allocator(
-        tmp_path / "allowed", replayed_last=NOW_MS + DAY_MS - 2,
-    )
-    assert allowed.allocate(now_ms=NOW_MS, decided_ns=1) == NOW_MS + DAY_MS - 1
-    allowed_fence.release()
-    denied, denied_fence, recorded = _allocator(
-        tmp_path / "denied", replayed_last=NOW_MS + DAY_MS - 1,
-    )
-    with pytest.raises(nonce.NonceAllocationError):
-        denied.allocate(now_ms=NOW_MS, decided_ns=1)
-    assert recorded == [] and denied.last_nonce == NOW_MS + DAY_MS - 1
-    denied_fence.release()
 
 
 def test_success_records_a_valid_schema_19_payload(tmp_path: Path) -> None:
