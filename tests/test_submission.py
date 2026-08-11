@@ -10,7 +10,7 @@ from execution.orders import (
     make_order_intent,
     order_request_record,
 )
-from execution.writer import WriterIdentity, WriterLease
+from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 
 ACCOUNT_DIGEST = "a" * 64
 WALLET = "b" * 64
@@ -107,6 +107,15 @@ def test_submit_resume_transports_the_existing_request_only(submission_runtime) 
     assert _submit(submission_runtime, intent, request=existing) == ("submit", "accepted")
     assert effects == [("transport", existing)]
     assert effects[0][1] is existing and allocator.last_nonce == 0
+
+
+@pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
+def test_persist_requires_current_submit_authority(submission_runtime, mode: str) -> None:
+    lease, allocator, effects = submission_runtime
+    lease._authority = lease.authority._replace(mode=mode)
+    with pytest.raises(WriterLeaseError, match="action not authorized"):
+        _submit(submission_runtime, _intent())
+    assert effects == [] and allocator.last_nonce == 0
 
 
 @pytest.mark.parametrize("decision", ["freeze", "reconcile", "hold", "reject_stale"])
