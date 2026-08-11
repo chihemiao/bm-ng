@@ -127,6 +127,46 @@ def venue_probe_row_errors(row: object) -> tuple[str, ...]:
     return tuple(errors)
 
 
+def normalize_venue_status(*, http_status: int, status_field: object) -> str:
+    """Reduce a response to a closed status without inspecting response prose."""
+    if type(http_status) is not int or http_status != 200:
+        return "absent"
+    if type(status_field) is str and status_field in ("ok", "err"):
+        return status_field
+    return "absent"
+
+
+def assemble_probe_row(
+    *,
+    probe_id,
+    attempt_ordinal,
+    signer_slot,
+    http_status,
+    venue_status,
+    start_offset_ms,
+    elapsed_ms,
+    run_digest,
+    harness_revision,
+) -> Mapping[str, object]:
+    """Build one validated row through a boundary with no raw-text input."""
+    row = {
+        "probe_id": probe_id,
+        "attempt_ordinal": attempt_ordinal,
+        "signer_slot": signer_slot,
+        "http_status": http_status,
+        "venue_status": venue_status,
+        "venue_error_code": None,
+        "start_offset_ms": start_offset_ms,
+        "elapsed_ms": elapsed_ms,
+        "run_digest": run_digest,
+        "harness_revision": harness_revision,
+    }
+    errors = venue_probe_row_errors(row)
+    if errors:
+        raise ValueError("invalid probe row: " + "; ".join(errors))
+    return row
+
+
 def _probe_row_identity(row: object) -> tuple[object, object, object]:
     if not isinstance(row, Mapping):
         return (None, None, None)
