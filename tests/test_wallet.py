@@ -1,5 +1,5 @@
 import ast
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -16,6 +16,21 @@ from execution.wallet import (
 DAY_NS = 86_400 * 1_000_000_000
 ISSUED_NS = 1_000_000_000
 ROOT = Path(__file__).parents[1]
+VALID_ROTATION_COMBINATIONS = (
+    ("rotated", "rotation_completed", "rotation_due"),
+    ("rotated", "rotation_completed", "expired"),
+    ("aborted", "not_due", "active"),
+    ("aborted", "same_wallet", "active"),
+    ("aborted", "same_wallet", "rotation_due"),
+    ("aborted", "same_wallet", "expired"),
+    ("aborted", "identity_changed", "active"),
+    ("aborted", "identity_changed", "rotation_due"),
+    ("aborted", "identity_changed", "expired"),
+    ("aborted", "release_failed", "rotation_due"),
+    ("aborted", "release_failed", "expired"),
+    ("aborted", "acquire_failed", "rotation_due"),
+    ("aborted", "acquire_failed", "expired"),
+)
 
 
 def _registration(**changes: object) -> AgentWalletRegistration:
@@ -67,6 +82,11 @@ def _decided_ns(assessment: str) -> int:
         "rotation_due": expiry - ROTATION_LEAD_NS,
         "expired": expiry,
     }[assessment]
+
+
+def _rotation_decision(**changes: object):
+    payload = _rotation_event(**changes)["payload"]
+    return wallet_module.AgentWalletRotationDecision(**payload)
 
 
 def test_wallet_timing_constants_are_owned_by_the_data_contract() -> None:
@@ -138,21 +158,7 @@ def test_wallet_rotation_rejects_invalid_field_formats(
 
 @pytest.mark.parametrize(
     ("outcome", "reason", "assessment"),
-    [
-        ("rotated", "rotation_completed", "rotation_due"),
-        ("rotated", "rotation_completed", "expired"),
-        ("aborted", "not_due", "active"),
-        ("aborted", "same_wallet", "active"),
-        ("aborted", "same_wallet", "rotation_due"),
-        ("aborted", "same_wallet", "expired"),
-        ("aborted", "identity_changed", "active"),
-        ("aborted", "identity_changed", "rotation_due"),
-        ("aborted", "identity_changed", "expired"),
-        ("aborted", "release_failed", "rotation_due"),
-        ("aborted", "release_failed", "expired"),
-        ("aborted", "acquire_failed", "rotation_due"),
-        ("aborted", "acquire_failed", "expired"),
-    ],
+    VALID_ROTATION_COMBINATIONS,
 )
 def test_wallet_rotation_accepts_every_closed_semantic_combination(
     outcome: str, reason: str, assessment: str
@@ -218,6 +224,61 @@ def test_wallet_rotation_rejects_semantic_contradictions(
 ) -> None:
     with pytest.raises(contracts.ContractError, match=message):
         contracts.validate_envelope(_rotation_event(**changes))
+
+
+@pytest.mark.parametrize(("outcome", "reason", "assessment"), VALID_ROTATION_COMBINATIONS)
+def test_rotation_decision_accepts_every_schema_combination(
+    outcome: str, reason: str, assessment: str
+) -> None:
+    changes = {
+        "outcome": outcome,
+        "reason": reason,
+        "assessment": assessment,
+        "decided_ns": _decided_ns(assessment),
+    }
+    if reason == "same_wallet":
+        changes["new_wallet_fingerprint"] = "b" * 64
+    assert _rotation_decision(**changes).reason == reason
+
+
+def test_rotation_decision_is_frozen_and_matches_all_thirteen_schema_fields() -> None:
+    decision = _rotation_decision()
+    assert tuple(field.name for field in fields(decision)) == (
+        "account_digest", "instance_id", "boot_id",
+        "old_wallet_fingerprint", "new_wallet_fingerprint",
+        "old_issued_ns", "old_expires_ns", "new_issued_ns", "new_expires_ns",
+        "assessment", "outcome", "reason", "decided_ns",
+    )
+    with pytest.raises(FrozenInstanceError):
+        decision.reason = "not_due"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"account_digest": "raw-account"},
+        {"old_wallet_fingerprint": "B" * 64},
+        {"new_wallet_fingerprint": "c" * 63},
+        {"instance_id": ""},
+        {"boot_id": ""},
+        {
+            "old_issued_ns": True,
+            "old_expires_ns": 1 + VALIDITY_NS,
+            "decided_ns": 1 + VALIDITY_NS - ROTATION_LEAD_NS,
+        },
+        {"old_expires_ns": 0},
+        {"new_issued_ns": 1.0},
+        {"new_expires_ns": 0},
+        {"decided_ns": 0},
+        {"old_expires_ns": ISSUED_NS + VALIDITY_NS - 1},
+        {"outcome": "aborted", "reason": "not_due"},
+    ],
+)
+def test_rotation_decision_rejects_invalid_structure_and_semantics(
+    changes: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError):
+        _rotation_decision(**changes)
 
 
 def test_registration_is_a_frozen_record_with_fixed_validity() -> None:
