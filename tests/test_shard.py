@@ -161,10 +161,16 @@ def test_writer_decision_uses_the_same_durable_window_replay(tmp_path: Path) -> 
     assert replay.freeze_reasons == ()
 
 
-def test_replay_freezes_distinct_acquires_for_the_same_account_epoch(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("instance_id", "writer-two"), ("lock_path_digest", "d" * 64)),
+)
+def test_replay_freezes_distinct_acquires_for_the_same_account_epoch(
+    tmp_path: Path, field: str, value: str,
+) -> None:
     first = _writer_decision(1)
     conflict = _writer_decision(2)
-    conflict["payload"]["lock_path_digest"] = "d" * 64
+    conflict["payload"][field] = value
     writer = ShardWriter(tmp_path, boot_id="boot-a")
     for event in (first, first, conflict):
         writer.append(shard_module.encode_event(event), event["recv_wall_ns"])
