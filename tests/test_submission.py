@@ -163,46 +163,39 @@ def test_submit_resume_allows_prior_instance_and_epoch(submission_runtime) -> No
 
 
 @pytest.mark.parametrize(
-    "offset", [-2 * DAY_MS - 1, -2 * DAY_MS, DAY_MS, DAY_MS + 1],
+    ("leg", "offset", "wallet", "error"),
+    [
+        ("hyperliquid", -2 * DAY_MS, WALLET,
+         "resumed request nonce is not strictly after now_ms minus two days"),
+        ("hyperliquid", -2 * DAY_MS + 1, WALLET, None),
+        ("hyperliquid", DAY_MS, WALLET,
+         "resumed request nonce is not strictly before now_ms plus one day"),
+        ("hyperliquid", DAY_MS - 1, WALLET, None),
+        ("bybit", 0, WALLET, None),
+        ("hyperliquid", -2 * DAY_MS, "c" * 64,
+         "resume request wallet_fingerprint mismatch"),
+    ],
 )
-def test_hyperliquid_resume_rejects_nonce_outside_strict_time_window(
-    submission_runtime, offset: int,
+def test_resume_nonce_window_and_binding_precedence(
+    submission_runtime, leg: str, offset: int, wallet: str, error: str | None,
 ) -> None:
-    intent = _intent()
-    now_ms = 3 * DAY_MS
+    allocator = _count_allocations(submission_runtime)
+    intent, now_ms = _intent(leg), 3 * DAY_MS
+    allocated = None if leg == "bybit" else now_ms + offset
     existing = _request(
-        submission_runtime, intent, allocated_nonce=now_ms + offset,
+        submission_runtime, intent, allocated_nonce=allocated,
+        wallet_fingerprint=wallet,
     )
-    with pytest.raises(
-        OrderContractError,
-        match="^resume request allocated_nonce outside time window$",
-    ):
-        _submit(submission_runtime, intent, request=existing, now_ms=now_ms)
-    assert submission_runtime[2] == []
-
-
-@pytest.mark.parametrize("offset", [-2 * DAY_MS + 1, DAY_MS - 1])
-def test_hyperliquid_resume_accepts_nonce_inside_strict_time_window(
-    submission_runtime, offset: int,
-) -> None:
-    intent = _intent()
-    now_ms = 3 * DAY_MS
-    existing = _request(
-        submission_runtime, intent, allocated_nonce=now_ms + offset,
-    )
-    assert _submit(
-        submission_runtime, intent, request=existing, now_ms=now_ms,
-    ) == ("submit", "accepted")
-    assert submission_runtime[2] == [("transport", existing)]
-
-
-def test_bybit_resume_has_no_signer_nonce_time_window(submission_runtime) -> None:
-    intent = _intent("bybit")
-    existing = _request(submission_runtime, intent, allocated_nonce=None)
-    assert _submit(
-        submission_runtime, intent, request=existing, now_ms=3 * DAY_MS,
-    ) == ("submit", "accepted")
-    assert submission_runtime[2] == [("transport", existing)]
+    if error is not None:
+        with pytest.raises(OrderContractError, match=f"^{error}$"):
+            _submit(submission_runtime, intent, request=existing, now_ms=now_ms)
+        assert submission_runtime[2] == []
+    else:
+        assert _submit(
+            submission_runtime, intent, request=existing, now_ms=now_ms,
+        ) == ("submit", "accepted")
+        assert submission_runtime[2] == [("transport", existing)]
+    assert allocator.allocate_calls == 0 and allocator.last_nonce == 0
 
 
 @pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
