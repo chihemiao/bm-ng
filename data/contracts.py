@@ -13,6 +13,7 @@ ROTATION_LEAD_NS = 7 * DAY_NS
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 PAYLOAD_SCHEMAS = frozenset(
     {
+        "agent_wallet_rotation",
         "bybit_sequence_gap",
         "account_ledger_entry",
         "collector_config",
@@ -37,7 +38,8 @@ RECONCILIATION_SCHEMAS = frozenset(
     {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
 )
 DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
-    "order_request", "writer_authority_promotion", "writer_lease_decision",
+    "agent_wallet_rotation", "order_request", "writer_authority_promotion",
+    "writer_lease_decision",
 }
 ORDER_LEASE_FIELDS = (
     "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
@@ -127,10 +129,14 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     if event["payload_schema"] in RECONCILIATION_SCHEMAS:
         _validate_reconciliation(event)
-    if event["payload_schema"] == "writer_lease_decision":
-        _validate_writer_decision(event)
-    if event["payload_schema"] == "writer_authority_promotion":
-        _validate_writer_promotion(event)
+    decision_validators = {
+        "agent_wallet_rotation": _validate_wallet_rotation,
+        "writer_authority_promotion": _validate_writer_promotion,
+        "writer_lease_decision": _validate_writer_decision,
+    }
+    validator = decision_validators.get(event["payload_schema"])
+    if validator is not None:
+        validator(event)
     return event
 
 
@@ -209,6 +215,31 @@ def _validate_writer_promotion(event: dict[str, Any]) -> None:
     key = tuple(payload[field] for field in ("outcome", "from_mode", "to_mode", "reason"))
     actions = PROMOTION_DECISIONS.get(key, frozenset())
     _require(payload["admission_action"] in actions, "invalid writer promotion combination")
+
+
+def _validate_wallet_rotation(event: dict[str, Any]) -> None:
+    _require(event["event_kind"] == "decision", "invalid wallet rotation event kind")
+    _require(event["schema_ver"] == 1, "unsupported wallet rotation schema version")
+    fields = set(
+        "account_digest assessment boot_id decided_ns instance_id new_expires_ns "
+        "new_issued_ns new_wallet_fingerprint old_expires_ns old_issued_ns "
+        "old_wallet_fingerprint outcome reason".split()
+    )
+    payload = _exact_fields(event["payload"], fields, "agent wallet rotation")
+    for field in ("account_digest", "old_wallet_fingerprint", "new_wallet_fingerprint"):
+        _require(_valid_digest(payload[field]), f"invalid {field}")
+    for field in ("instance_id", "boot_id"):
+        _require(_nonempty_text(payload[field]), f"invalid {field}")
+    times = ("old_issued_ns", "old_expires_ns", "new_issued_ns", "new_expires_ns", "decided_ns")
+    for field in times:
+        _require(type(payload[field]) is int and payload[field] > 0, f"invalid {field}")
+    _require(payload["assessment"] in {"active", "rotation_due", "expired"}, "invalid assessment")
+    _require(payload["outcome"] in {"rotated", "aborted"}, "invalid outcome")
+    reasons = {
+        "rotation_completed", "release_failed", "acquire_failed", "same_wallet",
+        "identity_changed", "not_due",
+    }
+    _require(payload["reason"] in reasons, "invalid reason")
 
 
 def _validate_surface(event: dict[str, Any]) -> None:
