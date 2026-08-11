@@ -45,7 +45,7 @@ def test_demotion_reason_encodes_each_closed_key(key: str) -> None:
     assert demotion_reason(_freeze(reason)) == f"writer_demoted:{key}"
 
 
-def test_demotion_reason_sorts_multiple_keys_and_drops_nonce_payload() -> None:
+def test_demotion_reason_encodes_multiple_keys_and_drops_nonce_payload() -> None:
     reasons = (
         "continuous_admission:pair_unknown",
         "continuous_admission:nonce_frozen:allocated_nonce_conflict",
@@ -56,6 +56,17 @@ def test_demotion_reason_sorts_multiple_keys_and_drops_nonce_payload() -> None:
         "continuous_admission:nonce_frozen,continuous_admission:pair_unknown"
     )
     assert demotion_reason(_freeze(*reasons)) == expected
+
+
+def test_demotion_reason_inherits_order_from_admission_decision() -> None:
+    decision = _freeze(
+        "continuous_admission:pair_unknown",
+        "continuous_admission:nonce_frozen:nonce-conflict",
+        "continuous_admission:exposure_unknown",
+    )
+    encoded_keys = demotion_reason(decision).removeprefix("writer_demoted:").split(",")
+    expected_keys = [reason.removesuffix(":nonce-conflict") for reason in decision.reasons]
+    assert encoded_keys == expected_keys
 
 
 def test_demotion_reason_rejects_ready_and_unknown_reason() -> None:
@@ -72,8 +83,7 @@ def test_demotion_reason_rejects_non_decision() -> None:
 
 def test_demotion_reason_maximum_length_is_exact_and_bounded() -> None:
     reasons = tuple(
-        f"{key}:detail" if key == NONCE_KEY else key
-        for key in CONTINUOUS_ADMISSION_REASON_KEYS
+        f"{key}:detail" if key == NONCE_KEY else key for key in CONTINUOUS_ADMISSION_REASON_KEYS
     )
     encoded = demotion_reason(_freeze(*reasons))
     maximum = len("writer_demoted:") + sum(map(len, CONTINUOUS_ADMISSION_REASON_KEYS))

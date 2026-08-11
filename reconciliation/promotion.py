@@ -4,7 +4,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from execution.writer import WriterAuthority, WriterLease, WriterLeaseError
+from reconciliation.admission import CONTINUOUS_ADMISSION_REASON_KEYS
 from reconciliation.state import AdmissionDecision, StartupContractError
+
+DEMOTION_PREFIX = "writer_demoted:"
+NONCE_FREEZE_KEY = "continuous_admission:nonce_frozen"
 
 
 def _require(condition: bool, message: str) -> None:
@@ -64,6 +68,21 @@ def _admission_digest(admission: AdmissionDecision) -> str:
         sort_keys=True, separators=(",", ":"),
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _demotion_key(reason: str) -> str:
+    key = NONCE_FREEZE_KEY if reason.startswith(f"{NONCE_FREEZE_KEY}:") else reason
+    _require(key in CONTINUOUS_ADMISSION_REASON_KEYS, "unknown continuous admission reason")
+    return key
+
+
+def demotion_reason(admission: AdmissionDecision) -> str:
+    """Encode bounded admission reason keys without copying dynamic payloads."""
+    if not isinstance(admission, AdmissionDecision):
+        raise TypeError("admission must be an AdmissionDecision")
+    _require(admission.action == "cancel_only_freeze", "ready admission cannot demote")
+    keys = tuple(_demotion_key(reason) for reason in admission.reasons)
+    return DEMOTION_PREFIX + ",".join(keys)
 
 
 def _decision(

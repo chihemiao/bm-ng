@@ -117,8 +117,7 @@ def _validate_reconciliation(event: dict[str, Any]) -> None:
     _require(event["event_kind"] == "reconciliation", "invalid reconciliation event kind")
     _require(event["schema_ver"] == 1, "unsupported reconciliation schema version")
     validators = {
-        "reconciliation_surface": _validate_surface,
-        "account_ledger_entry": _validate_ledger_entry,
+        "reconciliation_surface": _validate_surface, "account_ledger_entry": _validate_ledger_entry,
         "reconciliation_decision": _validate_decision,
     }
     validators[event["payload_schema"]](event)
@@ -134,10 +133,8 @@ def _validate_signer_nonce(event: dict[str, Any]) -> None:
 def _validate_writer_decision(event: dict[str, Any]) -> None:
     _require(event["event_kind"] == "decision", "invalid writer decision event kind")
     _require(event["schema_ver"] == 1, "unsupported writer decision schema version")
-    fields = set(
-        "account_digest action boot_id instance_id lease_epoch lock_path_digest outcome "
-        "prior_epoch_valid reason wallet_fingerprint".split()
-    )
+    fields = set("account_digest action boot_id instance_id lease_epoch lock_path_digest outcome "
+                 "prior_epoch_valid reason wallet_fingerprint".split())
     payload = _exact_fields(event["payload"], fields, "writer lease decision")
     for field in ("account_digest", "wallet_fingerprint", "lock_path_digest"):
         _require(_valid_digest(payload[field]), f"invalid {field}")
@@ -146,19 +143,24 @@ def _validate_writer_decision(event: dict[str, Any]) -> None:
     _require(type(payload["prior_epoch_valid"]) is bool, "invalid prior_epoch_valid")
     epoch = payload["lease_epoch"]
     _require(epoch is None or type(epoch) is int and epoch > 0, "invalid lease_epoch")
-    reasons = WRITER_DECISIONS.get((payload["action"], payload["outcome"]), frozenset())
-    _require(payload["reason"] in reasons, "invalid writer decision combination")
-    needs_epoch = payload["outcome"] not in {"terminated"}
+    combination, reason = (payload["action"], payload["outcome"]), payload["reason"]
+    valid_reason = isinstance(reason, str) and reason in WRITER_DECISIONS.get(combination, ())
+    if combination == ("demote", "cancel_only"):
+        has_prefix = isinstance(reason, str) and reason.startswith("writer_demoted:")
+        keys = reason.removeprefix("writer_demoted:").split(",") if has_prefix else []
+        valid_reason = bool(keys and keys[0]) and keys == sorted(set(keys))
+        key_prefix = "continuous_admission:"
+        valid_reason &= all(key.startswith(key_prefix) and key.count(":") == 1 for key in keys)
+    _require(valid_reason, "invalid writer decision combination")
+    needs_epoch = payload["outcome"] != "terminated"
     _require(not needs_epoch or epoch is not None, "writer decision needs lease_epoch")
 
 
 def _validate_writer_promotion(event: dict[str, Any]) -> None:
     _require(event["event_kind"] == "decision", "invalid writer promotion event kind")
     _require(event["schema_ver"] == 1, "unsupported writer promotion schema version")
-    fields = set(
-        "account_digest admission_action admission_digest boot_id decided_ns from_mode "
-        "instance_id lease_epoch outcome reason to_mode".split()
-    )
+    fields = set("account_digest admission_action admission_digest boot_id decided_ns from_mode "
+                 "instance_id lease_epoch outcome reason to_mode".split())
     payload = _exact_fields(event["payload"], fields, "writer authority promotion")
     for field in ("account_digest", "admission_digest"):
         _require(_valid_digest(payload[field]), f"invalid {field}")
@@ -168,18 +170,16 @@ def _validate_writer_promotion(event: dict[str, Any]) -> None:
     _require(valid_epoch, "invalid lease_epoch")
     _require(type(payload["decided_ns"]) is int and payload["decided_ns"] > 0, "invalid decided_ns")
     key = tuple(payload[field] for field in ("outcome", "from_mode", "to_mode", "reason"))
-    actions = PROMOTION_DECISIONS.get(key, frozenset())
-    _require(payload["admission_action"] in actions, "invalid writer promotion combination")
+    _require(payload["admission_action"] in PROMOTION_DECISIONS.get(key, ()),
+             "invalid writer promotion combination")
 
 
 def _validate_wallet_rotation(event: dict[str, Any]) -> None:
     _require(event["event_kind"] == "decision", "invalid wallet rotation event kind")
     _require(event["schema_ver"] == 1, "unsupported wallet rotation schema version")
-    fields = set(
-        "account_digest assessment boot_id decided_ns instance_id new_expires_ns "
-        "new_issued_ns new_wallet_fingerprint old_expires_ns old_issued_ns "
-        "old_wallet_fingerprint outcome reason".split()
-    )
+    fields = set("account_digest assessment boot_id decided_ns instance_id new_expires_ns "
+                 "new_issued_ns new_wallet_fingerprint old_expires_ns old_issued_ns "
+                 "old_wallet_fingerprint outcome reason".split())
     payload = _exact_fields(event["payload"], fields, "agent wallet rotation")
     for field in ("account_digest", "old_wallet_fingerprint", "new_wallet_fingerprint"):
         _require(_valid_digest(payload[field]), f"invalid {field}")
@@ -190,9 +190,8 @@ def _validate_wallet_rotation(event: dict[str, Any]) -> None:
         _require(type(payload[field]) is int and payload[field] > 0, f"invalid {field}")
     _require(payload["assessment"] in {"active", "rotation_due", "expired"}, "invalid assessment")
     _require(payload["outcome"] in {"rotated", "aborted"}, "invalid outcome")
-    reasons = set(
-        "rotation_completed release_failed acquire_failed same_wallet "
-        "identity_changed not_due".split())
+    reasons = set("rotation_completed release_failed acquire_failed same_wallet "
+                  "identity_changed not_due".split())
     _require(payload["reason"] in reasons, "invalid reason")
     errors = _wallet_errors(payload, validity_ns=VALIDITY_NS, rotation_lead_ns=ROTATION_LEAD_NS)
     _require(not errors, errors[0] if errors else "")
