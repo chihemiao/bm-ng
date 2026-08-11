@@ -48,7 +48,7 @@ class SignerFence:
     ) -> "SignerFence":
         _validate_instance(instance_id)
         path = path_for(root, wallet_fingerprint)
-        flags = os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW
+        flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW
         try:
             fd = os.open(path, flags, 0o600)
         except OSError as exc:
@@ -56,7 +56,6 @@ class SignerFence:
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise SignerFenceError("signer lock path is not a regular file")
-            os.fchmod(fd, 0o600)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(fd)
@@ -64,6 +63,12 @@ class SignerFence:
         except (OSError, SignerFenceError) as exc:
             os.close(fd)
             raise SignerFenceError("signer lock path is not a regular file") from exc
+        try:
+            os.fchmod(fd, 0o600)
+            os.ftruncate(fd, 0)
+        except OSError as exc:
+            os.close(fd)
+            raise SignerFenceError("signer lock setup failed") from exc
         fence = cls(path, wallet_fingerprint, instance_id, fd)
         fence.revalidate()
         return fence
