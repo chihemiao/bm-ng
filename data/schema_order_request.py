@@ -57,6 +57,8 @@ def order_request_binding_errors(
     nonce = payload["allocated_nonce"]
     if venue == "hyperliquid" and nonce is None:
         return ("order_request:hyperliquid_nonce_null",)
+    if venue == "hyperliquid" and (type(nonce) is not int or nonce <= 0):
+        return ("order_request:hyperliquid_nonce_invalid",)
     if venue == "bybit" and nonce is not None:
         return ("order_request:bybit_nonce_not_null",)
     return ()

@@ -4,6 +4,8 @@ import hashlib
 import json
 from dataclasses import dataclass
 
+from data.schema_order_request import order_request_binding_errors
+
 ORDER_STATUSES = frozenset(
     {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
 )
@@ -85,11 +87,17 @@ def _validate_lease_snapshot(
     _require(isinstance(instance_id, str) and bool(instance_id), "invalid writer_instance_id")
 
 
-def _validate_allocated_nonce(leg: str, allocated_nonce: object) -> None:
-    if leg == "hyperliquid":
-        _require(allocated_nonce is not None, "order_request:hyperliquid_nonce_null")
-    else:
-        _require(allocated_nonce is None, "order_request:bybit_nonce_not_null")
+def _validate_request_binding(
+    leg: str, account_digest: str, lease_epoch: int, instance_id: str,
+    wallet_fingerprint: str, allocated_nonce: object,
+) -> None:
+    payload = {
+        "account_digest": account_digest, "lease_epoch": lease_epoch,
+        "writer_instance_id": instance_id, "wallet_fingerprint": wallet_fingerprint,
+        "allocated_nonce": allocated_nonce,
+    }
+    errors = order_request_binding_errors(payload, venue=leg, has_sequence=True)
+    _require(not errors, errors[0] if errors else "")
 
 
 def _client_order_id(
@@ -139,7 +147,10 @@ def order_request_record(
     _validate_lease_snapshot(
         account_digest, lease_epoch, writer_instance_id, wallet_fingerprint
     )
-    _validate_allocated_nonce(intent.leg, allocated_nonce)
+    _validate_request_binding(
+        intent.leg, account_digest, lease_epoch, writer_instance_id,
+        wallet_fingerprint, allocated_nonce,
+    )
     values = [getattr(intent, field) for field in INTENT_FIELDS]
     return OrderRequestRecord(
         *values, intent.client_order_id, recorded_ns,
@@ -174,7 +185,10 @@ def _validate_request(intent: OrderIntent, request: OrderRequestRecord | None) -
         request.account_digest, request.lease_epoch,
         request.writer_instance_id, request.wallet_fingerprint,
     )
-    _validate_allocated_nonce(request.leg, request.allocated_nonce)
+    _validate_request_binding(
+        request.leg, request.account_digest, request.lease_epoch,
+        request.writer_instance_id, request.wallet_fingerprint, request.allocated_nonce,
+    )
     intent_fields = {field: getattr(intent, field) for field in INTENT_FIELDS}
     matches = request.client_order_id == intent.client_order_id
     matches &= request.intent_fields() == intent_fields
