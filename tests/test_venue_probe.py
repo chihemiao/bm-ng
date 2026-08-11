@@ -138,7 +138,7 @@ def test_probe_dataset_identity_set_rejects_newly_allowed_ordinal(monkeypatch):
     rows = _dataset()
     rows[0]["attempt_ordinal"] = 2
     errors = venue_probe.validate_probe_dataset(rows)
-    assert "invalid attempt_ordinal" not in errors
+    assert all(not error.endswith("invalid attempt_ordinal") for error in errors)
     assert "invalid probe row set" in errors
 
 
