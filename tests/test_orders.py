@@ -240,6 +240,33 @@ def test_order_request_sequence_presence_requires_an_exact_boolean() -> None:
         )
 
 
+@pytest.mark.parametrize("allocated_nonce", [0, -1, True, "7", 7.0])
+def test_schema_rejects_invalid_hyperliquid_nonce_domain(allocated_nonce) -> None:
+    schema = import_module("data.schema_order_request")
+    errors = schema.order_request_binding_errors(
+        _bound_event(allocated_nonce=allocated_nonce)["payload"],
+        venue="hyperliquid",
+        has_sequence=True,
+    )
+    assert errors == ("order_request:hyperliquid_nonce_invalid",)
+
+
+@pytest.mark.parametrize("allocated_nonce", [0, -1, True, "7", 7.0])
+def test_execution_reuses_schema_rule_for_invalid_hyperliquid_nonce(
+    allocated_nonce,
+) -> None:
+    orders = import_module("execution.orders")
+    schema = import_module("data.schema_order_request")
+    assert orders.order_request_binding_errors is schema.order_request_binding_errors
+    with pytest.raises(OrderContractError) as error:
+        order_request_record(
+            _intent(), recorded_ns=110, account_digest="a" * 64,
+            lease_epoch=1, writer_instance_id="writer-one", wallet_fingerprint="b" * 64,
+            allocated_nonce=allocated_nonce,
+        )
+    assert str(error.value) == "order_request:hyperliquid_nonce_invalid"
+
+
 def test_bound_order_request_requires_a_durable_sequence() -> None:
     with pytest.raises(ContractError) as error:
         validate_envelope(_bound_event(sequence=False))
