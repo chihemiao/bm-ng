@@ -8,6 +8,7 @@ from execution.writer import (
     WriterLease,
     WriterLeaseError,
 )
+from reconciliation.state import WriterPromotionDecision
 
 
 def _identity() -> WriterIdentity:
@@ -16,6 +17,63 @@ def _identity() -> WriterIdentity:
 
 def _acquire(root: Path, acquired_ns: int = 100) -> WriterLease:
     return WriterLease.acquire(root, _identity(), [].append, acquired_ns=acquired_ns)
+
+
+def _decision(**changes: object) -> WriterPromotionDecision:
+    fields = {
+        "account_digest": "a" * 64,
+        "instance_id": "writer-one",
+        "boot_id": "boot-one",
+        "lease_epoch": 1,
+        "from_mode": "pending_reconciliation",
+        "to_mode": "risk_increasing",
+        "outcome": "promoted",
+        "reason": "admission_ready",
+        "admission_action": "ready",
+        "admission_digest": "b" * 64,
+        "decided_ns": 100,
+    }
+    fields.update(changes)
+    return WriterPromotionDecision(**fields)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {
+            "to_mode": "pending_reconciliation", "outcome": "denied",
+            "reason": "admission_freeze", "admission_action": "cancel_only_freeze",
+        },
+        {
+            "from_mode": "cancel_only", "to_mode": "cancel_only", "outcome": "denied",
+            "reason": "not_promotable_mode", "admission_action": "ready",
+        },
+        {
+            "from_mode": "cancel_only", "to_mode": "cancel_only", "outcome": "denied",
+            "reason": "not_promotable_mode", "admission_action": "cancel_only_freeze",
+        },
+    ],
+)
+def test_promotion_decision_accepts_only_closed_outcomes(changes: dict) -> None:
+    assert _decision(**changes).decided_ns == 100
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"to_mode": "pending_reconciliation"},
+        {"account_digest": "raw-account"},
+        {"admission_digest": "raw-admission"},
+        {"instance_id": ""},
+        {"boot_id": ""},
+        {"lease_epoch": 0},
+        {"decided_ns": 0},
+    ],
+)
+def test_promotion_decision_rejects_invalid_fields_and_combinations(changes: dict) -> None:
+    with pytest.raises(ValueError):
+        _decision(**changes)
 
 
 @pytest.mark.parametrize("acquired_ns", [None, True, "100"])

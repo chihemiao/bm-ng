@@ -83,6 +83,42 @@ class AdmissionDecision:
             _require(bool(self.reasons), "freeze admission needs a reason")
 
 
+@dataclass(frozen=True, slots=True)
+class WriterPromotionDecision:
+    account_digest: str
+    instance_id: str
+    boot_id: str
+    lease_epoch: int
+    from_mode: str
+    to_mode: str
+    outcome: str
+    reason: str
+    admission_action: str
+    admission_digest: str
+    decided_ns: int
+
+    def __post_init__(self) -> None:
+        _require(_valid_digest(self.account_digest), "invalid promotion account digest")
+        _require(_valid_digest(self.admission_digest), "invalid admission digest")
+        _require(bool(self.instance_id) and isinstance(self.instance_id, str), "invalid instance")
+        _require(bool(self.boot_id) and isinstance(self.boot_id, str), "invalid boot")
+        _require(_valid_positive_int(self.lease_epoch), "invalid promotion lease epoch")
+        _require(_valid_positive_int(self.decided_ns), "invalid promotion time")
+        combination = (
+            self.from_mode, self.to_mode, self.outcome, self.reason, self.admission_action
+        )
+        allowed = {
+            ("pending_reconciliation", "risk_increasing", "promoted", "admission_ready", "ready"),
+            (
+                "pending_reconciliation", "pending_reconciliation", "denied",
+                "admission_freeze", "cancel_only_freeze",
+            ),
+            ("cancel_only", "cancel_only", "denied", "not_promotable_mode", "ready"),
+            ("cancel_only", "cancel_only", "denied", "not_promotable_mode", "cancel_only_freeze"),
+        }
+        _require(combination in allowed, "invalid promotion decision")
+
+
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise StartupContractError(message)
@@ -90,6 +126,16 @@ def _require(condition: bool, message: str) -> None:
 
 def _valid_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _valid_positive_int(value: object) -> bool:
+    return _valid_nonnegative_int(value) and value > 0
+
+
+def _valid_digest(value: object) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
 
 
 def _validate_canonical(value: CanonicalSet) -> None:
