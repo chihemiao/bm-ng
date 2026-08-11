@@ -4,6 +4,13 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from reconciliation.fx import FxRate, Notional, convert_usdt_to_usdc
+
+T0A_COLLATERAL_ASSETS = (
+    ("hyperliquid", "USDC"),
+    ("bybit", "USDT"),
+)
+
 
 class LedgerContractError(ValueError):
     """Raised when ledger evidence cannot be folded without guessing."""
@@ -124,3 +131,46 @@ def reconcile_balance_ledger(
         folded == observed,
     )
     return validate_balance_ledger(audit)
+
+
+def _known_collateral(
+    ledger: object, *, venue: str, asset: str
+) -> Decimal | None:
+    if not isinstance(ledger, BalanceLedger):
+        raise TypeError(f"{venue} must be a BalanceLedger")
+    validate_balance_ledger(ledger)
+    if not ledger.self_consistent or ledger.unknown_entry_ids:
+        return None
+    return _balance_pairs(ledger.folded_balances).get(asset)
+
+
+def total_collateral_usdc(
+    *,
+    hyperliquid: BalanceLedger,
+    bybit: BalanceLedger,
+    rate: FxRate | None,
+    now_ns: int,
+    max_age_ns: int,
+) -> Notional | None:
+    """Aggregate replayable T0A collateral, or None when evidence is unknown."""
+    hyperliquid_amount = _known_collateral(
+        hyperliquid, venue="hyperliquid", asset=T0A_COLLATERAL_ASSETS[0][1]
+    )
+    bybit_amount = _known_collateral(
+        bybit, venue="bybit", asset=T0A_COLLATERAL_ASSETS[1][1]
+    )
+    amounts = (hyperliquid_amount, bybit_amount)
+    if any(amount is not None and amount < 0 for amount in amounts):
+        raise ValueError("negative collateral cannot be represented as Notional")
+    converted = convert_usdt_to_usdc(
+        Decimal(0) if bybit_amount is None else bybit_amount,
+        rate=rate,
+        now_ns=now_ns,
+        max_age_ns=max_age_ns,
+    )
+    if hyperliquid_amount is None or bybit_amount is None or converted is None:
+        return None
+    total = hyperliquid_amount + converted
+    if total < 0:
+        raise ValueError("negative collateral cannot be represented as Notional")
+    return Notional(total, "USDC")
