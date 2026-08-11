@@ -1,10 +1,15 @@
+from decimal import Decimal
+
 import pytest
 
+from reconciliation.fx import FxRate, Notional
 from reconciliation.ledger import (
+    T0A_COLLATERAL_ASSETS,
     BalanceDelta,
     BalanceLedger,
     LedgerContractError,
     reconcile_balance_ledger,
+    total_collateral_usdc,
     validate_balance_ledger,
 )
 
@@ -92,3 +97,138 @@ def test_opening_and_snapshot_asset_identities_must_match() -> None:
             account_entries=[],
             closing_balances={"USDT": "1"},
         )
+
+
+def _collateral_ledger(
+    asset: str,
+    amount: str,
+    *,
+    consistent: bool = True,
+    unknown: frozenset[str] = frozenset(),
+    extra: tuple[tuple[str, str], ...] = (),
+) -> BalanceLedger:
+    folded = tuple(sorted(((asset, amount), *extra)))
+    snapshot_amount = amount if consistent else "999"
+    snapshot = tuple(sorted(((asset, snapshot_amount), *extra)))
+    return BalanceLedger(100, 200, folded, snapshot, (), unknown, consistent)
+
+
+def _venue_ledger(venue: str, amount: str | None = None, **changes) -> BalanceLedger:
+    assets = dict(T0A_COLLATERAL_ASSETS)
+    value = amount or ("10.25" if venue == "hyperliquid" else "5")
+    return _collateral_ledger(assets[venue], value, **changes)
+
+
+def _total(**changes):
+    values = {
+        "hyperliquid": _venue_ledger("hyperliquid"),
+        "bybit": _venue_ledger("bybit"),
+        "rate": FxRate("USDT", "USDC", Decimal("1.001"), 100),
+        "now_ns": 110,
+        "max_age_ns": 10,
+    }
+    values.update(changes)
+    return total_collateral_usdc(**values)
+
+
+def test_t0a_collateral_assets_are_bound_to_the_frozen_venues() -> None:
+    assert T0A_COLLATERAL_ASSETS == (
+        ("hyperliquid", "USDC"),
+        ("bybit", "USDT"),
+    )
+
+
+def test_total_collateral_converts_bybit_and_binds_the_usdc_unit() -> None:
+    assert _total() == Notional(Decimal("15.255"), "USDC")
+
+
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+def test_inconsistent_venue_ledger_makes_total_unknown(venue: str) -> None:
+    assert _total(**{venue: _venue_ledger(venue, consistent=False)}) is None
+
+
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+def test_unknown_venue_entry_makes_total_unknown(venue: str) -> None:
+    ledger = _venue_ledger(venue, unknown=frozenset({"unclassified-row"}))
+    assert _total(**{venue: ledger}) is None
+
+
+@pytest.mark.parametrize(
+    ("venue", "unexpected_asset"),
+    [("hyperliquid", "USDT"), ("bybit", "USDC")],
+)
+def test_missing_expected_collateral_asset_is_unknown_not_zero(
+    venue: str, unexpected_asset: str
+) -> None:
+    missing = _collateral_ledger(unexpected_asset, "10")
+    assert _total(**{venue: missing}) is None
+
+
+@pytest.mark.parametrize(
+    "rate",
+    [None, FxRate("USDT", "USDC", Decimal("1.001"), 99)],
+)
+def test_missing_or_stale_fx_keeps_total_unknown(rate: FxRate | None) -> None:
+    assert _total(rate=rate) is None
+
+
+def test_extra_assets_are_ignored_conservatively() -> None:
+    extra = (("BTC", "999999"),)
+    assert _total(
+        hyperliquid=_venue_ledger("hyperliquid", extra=extra),
+        bybit=_venue_ledger("bybit", extra=extra),
+    ) == _total()
+
+
+@pytest.mark.parametrize(
+    ("hyperliquid_amount", "bybit_amount"),
+    [("-1", "0.5"), ("10", "-1")],
+)
+def test_negative_component_or_total_is_known_invalid(
+    hyperliquid_amount: str, bybit_amount: str
+) -> None:
+    with pytest.raises(ValueError, match="negative collateral"):
+        _total(
+            hyperliquid=_venue_ledger("hyperliquid", hyperliquid_amount),
+            bybit=_venue_ledger("bybit", bybit_amount),
+        )
+
+
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+def test_total_requires_real_balance_ledgers(venue: str) -> None:
+    with pytest.raises(TypeError, match=venue):
+        _total(**{venue: object()})
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("now_ns", True, TypeError),
+        ("now_ns", 0, ValueError),
+        ("max_age_ns", 1.0, TypeError),
+        ("max_age_ns", 0, ValueError),
+    ],
+)
+def test_total_collateral_clock_inputs_are_strict(
+    field: str, value: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error, match=field):
+        _total(**{field: value})
+
+
+def test_invalid_ledger_contract_is_not_downgraded_to_unknown() -> None:
+    forged = BalanceLedger(
+        100, 200, (("USDC", "1"),), (("USDC", "2"),), (), frozenset(), True
+    )
+    with pytest.raises(LedgerContractError, match="consistency"):
+        _total(hyperliquid=forged)
+
+
+def test_total_collateral_keeps_all_decimal_precision() -> None:
+    rate = FxRate("USDT", "USDC", Decimal("0.9987654321"), 100)
+    total = _total(
+        hyperliquid=_venue_ledger("hyperliquid", "0.123456789"),
+        bybit=_venue_ledger("bybit", "0.987654321"),
+        rate=rate,
+    )
+    assert total == Notional(Decimal("1.1098917836789971041"), "USDC")
