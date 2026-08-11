@@ -9,6 +9,7 @@ import pytest
 from data.contracts import PAYLOAD_SCHEMAS, ContractError, validate_envelope
 from execution import nonce
 from execution.nonce import SignerFence, SignerFenceError, path_for
+from execution.writer import WriterIdentity, WriterLease
 
 FINGERPRINT = "a" * 64
 ACCOUNT_DIGEST = "b" * 64
@@ -81,42 +82,45 @@ def test_replay_ignores_other_signers_but_not_malformed_matching_rows() -> None:
         nonce.replay_last_allocated_nonce([malformed], FINGERPRINT)
 
 
-def _allocator(
-    tmp_path: Path, *, replayed_last: int = 0, replayed_freeze_reason=None, recorder=None,
-):
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
-    recorded = []
-    allocator = nonce.NonceAllocator(
-        fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
-        replayed_last=replayed_last, replayed_freeze_reason=replayed_freeze_reason,
-        recorder=recorded.append if recorder is None else recorder,
-    )
-    return allocator, fence, recorded
+@pytest.fixture
+def make_nonce_allocator(tmp_path: Path, request):
+    def make(*, replayed_last=0, replayed_freeze_reason=None, recorder=..., **changes):
+        fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+        identity = WriterIdentity(
+            "hyperliquid:test-account", INSTANCE_ID, FINGERPRINT, "boot-one"
+        )
+        lease = WriterLease.acquire(tmp_path, identity, [].append, acquired_ns=100)
+        request.addfinalizer(lease.release)
+        request.addfinalizer(fence.release)
+        recorded = []
+        values = {
+            "fence": fence, "lease": lease, "account_digest": ACCOUNT_DIGEST,
+            "replayed_last": replayed_last,
+            "replayed_freeze_reason": replayed_freeze_reason,
+            "recorder": recorded.append if recorder is ... else recorder,
+        }
+        values.update(changes)
+        allocator = nonce.NonceAllocator(
+            values.pop("fence"), values.pop("lease"), **values
+        )
+        return allocator, fence, recorded
+
+    return make
 
 
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     [
         ("fence", object(), TypeError), ("account_digest", None, TypeError),
-        ("account_digest", "B" * 64, ValueError), ("instance_id", None, TypeError),
-        ("instance_id", "", ValueError), ("replayed_last", True, TypeError),
+        ("account_digest", "B" * 64, ValueError), ("replayed_last", True, TypeError),
         ("replayed_last", -1, ValueError), ("recorder", None, TypeError),
     ],
 )
 def test_allocator_rejects_invalid_bound_inputs(
-    tmp_path: Path, field: str, value: object, error: type[Exception],
+    make_nonce_allocator, field: str, value: object, error: type[Exception],
 ) -> None:
-    fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
-    values = {
-        "fence": fence, "account_digest": ACCOUNT_DIGEST, "instance_id": INSTANCE_ID,
-        "replayed_last": 0, "replayed_freeze_reason": None,
-        "recorder": lambda payload: None,
-    }
-    values[field] = value
     with pytest.raises(error):
-        nonce.NonceAllocator(**values)
-    fence.release()
+        make_nonce_allocator(**{field: value})
 
 
 @pytest.mark.parametrize(
@@ -125,23 +129,23 @@ def test_allocator_rejects_invalid_bound_inputs(
      (NOW_MS + 2, NOW_MS, NOW_MS + 3)],
 )
 def test_allocator_uses_the_larger_of_replay_and_time(
-    tmp_path: Path, last: int, now_ms: int, expected: int,
+    make_nonce_allocator, last: int, now_ms: int, expected: int,
 ) -> None:
-    allocator, fence, _ = _allocator(tmp_path, replayed_last=last)
+    allocator, fence, _ = make_nonce_allocator(replayed_last=last)
     assert allocator.allocate(now_ms=now_ms, decided_ns=1) == expected
     assert allocator.last_nonce == expected
     fence.release()
 
 
-def test_consecutive_allocations_are_strictly_increasing(tmp_path: Path) -> None:
-    allocator, fence, _ = _allocator(tmp_path, replayed_last=NOW_MS)
+def test_consecutive_allocations_are_strictly_increasing(make_nonce_allocator) -> None:
+    allocator, fence, _ = make_nonce_allocator(replayed_last=NOW_MS)
     first = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
     assert allocator.allocate(now_ms=NOW_MS, decided_ns=2) == first + 1
     fence.release()
 
 
-def test_success_records_a_valid_schema_19_payload(tmp_path: Path) -> None:
-    allocator, fence, recorded = _allocator(tmp_path, replayed_last=NOW_MS)
+def test_success_records_a_valid_schema_19_payload(make_nonce_allocator) -> None:
+    allocator, fence, recorded = make_nonce_allocator(replayed_last=NOW_MS)
     allocated = allocator.allocate(now_ms=NOW_MS, decided_ns=7)
     event = _nonce_event()
     event["payload"] = recorded[0]
@@ -155,7 +159,9 @@ def test_success_records_a_valid_schema_19_payload(tmp_path: Path) -> None:
     fence.release()
 
 
-def test_recorder_failure_does_not_advance_and_retry_reuses_candidate(tmp_path: Path) -> None:
+def test_recorder_failure_does_not_advance_and_retry_reuses_candidate(
+    make_nonce_allocator,
+) -> None:
     attempts = []
 
     def fail_once(payload) -> None:
@@ -163,7 +169,7 @@ def test_recorder_failure_does_not_advance_and_retry_reuses_candidate(tmp_path: 
         if len(attempts) == 1:
             raise OSError("durable write failed")
 
-    allocator, fence, _ = _allocator(tmp_path, replayed_last=NOW_MS, recorder=fail_once)
+    allocator, fence, _ = make_nonce_allocator(replayed_last=NOW_MS, recorder=fail_once)
     with pytest.raises(OSError, match="durable write failed"):
         allocator.allocate(now_ms=NOW_MS, decided_ns=1)
     assert allocator.last_nonce == NOW_MS
@@ -176,9 +182,9 @@ def test_recorder_failure_does_not_advance_and_retry_reuses_candidate(tmp_path: 
     ("now_ms", True), ("now_ms", 0), ("decided_ns", True), ("decided_ns", 0),
 ])
 def test_invalid_allocation_time_never_calls_recorder(
-    tmp_path: Path, field: str, value: object,
+    make_nonce_allocator, field: str, value: object,
 ) -> None:
-    allocator, fence, recorded = _allocator(tmp_path)
+    allocator, fence, recorded = make_nonce_allocator()
     values = {"now_ms": NOW_MS, "decided_ns": 1}
     values[field] = value
     with pytest.raises((TypeError, ValueError)):
