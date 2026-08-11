@@ -3,6 +3,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from data import schema_dispatch
+
 ROOT = Path(__file__).parents[1]
 RUNTIME_DIRS = frozenset({"data", "execution", "strategy", "risk", "reconciliation", "ops"})
 IGNORED_DIRS = frozenset({".git", ".pytest_cache", ".ruff_cache", ".venv", "__pycache__"})
@@ -149,7 +151,14 @@ def test_current_repository_passes_inventory_budget_and_secret_gates() -> None:
 
 def test_contract_schema_data_is_split_with_entrypoint_headroom() -> None:
     assert (ROOT / "data/schema_dispatch.py").is_file()
-    assert _lines(ROOT / "data/contracts.py") <= 360
+    assert _lines(ROOT / "data/contracts.py") <= 354
+
+
+def test_schema_dispatch_owns_remaining_static_contract_data() -> None:
+    expected = {
+        "IDENTITY_STATUSES", "ORDER_LEASE_FIELDS", "SURFACES", "LEDGER_KINDS", "COMMON_FIELDS",
+    }
+    assert expected <= vars(schema_dispatch).keys()
 
 
 def test_synthetic_tree_exposes_every_inventory_and_budget_violation(tmp_path: Path) -> None:
