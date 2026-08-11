@@ -81,6 +81,124 @@ def test_replay_ignores_other_signers_but_not_malformed_matching_rows() -> None:
         nonce.replay_last_allocated_nonce([malformed], FINGERPRINT)
 
 
+def _allocator(tmp_path: Path, *, replayed_last: int = 0, recorder=None):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    recorded = []
+    allocator = nonce.NonceAllocator(
+        fence, account_digest=ACCOUNT_DIGEST, instance_id=INSTANCE_ID,
+        replayed_last=replayed_last,
+        recorder=recorded.append if recorder is None else recorder,
+    )
+    return allocator, fence, recorded
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("fence", object(), TypeError), ("account_digest", None, TypeError),
+        ("account_digest", "B" * 64, ValueError), ("instance_id", None, TypeError),
+        ("instance_id", "", ValueError), ("replayed_last", True, TypeError),
+        ("replayed_last", -1, ValueError), ("recorder", None, TypeError),
+    ],
+)
+def test_allocator_rejects_invalid_bound_inputs(
+    tmp_path: Path, field: str, value: object, error: type[Exception],
+) -> None:
+    fence = SignerFence.acquire(tmp_path, FINGERPRINT, INSTANCE_ID)
+    values = {
+        "fence": fence, "account_digest": ACCOUNT_DIGEST, "instance_id": INSTANCE_ID,
+        "replayed_last": 0, "recorder": lambda payload: None,
+    }
+    values[field] = value
+    with pytest.raises(error):
+        nonce.NonceAllocator(**values)
+    fence.release()
+
+
+@pytest.mark.parametrize(
+    ("last", "now_ms", "expected"),
+    [(1, NOW_MS, NOW_MS + 1), (NOW_MS, NOW_MS, NOW_MS + 1),
+     (NOW_MS + 2, NOW_MS, NOW_MS + 3)],
+)
+def test_allocator_uses_the_larger_of_replay_and_time(
+    tmp_path: Path, last: int, now_ms: int, expected: int,
+) -> None:
+    allocator, fence, _ = _allocator(tmp_path, replayed_last=last)
+    assert allocator.allocate(now_ms=now_ms, decided_ns=1) == expected
+    assert allocator.last_nonce == expected
+    fence.release()
+
+
+def test_consecutive_allocations_are_strictly_increasing(tmp_path: Path) -> None:
+    allocator, fence, _ = _allocator(tmp_path, replayed_last=NOW_MS)
+    first = allocator.allocate(now_ms=NOW_MS, decided_ns=1)
+    assert allocator.allocate(now_ms=NOW_MS, decided_ns=2) == first + 1
+    fence.release()
+
+
+def test_allocator_enforces_the_strict_upper_window(tmp_path: Path) -> None:
+    allowed, allowed_fence, _ = _allocator(
+        tmp_path / "allowed", replayed_last=NOW_MS + DAY_MS - 2,
+    )
+    assert allowed.allocate(now_ms=NOW_MS, decided_ns=1) == NOW_MS + DAY_MS - 1
+    allowed_fence.release()
+    denied, denied_fence, recorded = _allocator(
+        tmp_path / "denied", replayed_last=NOW_MS + DAY_MS - 1,
+    )
+    with pytest.raises(nonce.NonceAllocationError):
+        denied.allocate(now_ms=NOW_MS, decided_ns=1)
+    assert recorded == [] and denied.last_nonce == NOW_MS + DAY_MS - 1
+    denied_fence.release()
+
+
+def test_success_records_a_valid_schema_19_payload(tmp_path: Path) -> None:
+    allocator, fence, recorded = _allocator(tmp_path, replayed_last=NOW_MS)
+    allocated = allocator.allocate(now_ms=NOW_MS, decided_ns=7)
+    event = _nonce_event()
+    event["payload"] = recorded[0]
+    assert validate_envelope(event) is event
+    assert recorded == [{
+        "wallet_fingerprint": FINGERPRINT, "account_digest": ACCOUNT_DIGEST,
+        "instance_id": INSTANCE_ID, "allocated_nonce": allocated,
+        "previous_nonce": NOW_MS, "now_ms": NOW_MS, "outcome": "allocated",
+        "reason": "nonce_allocated", "decided_ns": 7,
+    }]
+    fence.release()
+
+
+def test_recorder_failure_does_not_advance_and_retry_reuses_candidate(tmp_path: Path) -> None:
+    attempts = []
+
+    def fail_once(payload) -> None:
+        attempts.append(payload)
+        if len(attempts) == 1:
+            raise OSError("durable write failed")
+
+    allocator, fence, _ = _allocator(tmp_path, replayed_last=NOW_MS, recorder=fail_once)
+    with pytest.raises(OSError, match="durable write failed"):
+        allocator.allocate(now_ms=NOW_MS, decided_ns=1)
+    assert allocator.last_nonce == NOW_MS
+    assert allocator.allocate(now_ms=NOW_MS, decided_ns=2) == NOW_MS + 1
+    assert attempts[0]["allocated_nonce"] == NOW_MS + 1
+    fence.release()
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("now_ms", True), ("now_ms", 0), ("decided_ns", True), ("decided_ns", 0),
+])
+def test_invalid_allocation_time_never_calls_recorder(
+    tmp_path: Path, field: str, value: object,
+) -> None:
+    allocator, fence, recorded = _allocator(tmp_path)
+    values = {"now_ms": NOW_MS, "decided_ns": 1}
+    values[field] = value
+    with pytest.raises((TypeError, ValueError)):
+        allocator.allocate(**values)
+    assert recorded == [] and allocator.last_nonce == 0
+    fence.release()
+
+
 def test_signer_nonce_schema_is_registered_durable_and_bounded() -> None:
     event = _nonce_event()
     assert validate_envelope(event) is event
