@@ -235,3 +235,83 @@ def test_transport_failure_or_uncoded_error_is_inconclusive(http_status, code):
     experimental = _probe_row(rows, "B1_duplicate", 2)
     _set_outcome(experimental, "err", code, http_status)
     assert venue_probe.single_probe_verdicts(rows)["B1_duplicate"] == "inconclusive"
+
+
+def test_final_classifier_rejects_an_invalid_experiment():
+    rows = _dataset()
+    rows.pop()
+    with pytest.raises(ValueError, match="invalid probe dataset"):
+        venue_probe.classify_probe_dataset(rows)
+
+
+def test_final_classifier_reuses_the_three_frozen_single_probe_verdicts():
+    rows = _dataset()
+    singles = venue_probe.single_probe_verdicts(rows)
+    verdicts = venue_probe.classify_probe_dataset(rows)
+    assert {key: verdicts[key] for key in singles} == singles
+    assert verdicts == {
+        **singles,
+        "B3_concurrent": "confirms",
+        "B4_error_class": "inconclusive",
+    }
+    assert (
+        venue_probe.classify_probe_dataset.__globals__["single_probe_verdicts"]
+        is venue_probe.single_probe_verdicts
+    )
+
+
+def test_final_classifier_deliberately_validates_both_public_boundaries(monkeypatch):
+    calls = []
+    validator = venue_probe.validate_probe_dataset
+
+    def counted(rows):
+        calls.append(rows)
+        return validator(rows)
+
+    monkeypatch.setattr(venue_probe, "validate_probe_dataset", counted)
+    rows = _dataset()
+    venue_probe.classify_probe_dataset(rows)
+    assert calls == [rows, rows]
+
+
+@pytest.mark.parametrize(
+    ("a_start", "a_elapsed", "b_start", "b_elapsed"),
+    [(0, 5, 5, 5), (2, 0, 1, 3)],
+)
+def test_b3_requires_strict_nondegenerate_interval_overlap(
+    a_start, a_elapsed, b_start, b_elapsed
+):
+    rows = _dataset()
+    a_row = _probe_row(rows, "B3_concurrent", 1, "A")
+    b_row = _probe_row(rows, "B3_concurrent", 1, "B")
+    a_row.update(start_offset_ms=a_start, elapsed_ms=a_elapsed)
+    b_row.update(start_offset_ms=b_start, elapsed_ms=b_elapsed)
+    assert venue_probe.classify_probe_dataset(rows)["B3_concurrent"] == "inconclusive"
+
+
+def test_b3_error_is_inconclusive_and_never_refutes():
+    rows = _dataset()
+    _set_outcome(_probe_row(rows, "B3_concurrent", 1, "A"), "err", "busy")
+    assert venue_probe.classify_probe_dataset(rows)["B3_concurrent"] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("nonce_code", "auth_code", "expected"),
+    [("nonce_stale", "agent_revoked", "confirms"), ("denied", "denied", "refutes")],
+)
+def test_b4_compares_only_conclusive_experimental_error_codes(
+    nonce_code, auth_code, expected
+):
+    rows = _dataset()
+    _set_outcome(_probe_row(rows, "B1_stale", 1), "err", nonce_code)
+    _set_outcome(_probe_row(rows, "B2_revoked", 2), "err", auth_code)
+    assert venue_probe.classify_probe_dataset(rows)["B4_error_class"] == expected
+
+
+@pytest.mark.parametrize("control", [("B1_duplicate", 1), ("B2_revoked", 1)])
+def test_b4_is_blocked_when_either_control_is_not_conclusive_ok(control):
+    rows = _dataset()
+    _set_outcome(_probe_row(rows, "B1_stale", 1), "err", "nonce_stale")
+    _set_outcome(_probe_row(rows, "B2_revoked", 2), "err", "agent_revoked")
+    _set_outcome(_probe_row(rows, *control), "err", "control_failed")
+    assert venue_probe.classify_probe_dataset(rows)["B4_error_class"] == "inconclusive"

@@ -200,3 +200,59 @@ def single_probe_verdicts(rows: object) -> dict[str, str]:
             index[("B2_revoked", 1, None)], index[("B2_revoked", 2, None)]
         ),
     }
+
+
+def _strict_overlap(
+    a_row: Mapping[object, object], b_row: Mapping[object, object]
+) -> bool:
+    a_start, a_elapsed = a_row["start_offset_ms"], a_row["elapsed_ms"]
+    b_start, b_elapsed = b_row["start_offset_ms"], b_row["elapsed_ms"]
+    return (
+        a_elapsed > 0
+        and b_elapsed > 0
+        and a_start < b_start + b_elapsed
+        and b_start < a_start + a_elapsed
+    )
+
+
+def _b3_verdict(
+    a_row: Mapping[object, object], b_row: Mapping[object, object]
+) -> str:
+    if _conclusive_ok(a_row) and _conclusive_ok(b_row) and _strict_overlap(a_row, b_row):
+        return "confirms"
+    return "inconclusive"
+
+
+def _error_code(row: Mapping[object, object]) -> object:
+    if _conclusive(row) and row["venue_status"] == "err":
+        return row["venue_error_code"]
+    return None
+
+
+def _b4_verdict(index: Mapping[tuple[object, object, object], Mapping]) -> str:
+    if not _conclusive_ok(index[("B1_duplicate", 1, None)]) or not _conclusive_ok(
+        index[("B2_revoked", 1, None)]
+    ):
+        return "inconclusive"
+    nonce_codes = {
+        code
+        for key in (("B1_stale", 1, None), ("B1_duplicate", 2, None))
+        if (code := _error_code(index[key])) is not None
+    }
+    auth_code = _error_code(index[("B2_revoked", 2, None)])
+    if not nonce_codes or auth_code is None:
+        return "inconclusive"
+    return "confirms" if auth_code not in nonce_codes else "refutes"
+
+
+def classify_probe_dataset(rows: object) -> dict[str, str]:
+    """Validate independently, then return all five precommitted verdicts."""
+    index = _validated_index(rows)
+    verdicts = single_probe_verdicts(rows)
+    verdicts.update(
+        B3_concurrent=_b3_verdict(
+            index[("B3_concurrent", 1, "A")], index[("B3_concurrent", 1, "B")]
+        ),
+        B4_error_class=_b4_verdict(index),
+    )
+    return verdicts
