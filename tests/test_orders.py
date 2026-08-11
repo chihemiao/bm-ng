@@ -87,6 +87,17 @@ def test_request_record_must_exist_and_match_before_submit() -> None:
         _decide(intent, evidence, request=wrong_request)
 
 
+def test_request_record_binds_the_writer_lease_snapshot() -> None:
+    request = order_request_record(
+        _intent(), recorded_ns=110, account_digest="a" * 64,
+        lease_epoch=3, writer_instance_id="writer-one",
+    )
+
+    assert request.account_digest == "a" * 64
+    assert request.lease_epoch == 3
+    assert request.writer_instance_id == "writer-one"
+
+
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
