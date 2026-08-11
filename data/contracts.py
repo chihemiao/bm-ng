@@ -21,6 +21,7 @@ from data.schema_dispatch import (
     VALIDITY_NS,
     WRITER_DECISIONS,
 )
+from data.schema_nonce import signer_nonce_allocation_errors as _nonce_errors
 from data.schema_wallet import wallet_rotation_semantic_errors as _wallet_errors
 
 
@@ -78,6 +79,7 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _validate_reconciliation(event)
     validator = {
         "agent_wallet_rotation": _validate_wallet_rotation,
+        "signer_nonce_allocation": _validate_signer_nonce,
         "writer_authority_promotion": _validate_writer_promotion,
         "writer_lease_decision": _validate_writer_decision,
     }.get(event["payload_schema"])
@@ -120,6 +122,13 @@ def _validate_reconciliation(event: dict[str, Any]) -> None:
         "reconciliation_decision": _validate_decision,
     }
     validators[event["payload_schema"]](event)
+
+
+def _validate_signer_nonce(event: dict[str, Any]) -> None:
+    _require(event["event_kind"] == "decision", "invalid signer nonce event kind")
+    _require(event["schema_ver"] == 1, "unsupported signer nonce schema version")
+    errors = _nonce_errors(event["payload"])
+    _require(not errors, errors[0] if errors else "")
 
 
 def _validate_writer_decision(event: dict[str, Any]) -> None:

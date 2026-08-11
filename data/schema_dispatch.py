@@ -36,6 +36,7 @@ PAYLOAD_SCHEMAS = frozenset(
         "raw_quarantine",
         "reconciliation_decision",
         "reconciliation_surface",
+        "signer_nonce_allocation",
         "subscription_ack",
         "subscription_send",
         "venue_down",
@@ -49,7 +50,7 @@ RECONCILIATION_SCHEMAS = frozenset(
 )
 DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
     "agent_wallet_rotation", "order_request", "writer_authority_promotion",
-    "writer_lease_decision",
+    "signer_nonce_allocation", "writer_lease_decision",
 }
 WRITER_DECISIONS = {
     ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
