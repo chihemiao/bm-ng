@@ -1,8 +1,11 @@
+from pathlib import Path
+
 import pytest
 
 from data.contracts import ContractError, validate_envelope
+from execution.writer import WriterAuthority, WriterIdentity, WriterLease, WriterLeaseError
 from reconciliation.admission import CONTINUOUS_ADMISSION_REASON_KEYS
-from reconciliation.promotion import demotion_reason
+from reconciliation.promotion import demote_writer, demotion_reason
 from reconciliation.state import AdmissionDecision
 
 NONCE_KEY = "continuous_admission:nonce_frozen"
@@ -10,6 +13,27 @@ NONCE_KEY = "continuous_admission:nonce_frozen"
 
 def _freeze(*reasons: str) -> AdmissionDecision:
     return AdmissionDecision("cancel_only_freeze", tuple(sorted(reasons)))
+
+
+def _identity() -> WriterIdentity:
+    return WriterIdentity("hyperliquid:test", "writer-one", "a" * 64, "boot-one")
+
+
+def _lease_for_mode(root: Path, mode: str, recorder) -> WriterLease:
+    identity = _identity()
+    if mode == "cancel_only":
+        authority = WriterAuthority(identity, mode, 1)
+        return WriterLease(
+            WriterLease.path_for(root, identity.account_id),
+            authority,
+            None,
+            recorder,
+            True,
+            acquired_ns=None,
+        )
+    lease = WriterLease.acquire(root, identity, recorder, acquired_ns=100)
+    lease._authority = lease.authority._replace(mode=mode)
+    return lease
 
 
 def _writer_event(reason: str) -> dict:
@@ -108,3 +132,115 @@ def test_schema_accepts_canonical_demotion_reason() -> None:
 def test_schema_rejects_noncanonical_demotion_reason(reason: str) -> None:
     with pytest.raises(ContractError, match="writer decision combination"):
         validate_envelope(_writer_event(reason))
+
+
+def test_freeze_demotes_and_emits_schema_valid_decision(tmp_path: Path) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    authority = demote_writer(
+        lease, _freeze("continuous_admission:pair_unknown"), now_ns=101
+    )
+    assert authority == lease.authority and authority.mode == "cancel_only"
+    assert len(recorded) == 1
+    assert (recorded[0].action, recorded[0].outcome) == ("demote", "cancel_only")
+    event = _writer_event(recorded[0].reason)
+    event["payload"] = recorded[0]._asdict()
+    assert validate_envelope(event)["payload"]["reason"] == recorded[0].reason
+    with pytest.raises(WriterLeaseError, match="not authorized"):
+        lease.authorize("submit")
+    lease.release()
+
+
+def test_demotion_records_only_after_mode_is_cancel_only(tmp_path: Path) -> None:
+    holder = {}
+    observed_modes = []
+
+    def record(decision) -> None:
+        if decision.action == "demote":
+            observed_modes.append(holder["lease"].authority.mode)
+
+    lease = _lease_for_mode(tmp_path, "risk_increasing", record)
+    holder["lease"] = lease
+    demote_writer(lease, _freeze("continuous_admission:exposure_unknown"), now_ns=101)
+    assert observed_modes == ["cancel_only"]
+    lease.release()
+
+
+def test_recorder_failure_reports_demotion_already_applied(tmp_path: Path) -> None:
+    failure = OSError("decision stream unavailable")
+
+    def fail_demotion(decision) -> None:
+        if decision.action == "demote":
+            raise failure
+
+    lease = _lease_for_mode(tmp_path, "risk_increasing", fail_demotion)
+    with pytest.raises(WriterLeaseError, match="demotion applied.*evidence") as caught:
+        demote_writer(lease, _freeze("continuous_admission:pair_unknown"), now_ns=101)
+    assert caught.value.__cause__ is failure
+    assert lease.authority.mode == "cancel_only"
+    lease.release()
+
+
+def test_ready_decision_cannot_demote_or_record(tmp_path: Path) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    with pytest.raises(ValueError, match="ready"):
+        demote_writer(lease, AdmissionDecision("ready", ()), now_ns=101)
+    assert lease.authority.mode == "risk_increasing" and recorded == []
+    lease.release()
+
+
+@pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
+def test_non_risk_modes_are_idempotent_without_recording(tmp_path: Path, mode: str) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, mode, recorded.append)
+    recorded.clear()
+    authority = demote_writer(
+        lease, _freeze("continuous_admission:pair_unknown"), now_ns=101
+    )
+    assert authority.mode == mode and recorded == []
+    lease.release()
+
+
+def test_demotion_requires_real_lease_and_admission(tmp_path: Path) -> None:
+    admission = _freeze("continuous_admission:pair_unknown")
+    with pytest.raises(TypeError, match="lease"):
+        demote_writer(object(), admission, now_ns=101)  # type: ignore[arg-type]
+    lease = _lease_for_mode(tmp_path, "risk_increasing", [].append)
+    with pytest.raises(TypeError, match="admission"):
+        demote_writer(lease, ("freeze",), now_ns=101)  # type: ignore[arg-type]
+    lease.release()
+
+
+@pytest.mark.parametrize(
+    ("now_ns", "error"),
+    [(None, TypeError), (True, TypeError), ("101", TypeError), (0, ValueError), (-1, ValueError)],
+)
+def test_demotion_rejects_invalid_time_before_state_change(
+    tmp_path: Path, now_ns: object, error: type[Exception]
+) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    with pytest.raises(error):
+        demote_writer(
+            lease, _freeze("continuous_admission:pair_unknown"), now_ns=now_ns
+        )
+    assert lease.authority.mode == "risk_increasing" and recorded == []
+    lease.release()
+
+
+@pytest.mark.parametrize(
+    ("reason", "error"),
+    [(None, TypeError), ("", ValueError), ("continuous_admission:pair_unknown", ValueError)],
+)
+def test_low_level_demotion_rejects_invalid_reason_before_state_change(
+    tmp_path: Path, reason: object, error: type[Exception]
+) -> None:
+    lease = _lease_for_mode(tmp_path, "risk_increasing", [].append)
+    with pytest.raises(error):
+        lease.demote_to_cancel_only(demotion_ns=101, reason=reason)
+    assert lease.authority.mode == "risk_increasing"
+    lease.release()
