@@ -3,7 +3,13 @@ from decimal import Decimal
 
 import pytest
 
-from reconciliation.exposure import LegPosition, delta_state, net_delta
+from reconciliation.exposure import (
+    ExposureClock,
+    LegPosition,
+    advance_exposure_clock,
+    delta_state,
+    net_delta,
+)
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 
@@ -186,3 +192,106 @@ def test_non_finite_leg_quantity_is_rejected_with_value_error(quantity):
     with pytest.raises(ValueError) as raised:
         net_delta(positions, symbol="BTC", now_ns=110, max_age_ns=10)
     assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize(
+    ("state", "naked_since_ns", "duration_exceeded"),
+    [
+        ("flat", None, False),
+        ("naked", 100, False),
+        ("unknown", None, None),
+    ],
+)
+def test_first_exposure_sample_has_a_closed_clock_state(state, naked_since_ns, duration_exceeded):
+    assert advance_exposure_clock(
+        None, state=state, observed_ns=100, max_naked_ns=0
+    ) == ExposureClock(state, 100, naked_since_ns, duration_exceeded)
+
+
+def test_continuous_naked_samples_preserve_the_first_observed_time():
+    started = advance_exposure_clock(None, state="naked", observed_ns=100, max_naked_ns=10)
+    assert advance_exposure_clock(
+        started, state="naked", observed_ns=105, max_naked_ns=10
+    ) == ExposureClock("naked", 105, 100, False)
+
+
+@pytest.mark.parametrize(("observed_ns", "exceeded"), [(110, False), (111, True)])
+def test_naked_duration_exceeds_only_after_the_inclusive_limit(observed_ns, exceeded):
+    started = ExposureClock("naked", 100, 100, False)
+    result = advance_exposure_clock(
+        started, state="naked", observed_ns=observed_ns, max_naked_ns=10
+    )
+    assert result.duration_exceeded is exceeded
+
+
+def test_flat_sample_clears_even_an_exceeded_clock_without_latching():
+    exceeded = ExposureClock("naked", 111, 100, True)
+    assert advance_exposure_clock(
+        exceeded, state="flat", observed_ns=112, max_naked_ns=10
+    ) == ExposureClock("flat", 112, None, False)
+
+
+def test_unknown_sample_preserves_and_advances_an_existing_naked_clock():
+    started = ExposureClock("naked", 100, 100, False)
+    assert advance_exposure_clock(
+        started, state="unknown", observed_ns=111, max_naked_ns=10
+    ) == ExposureClock("unknown", 111, 100, True)
+
+
+def test_unknown_sample_without_a_timer_does_not_assert_safety_or_breach():
+    flat = ExposureClock("flat", 100, None, False)
+    assert advance_exposure_clock(
+        flat, state="unknown", observed_ns=101, max_naked_ns=10
+    ) == ExposureClock("unknown", 101, None, None)
+
+
+def test_naked_sample_after_unknown_without_a_timer_starts_at_that_observation():
+    unknown = ExposureClock("unknown", 100, None, None)
+    assert advance_exposure_clock(
+        unknown, state="naked", observed_ns=101, max_naked_ns=0
+    ) == ExposureClock("naked", 101, 101, False)
+
+
+def test_observation_clock_cannot_move_backward():
+    previous = ExposureClock("flat", 100, None, False)
+    with pytest.raises(ValueError, match="observed_ns"):
+        advance_exposure_clock(previous, state="flat", observed_ns=99, max_naked_ns=10)
+
+
+def test_same_timestamp_and_state_is_an_idempotent_recalculation():
+    previous = ExposureClock("naked", 100, 100, False)
+    assert (
+        advance_exposure_clock(previous, state="naked", observed_ns=100, max_naked_ns=10)
+        == previous
+    )
+
+
+def test_same_timestamp_with_a_different_state_is_contradictory():
+    previous = ExposureClock("flat", 100, None, False)
+    with pytest.raises(ValueError, match="same observed_ns"):
+        advance_exposure_clock(previous, state="naked", observed_ns=100, max_naked_ns=10)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"previous": object()}, TypeError),
+        ({"state": 1}, TypeError),
+        ({"state": "other"}, ValueError),
+        ({"observed_ns": True}, TypeError),
+        ({"observed_ns": 0}, ValueError),
+        ({"max_naked_ns": True}, TypeError),
+        ({"max_naked_ns": 1.0}, TypeError),
+        ({"max_naked_ns": -1}, ValueError),
+    ],
+)
+def test_exposure_clock_inputs_are_strict_and_closed(changes, error):
+    values = {
+        "previous": None,
+        "state": "flat",
+        "observed_ns": 100,
+        "max_naked_ns": 0,
+    }
+    values.update(changes)
+    with pytest.raises(error):
+        advance_exposure_clock(**values)
