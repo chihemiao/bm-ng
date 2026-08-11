@@ -26,9 +26,12 @@ def _event(reason: str = "clock_backward", fingerprint: str = FINGERPRINT) -> di
 
 def test_replay_freeze_reason_filters_signer_and_returns_one_reason() -> None:
     other = _event(fingerprint="c" * 64)
+    allocated = _event(reason="nonce_allocated")
+    allocated["payload"]["outcome"] = "allocated"
     assert nonce.replay_freeze_reason([], FINGERPRINT) is None
     assert nonce.replay_freeze_reason([other], FINGERPRINT) is None
-    assert nonce.replay_freeze_reason([other, _event()], FINGERPRINT) == "clock_backward"
+    assert nonce.replay_freeze_reason([allocated], FINGERPRINT) is None
+    assert nonce.replay_freeze_reason([other, allocated, _event()], FINGERPRINT) == "clock_backward"
 
 
 @pytest.mark.parametrize("reasons", [
