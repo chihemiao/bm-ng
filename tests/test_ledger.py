@@ -106,11 +106,12 @@ def _collateral_ledger(
     consistent: bool = True,
     unknown: frozenset[str] = frozenset(),
     extra: tuple[tuple[str, str], ...] = (),
+    end_ns: int = 105,
 ) -> BalanceLedger:
     folded = tuple(sorted(((asset, amount), *extra)))
     snapshot_amount = amount if consistent else "999"
     snapshot = tuple(sorted(((asset, snapshot_amount), *extra)))
-    return BalanceLedger(100, 200, folded, snapshot, (), unknown, consistent)
+    return BalanceLedger(90, end_ns, folded, snapshot, (), unknown, consistent)
 
 
 def _venue_ledger(venue: str, amount: str | None = None, **changes) -> BalanceLedger:
@@ -125,7 +126,8 @@ def _total(**changes):
         "bybit": _venue_ledger("bybit"),
         "rate": FxRate("USDT", "USDC", Decimal("1.001"), 100),
         "now_ns": 110,
-        "max_age_ns": 10,
+        "max_fx_age_ns": 10,
+        "max_ledger_age_ns": 10,
     }
     values.update(changes)
     return total_collateral_usdc(**values)
@@ -140,6 +142,56 @@ def test_t0a_collateral_assets_are_bound_to_the_frozen_venues() -> None:
 
 def test_total_collateral_converts_bybit_and_binds_the_usdc_unit() -> None:
     assert _total() == Notional(Decimal("15.255"), "USDC")
+
+
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+def test_ledger_at_the_inclusive_age_limit_is_fresh(venue: str) -> None:
+    boundary = _venue_ledger(venue, end_ns=100)
+    assert _total(**{venue: boundary}) == Notional(Decimal("15.255"), "USDC")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"hyperliquid": _venue_ledger("hyperliquid", end_ns=99)},
+        {"bybit": _venue_ledger("bybit", end_ns=99)},
+        {
+            "hyperliquid": _venue_ledger("hyperliquid", end_ns=99),
+            "bybit": _venue_ledger("bybit", end_ns=99),
+        },
+    ],
+)
+def test_any_stale_ledger_makes_total_unknown(changes: dict) -> None:
+    assert _total(**changes) is None
+
+
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+def test_future_ledger_endpoint_makes_total_unknown(venue: str) -> None:
+    future = _venue_ledger(venue, end_ns=111)
+    assert _total(**{venue: future}) is None
+
+
+def test_differently_aged_but_fresh_ledgers_can_be_aggregated() -> None:
+    assert _total(
+        hyperliquid=_venue_ledger("hyperliquid", end_ns=100),
+        bybit=_venue_ledger("bybit", end_ns=109),
+    ) == Notional(Decimal("15.255"), "USDC")
+
+
+def test_stale_evidence_is_unknown_before_negative_collateral_is_interpreted() -> None:
+    stale_negative = _venue_ledger("hyperliquid", "-1", end_ns=99)
+    assert _total(hyperliquid=stale_negative) is None
+
+
+def test_fx_and_ledger_age_thresholds_are_not_cross_wired() -> None:
+    fresh_rate = FxRate("USDT", "USDC", Decimal("1.001"), 109)
+    assert _total(
+        hyperliquid=_venue_ledger("hyperliquid", end_ns=100),
+        bybit=_venue_ledger("bybit", end_ns=100),
+        rate=fresh_rate,
+        max_fx_age_ns=1,
+        max_ledger_age_ns=10,
+    ) == Notional(Decimal("15.255"), "USDC")
 
 
 @pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
@@ -205,8 +257,11 @@ def test_total_requires_real_balance_ledgers(venue: str) -> None:
     [
         ("now_ns", True, TypeError),
         ("now_ns", 0, ValueError),
-        ("max_age_ns", 1.0, TypeError),
-        ("max_age_ns", 0, ValueError),
+        ("max_fx_age_ns", 1.0, TypeError),
+        ("max_fx_age_ns", 0, ValueError),
+        ("max_ledger_age_ns", True, TypeError),
+        ("max_ledger_age_ns", 0, ValueError),
+        ("max_ledger_age_ns", -1, ValueError),
     ],
 )
 def test_total_collateral_clock_inputs_are_strict(
@@ -214,6 +269,11 @@ def test_total_collateral_clock_inputs_are_strict(
 ) -> None:
     with pytest.raises(error, match=field):
         _total(**{field: value})
+
+
+def test_ambiguous_old_max_age_keyword_is_not_accepted() -> None:
+    with pytest.raises(TypeError, match="max_age_ns"):
+        _total(max_age_ns=10)
 
 
 def test_invalid_ledger_contract_is_not_downgraded_to_unknown() -> None:
