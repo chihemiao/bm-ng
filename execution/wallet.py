@@ -133,7 +133,7 @@ def _record_lease_abort(
 ) -> None:
     try:
         _record_abort(recorder, identity, old, new, assessment, reason, now_ns)
-    except BaseException as exc:
+    except Exception as exc:
         raise RotationRecordError(lease, exc) from exc
 
 
