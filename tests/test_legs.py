@@ -148,9 +148,7 @@ def test_two_unfilled_legs_are_not_misreported_as_a_completed_balance():
         ),
     ],
 )
-def test_underfilled_pair_shapes_share_one_imbalanced_label(
-    hyperliquid, bybit, unresolved
-):
+def test_underfilled_pair_shapes_share_one_imbalanced_label(hyperliquid, bybit, unresolved):
     assert pair_state(_pair(hyperliquid, bybit)) == PairState("imbalanced", unresolved)
 
 
@@ -165,9 +163,7 @@ def test_underfilled_pair_shapes_share_one_imbalanced_label(
         ),
     ],
 )
-def test_known_overfill_has_a_distinct_label_and_remains_unresolved(
-    hyperliquid, bybit, unresolved
-):
+def test_known_overfill_has_a_distinct_label_and_remains_unresolved(hyperliquid, bybit, unresolved):
     assert pair_state(_pair(hyperliquid, bybit)) == PairState("overfilled", unresolved)
 
 
