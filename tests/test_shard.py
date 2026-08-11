@@ -67,6 +67,21 @@ def _writer_decision(sequence: int) -> dict:
     return event
 
 
+def _order_request(sequence: int, **changes) -> dict:
+    event = _writer_decision(sequence)
+    payload = {
+        "account_digest": "a" * 64,
+        "lease_epoch": 1,
+        "writer_instance_id": "writer-one",
+    }
+    payload.update(changes)
+    event.update(
+        event_kind="order", payload_schema="order_request", payload=payload,
+        identity_status="known", client_order_id="0xrequest", venue_order_id=None,
+    )
+    return event
+
+
 def test_hour_rotation_sidecars_append_only_manifest_and_replay(tmp_path: Path) -> None:
     records = [b'{"n":1}', b'{"n":2}']
     writer = ShardWriter(tmp_path, boot_id="boot-a")
@@ -184,6 +199,31 @@ def test_replay_freezes_distinct_acquires_for_the_same_account_epoch(
     assert replay.freeze_reasons == (
         f"writer_lease_decision:lease_epoch_conflict:{account}:1",
     )
+
+
+def test_order_request_replay_checks_only_matching_window_leases(tmp_path: Path) -> None:
+    acquire = _writer_decision(1)
+    mismatch = _order_request(2, writer_instance_id="writer-two")
+    outside = _order_request(3, lease_epoch=2)
+    legacy = _order_request(4)
+    legacy.pop("seq_within_boot")
+    legacy["payload"] = {}
+    writer = ShardWriter(tmp_path, boot_id="boot-a")
+    for event in (acquire, mismatch, outside):
+        writer.append_event(event)
+    writer.append(shard_module.encode_event(legacy), legacy["recv_wall_ns"])
+    writer.close()
+
+    replay = shard_module.replay_event_window(tmp_path, _ns(4), _ns(5))
+
+    assert replay.events == (acquire, mismatch, outside, legacy)
+    assert replay.freeze_reasons == (
+        "order_request:lease_binding_mismatch:" + "a" * 64 + ":1",
+    )
+    rejected = ShardWriter(tmp_path / "legacy", boot_id="boot-a")
+    with pytest.raises(ContractError, match="legacy order request"):
+        rejected.append_event(legacy)
+    rejected.close()
 
 
 def test_replay_deduplicates_exact_events_and_freezes_conflicts(tmp_path: Path) -> None:

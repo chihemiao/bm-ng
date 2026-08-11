@@ -31,7 +31,8 @@ IDENTITY_STATUSES = frozenset({"known", "unknown"})
 RECONCILIATION_SCHEMAS = frozenset(
     {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
 )
-DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {"writer_lease_decision"}
+DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {"order_request", "writer_lease_decision"}
+ORDER_LEASE_FIELDS = ("account_digest", "lease_epoch", "writer_instance_id")
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
 WRITER_DECISIONS = {
@@ -104,7 +105,8 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _validate_order_identity(event)
     if event["event_kind"] == "ops" and event["payload_schema"] == "raw_quarantine":
         _require(_nonempty_text(event["payload"].get("raw")), "raw quarantine requires raw frame")
-    if event["payload_schema"] in DURABLE_EVENT_SCHEMAS:
+    legacy_order = event["payload_schema"] == "order_request" and order_request_is_legacy(event)
+    if event["payload_schema"] in DURABLE_EVENT_SCHEMAS and not legacy_order:
         _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     if event["payload_schema"] in RECONCILIATION_SCHEMAS:
         _validate_reconciliation(event)
@@ -240,6 +242,20 @@ def _validate_order_identity(event: dict[str, Any]) -> None:
     if event["payload_schema"] == "order_request":
         has_client_id = _nonempty_text(event.get("client_order_id"))
         _require(has_client_id, "order request needs client_order_id")
+
+
+def order_request_is_legacy(event: dict[str, Any]) -> bool:
+    payload = event["payload"]
+    present = tuple(field in payload for field in ORDER_LEASE_FIELDS)
+    has_sequence = "seq_within_boot" in event
+    if not has_sequence and not any(present):
+        return True
+    _require(has_sequence and all(present), "invalid order request lease binding")
+    account, epoch, instance = (payload[field] for field in ORDER_LEASE_FIELDS)
+    valid = _valid_digest(account) and type(epoch) is int and epoch > 0
+    valid &= _nonempty_text(instance)
+    _require(valid, "invalid order request lease binding")
+    return False
 
 
 def bybit_update_gap(previous_u: int | None, current_u: int, message_type: str) -> bool:

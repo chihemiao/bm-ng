@@ -13,6 +13,7 @@ from data.contracts import (
     DURABLE_EVENT_SCHEMAS,
     ContractError,
     checksum_matches,
+    order_request_is_legacy,
     validate_envelope,
     validate_manifest,
 )
@@ -57,7 +58,7 @@ def encode_event(event: dict[str, Any]) -> bytes:
 
 
 def _event_key(event: dict[str, Any]) -> tuple[int, str, int]:
-    return event["recv_wall_ns"], event["boot_id"], event["seq_within_boot"]
+    return event["recv_wall_ns"], event["boot_id"], event.get("seq_within_boot", 0)
 
 
 class ShardWriter:
@@ -107,6 +108,8 @@ class ShardWriter:
         """Append one validated durable event in strict event-key order."""
         encoded = encode_event(event)
         _require(event["payload_schema"] in DURABLE_EVENT_SCHEMAS, "not a durable event")
+        legacy = event["payload_schema"] == "order_request" and order_request_is_legacy(event)
+        _require(not legacy, "legacy order request cannot be appended")
         _require(event["boot_id"] == self.boot_id, "event boot differs from writer")
         key = _event_key(event)
         if self._last_event_key is not None:
@@ -232,6 +235,27 @@ def _semantic_conflict(
     return None
 
 
+def _order_binding_conflicts(events: list[dict[str, Any]]) -> set[str]:
+    leases: dict[tuple[str, int], str] = {}
+    requests = []
+    for event in events:
+        payload = event["payload"]
+        if event["payload_schema"] == "writer_lease_decision":
+            if (payload["action"], payload["outcome"]) == ("acquire", "pending_reconciliation"):
+                leases.setdefault(
+                    (payload["account_digest"], payload["lease_epoch"]), payload["instance_id"]
+                )
+        elif event["payload_schema"] == "order_request" and not order_request_is_legacy(event):
+            requests.append(payload)
+    conflicts = set()
+    for payload in requests:
+        key = payload["account_digest"], payload["lease_epoch"]
+        if key in leases and leases[key] != payload["writer_instance_id"]:
+            account, epoch = key
+            conflicts.add(f"order_request:lease_binding_mismatch:{account}:{epoch}")
+    return conflicts
+
+
 def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
     """Replay canonical durable events in an inclusive wall-time window."""
     valid_window = type(start_ns) is int and start_ns >= 0
@@ -264,6 +288,7 @@ def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
         if reason is not None:
             freeze_reasons.add(reason)
         events.append(event)
+    freeze_reasons.update(_order_binding_conflicts(events))
     input_hash = hashlib.sha256()
     for event in events:
         encoded = encode_event(event)
