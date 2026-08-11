@@ -155,18 +155,20 @@ def _payload_schemas(tree: ast.Module) -> frozenset[str] | None:
 
 def structural_violations(root: Path) -> set[str]:
     violations = set()
-    contracts_tree = None
+    schema_tree = None
     for path in _python_files(root):
         tree = ast.parse(path.read_text())
         relative = path.relative_to(root)
-        if relative == Path("data/contracts.py"):
-            contracts_tree = tree
+        if relative == Path("data/schema_dispatch.py"):
+            schema_tree = tree
+            if any(isinstance(node, (ast.FunctionDef, ast.ClassDef)) for node in tree.body):
+                violations.add("schema-dispatch-code")
         if relative.parts[0] in RUNTIME_DIRS:
             violations |= _import_violations(relative, _imports(tree, relative))
         if relative == Path("data/contracts.py") and _contract_builtin_io(tree):
             violations.add("contracts-io")
         violations |= _tree_violations(tree)
-    schemas = _payload_schemas(contracts_tree) if contracts_tree else None
+    schemas = _payload_schemas(schema_tree) if schema_tree else None
     if schemas is None:
         violations.add("payload-schema-registry")
     elif len(schemas) > 20:
@@ -179,7 +181,8 @@ def test_current_repository_passes_structural_gates() -> None:
 
 
 def test_synthetic_tree_exposes_function_import_and_source_violations(tmp_path: Path) -> None:
-    _write(tmp_path, "data/contracts.py", "from pathlib import Path\n" + _registry(["raw_frame"]))
+    _write(tmp_path, "data/schema_dispatch.py", _registry(["raw_frame"]))
+    _write(tmp_path, "data/contracts.py", "from pathlib import Path\n")
     _write(tmp_path, "data/session.py", "from data.shard import ShardWriter\n")
     _write(tmp_path, "data/runtime.py", "import tests.helpers\nfrom research import evidence\n")
     _write(tmp_path, "ops/worker.py", "import execution.orders\n")
@@ -200,35 +203,43 @@ def test_synthetic_tree_exposes_function_import_and_source_violations(tmp_path: 
 
 
 def test_dynamic_payload_schema_registry_is_rejected(tmp_path: Path) -> None:
-    _write(tmp_path, "data/contracts.py", "PAYLOAD_SCHEMAS = frozenset(load_types())\n")
+    _write(tmp_path, "data/schema_dispatch.py", "PAYLOAD_SCHEMAS = frozenset(load_types())\n")
     assert structural_violations(tmp_path) == {"payload-schema-registry"}
 
 
 def test_more_than_twenty_payload_schemas_are_rejected(tmp_path: Path) -> None:
-    _write(tmp_path, "data/contracts.py", _registry([f"event_{index}" for index in range(21)]))
+    registry = _registry([f"event_{index}" for index in range(21)])
+    _write(tmp_path, "data/schema_dispatch.py", registry)
     assert structural_violations(tmp_path) == {"event-types"}
 
 
 def test_relative_session_import_cannot_bypass_the_shard_boundary(tmp_path: Path) -> None:
-    _write(tmp_path, "data/contracts.py", _registry(["raw_frame"]))
+    _write(tmp_path, "data/schema_dispatch.py", _registry(["raw_frame"]))
     _write(tmp_path, "data/session.py", "from . import shard\n")
     assert structural_violations(tmp_path) == {"session-shard-import"}
 
 
 def test_contract_builtin_io_is_rejected_without_an_import(tmp_path: Path) -> None:
-    source = _registry(["raw_frame"]) + 'def load():\n    return open("evidence")\n'
+    _write(tmp_path, "data/schema_dispatch.py", _registry(["raw_frame"]))
+    source = 'def load():\n    return open("evidence")\n'
     _write(tmp_path, "data/contracts.py", source)
     assert structural_violations(tmp_path) == {"contracts-io"}
 
 
 def test_payload_schema_registry_cannot_be_reassigned(tmp_path: Path) -> None:
     source = _registry(["raw_frame"]) + 'PAYLOAD_SCHEMAS = PAYLOAD_SCHEMAS | {"extra"}\n'
-    _write(tmp_path, "data/contracts.py", source)
+    _write(tmp_path, "data/schema_dispatch.py", source)
     assert structural_violations(tmp_path) == {"payload-schema-registry"}
 
 
+def test_schema_dispatch_cannot_grow_behavior(tmp_path: Path) -> None:
+    source = _registry(["raw_frame"]) + "def validate():\n    return True\n"
+    _write(tmp_path, "data/schema_dispatch.py", source)
+    assert structural_violations(tmp_path) == {"schema-dispatch-code"}
+
+
 def test_source_driven_dynamic_dispatch_is_rejected(tmp_path: Path) -> None:
-    _write(tmp_path, "data/contracts.py", _registry(["raw_frame"]))
+    _write(tmp_path, "data/schema_dispatch.py", _registry(["raw_frame"]))
     source = "HANDLERS[event.source]()\ngetattr(handler, event.source)()\n"
     _write(tmp_path, "data/dispatch.py", source)
     assert structural_violations(tmp_path) == {"source-branch"}
