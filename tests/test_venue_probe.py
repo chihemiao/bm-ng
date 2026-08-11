@@ -173,7 +173,16 @@ def test_probe_dataset_delegates_to_the_pinned_row_validator():
 def test_single_probe_verdicts_reject_an_invalid_experiment():
     rows = _dataset()
     rows.pop()
-    with pytest.raises(ValueError, match="invalid probe dataset"):
+    expected_errors = venue_probe.validate_probe_dataset(rows)
+    with pytest.raises(ValueError, match="invalid probe dataset") as raised:
+        venue_probe.single_probe_verdicts(rows)
+    assert all(error in str(raised.value) for error in expected_errors)
+
+
+def test_single_probe_verdicts_never_classify_a_complete_mixed_run():
+    rows = _dataset()
+    rows[-1]["run_digest"] = "def01234"
+    with pytest.raises(ValueError, match="mixed run_digest"):
         venue_probe.single_probe_verdicts(rows)
 
 
