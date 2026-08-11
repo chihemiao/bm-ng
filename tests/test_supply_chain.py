@@ -110,7 +110,12 @@ def test_build_and_import_roots_match_the_current_runtime_packages() -> None:
             "type": "forbidden",
             "source_modules": ["data", "execution", "reconciliation"],
             "forbidden_modules": ["tests", "research"],
-        }
+        },
+        {
+            "name": "Runtime layering",
+            "type": "layers",
+            "layers": ["reconciliation", "execution", "data"],
+        },
     ]
 
 
