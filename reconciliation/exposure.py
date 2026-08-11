@@ -4,7 +4,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from reconciliation.state import VENUES, SurfaceEvidence, validate_surface_evidence
+from reconciliation.state import (
+    VENUES,
+    SurfaceEvidence,
+    surface_is_authoritative,
+    validate_surface_evidence,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,17 +48,6 @@ def _validate_leg(leg: LegPosition, symbol: str) -> None:
     evidence = leg.evidence
     observed_ns = evidence.observed_ns if isinstance(evidence, SurfaceEvidence) else 0
     validate_surface_evidence(evidence, now_ns=observed_ns)
-
-
-def _authoritative(evidence: SurfaceEvidence, now_ns: int, max_age_ns: int) -> bool:
-    age_ns = now_ns - evidence.observed_ns
-    return (
-        evidence.page_complete
-        and not evidence.truncated
-        and evidence.unknown_count == 0
-        and evidence.mismatch_count == 0
-        and 0 <= age_ns <= max_age_ns
-    )
 
 
 def delta_state(delta: Decimal | None, *, tolerance: Decimal) -> str:
@@ -135,6 +129,8 @@ def net_delta(
         raise ValueError("position venue set is invalid")
     for leg in legs:
         _validate_leg(leg, symbol)
-    if not all(_authoritative(leg.evidence, now, max_age) for leg in legs):
+    if not all(
+        surface_is_authoritative(leg.evidence, now_ns=now, max_age_ns=max_age) for leg in legs
+    ):
         return None
     return sum((leg.signed_quantity for leg in legs), start=Decimal(0))
