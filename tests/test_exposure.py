@@ -48,9 +48,7 @@ def _positions(left="-0.1", right="0.1") -> list[LegPosition]:
     ("left", "right", "expected"),
     [("-0.1", "0.1", "0.0"), ("-0.1", "0.08", "-0.02")],
 )
-def test_two_authoritative_legs_sum_with_exact_decimal_arithmetic(
-    left, right, expected
-):
+def test_two_authoritative_legs_sum_with_exact_decimal_arithmetic(left, right, expected):
     assert net_delta(_positions(left, right), symbol="BTC", now_ns=110, max_age_ns=10) == Decimal(
         expected
     )
