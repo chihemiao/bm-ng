@@ -3,6 +3,8 @@ from decimal import Decimal
 
 import pytest
 
+import reconciliation.clock as clock_module
+import reconciliation.exposure as exposure_module
 from reconciliation.exposure import (
     ExposureClock,
     LegPosition,
@@ -295,3 +297,7 @@ def test_exposure_clock_inputs_are_strict_and_closed(changes, error):
     values.update(changes)
     with pytest.raises(error):
         advance_exposure_clock(**values)
+
+
+def test_exposure_wrapper_uses_the_shared_state_clock_function():
+    assert exposure_module.advance_state_clock is clock_module.advance_state_clock
