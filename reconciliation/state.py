@@ -70,6 +70,18 @@ class AdmissionDecision:
     action: Literal["ready", "cancel_only_freeze"]
     reasons: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        _require(self.action in {"ready", "cancel_only_freeze"}, "invalid admission action")
+        _require(isinstance(self.reasons, tuple), "invalid admission reasons")
+        valid = all(isinstance(reason, str) and reason for reason in self.reasons)
+        _require(valid, "invalid admission reason")
+        canonical = tuple(sorted(set(self.reasons)))
+        _require(self.reasons == canonical, "admission reasons are not canonical")
+        if self.action == "ready":
+            _require(not self.reasons, "ready admission cannot have reasons")
+        else:
+            _require(bool(self.reasons), "freeze admission needs a reason")
+
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
