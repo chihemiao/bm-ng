@@ -87,6 +87,7 @@ def _decision(**changes) -> AdmissionDecision:
         "now_ns": 200,
         "venues": _venues(),
         "expectations": _expectations(),
+        "signer_nonce_events": (), "signer_wallet_fingerprint": "a" * 64,
     }
     values.update(changes)
     return decide_startup_admission(**values)
