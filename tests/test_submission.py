@@ -17,6 +17,14 @@ WALLET = "b" * 64
 INSTANCE = "writer-one"
 
 
+class InjectedWriterLease(WriterLease):
+    pass
+
+
+class InjectedNonceAllocator(NonceAllocator):
+    pass
+
+
 def _intent(leg: str = "hyperliquid"):
     return make_order_intent("funding-carry", "git-deadbeef", 100, leg)
 
@@ -133,6 +141,13 @@ def test_submission_dependencies_fail_preflight_without_effects(
     with pytest.raises(TypeError, match=f"^{message}$"):
         _submit(submission_runtime, _intent(), **{field: value})
     assert submission_runtime[2] == [] and submission_runtime[1].last_nonce == 0
+
+
+def test_submission_preflight_accepts_real_control_subclasses(submission_runtime) -> None:
+    lease, allocator, _ = submission_runtime
+    lease.__class__ = InjectedWriterLease
+    allocator.__class__ = InjectedNonceAllocator
+    assert _submit(submission_runtime, _intent()) == ("persist", "accepted")
 
 
 @pytest.mark.parametrize(
