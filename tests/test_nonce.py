@@ -64,7 +64,7 @@ def test_signer_nonce_schema_is_registered_durable_and_bounded() -> None:
         validate_envelope(event)
 
 
-@pytest.mark.parametrize("reason", ["clock_backward", "clock_forward", "fence_invalidated"])
+@pytest.mark.parametrize("reason", ["clock_backward", "fence_invalidated"])
 def test_frozen_nonce_decisions_have_no_allocated_value_or_time_relation(reason: str) -> None:
     event = _nonce_event(outcome="frozen", reason=reason, allocated_nonce=None, now_ms=1)
     assert validate_envelope(event)["payload"]["allocated_nonce"] is None
@@ -73,13 +73,13 @@ def test_frozen_nonce_decisions_have_no_allocated_value_or_time_relation(reason:
 @pytest.mark.parametrize(
     ("allocated_nonce", "message"),
     [
-        (NOW_MS - 2 * DAY_MS, None),
-        (NOW_MS - 2 * DAY_MS - 1, "minus two days"),
-        (NOW_MS + DAY_MS, None),
-        (NOW_MS + DAY_MS + 1, "plus one day"),
+        (NOW_MS - 2 * DAY_MS, "minus two days"),
+        (NOW_MS - 2 * DAY_MS + 1, None),
+        (NOW_MS + DAY_MS, "plus one day"),
+        (NOW_MS + DAY_MS - 1, None),
     ],
 )
-def test_allocated_nonce_time_window_is_closed(
+def test_allocated_nonce_time_window_is_open(
     allocated_nonce: int, message: str | None,
 ) -> None:
     event = _nonce_event(allocated_nonce=allocated_nonce)
@@ -88,6 +88,13 @@ def test_allocated_nonce_time_window_is_closed(
     else:
         with pytest.raises(ContractError, match=message):
             validate_envelope(event)
+
+
+def test_clock_forward_is_not_an_allocatable_freeze_reason() -> None:
+    with pytest.raises(ContractError, match="invalid nonce reason"):
+        validate_envelope(
+            _nonce_event(outcome="frozen", reason="clock_forward", allocated_nonce=None)
+        )
 
 
 @pytest.mark.parametrize(
