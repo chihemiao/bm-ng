@@ -212,6 +212,26 @@ def _durable_events(root: Path) -> Iterator[dict[str, Any]]:
             yield event
 
 
+def _semantic_conflict(
+    event: dict[str, Any], digest: str, entry_digests: dict[str, str],
+    lease_digests: dict[tuple[str, int], str],
+) -> str | None:
+    payload = event["payload"]
+    if event["payload_schema"] == "account_ledger_entry":
+        entry_id = payload["entry_id"]
+        previous = entry_digests.setdefault(entry_id, digest)
+        if previous != digest:
+            return f"account_ledger_entry:entry_id_conflict:{entry_id}"
+    if event["payload_schema"] == "writer_lease_decision":
+        if (payload["action"], payload["outcome"]) == ("acquire", "pending_reconciliation"):
+            lease_key = payload["account_digest"], payload["lease_epoch"]
+            previous = lease_digests.setdefault(lease_key, digest)
+            if previous != digest:
+                account, epoch = lease_key
+                return f"writer_lease_decision:lease_epoch_conflict:{account}:{epoch}"
+    return None
+
+
 def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
     """Replay canonical durable events in an inclusive wall-time window."""
     valid_window = type(start_ns) is int and start_ns >= 0
@@ -222,6 +242,7 @@ def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
     freeze_reasons = set()
     seen_digests = set()
     entry_digests: dict[str, str] = {}
+    lease_digests: dict[tuple[str, int], str] = {}
     previous_key: tuple[int, str, int] | None = None
     for event in _durable_events(root):
         canonical = encode_event(event)
@@ -239,11 +260,9 @@ def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
         previous_key = key
         if not start_ns <= event["recv_wall_ns"] <= end_ns:
             continue
-        if event["payload_schema"] == "account_ledger_entry":
-            entry_id = event["payload"]["entry_id"]
-            if entry_id in entry_digests and entry_digests[entry_id] != digest:
-                freeze_reasons.add(f"account_ledger_entry:entry_id_conflict:{entry_id}")
-            entry_digests.setdefault(entry_id, digest)
+        reason = _semantic_conflict(event, digest, entry_digests, lease_digests)
+        if reason is not None:
+            freeze_reasons.add(reason)
         events.append(event)
     input_hash = hashlib.sha256()
     for event in events:
