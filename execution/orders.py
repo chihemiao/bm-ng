@@ -36,6 +36,9 @@ class OrderRequestRecord:
     replacement_ordinal: int
     client_order_id: str
     recorded_ns: int
+    account_digest: str
+    lease_epoch: int
+    writer_instance_id: str
 
     def intent_fields(self) -> dict[str, str | int]:
         return {field: getattr(self, field) for field in INTENT_FIELDS}
@@ -65,6 +68,14 @@ def _require(condition: bool, message: str) -> None:
 
 def _valid_ns(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _validate_lease_snapshot(account_digest: str, lease_epoch: int, instance_id: str) -> None:
+    valid_digest = isinstance(account_digest, str) and len(account_digest) == 64
+    valid_digest &= all(char in "0123456789abcdef" for char in account_digest)
+    _require(valid_digest, "invalid account_digest")
+    _require(type(lease_epoch) is int and lease_epoch > 0, "invalid lease_epoch")
+    _require(isinstance(instance_id, str) and bool(instance_id), "invalid writer_instance_id")
 
 
 def _client_order_id(
@@ -104,11 +115,18 @@ def _validate_intent(intent: OrderIntent) -> None:
     _require(intent.client_order_id == expected.client_order_id, "invalid client_order_id")
 
 
-def order_request_record(intent: OrderIntent, recorded_ns: int) -> OrderRequestRecord:
+def order_request_record(
+    intent: OrderIntent, recorded_ns: int, *, account_digest: str,
+    lease_epoch: int, writer_instance_id: str,
+) -> OrderRequestRecord:
     _validate_intent(intent)
     _require(_valid_ns(recorded_ns) and recorded_ns >= intent.signal_ns, "invalid recorded_ns")
+    _validate_lease_snapshot(account_digest, lease_epoch, writer_instance_id)
     values = [getattr(intent, field) for field in INTENT_FIELDS]
-    return OrderRequestRecord(*values, intent.client_order_id, recorded_ns)
+    return OrderRequestRecord(
+        *values, intent.client_order_id, recorded_ns,
+        account_digest, lease_epoch, writer_instance_id,
+    )
 
 
 def _validate_evidence(evidence: ReconciliationEvidence) -> None:
@@ -134,6 +152,9 @@ def _validate_request(intent: OrderIntent, request: OrderRequestRecord | None) -
     if request is None:
         return
     _require(isinstance(request, OrderRequestRecord), "invalid request record")
+    _validate_lease_snapshot(
+        request.account_digest, request.lease_epoch, request.writer_instance_id
+    )
     intent_fields = {field: getattr(intent, field) for field in INTENT_FIELDS}
     matches = request.client_order_id == intent.client_order_id
     matches &= request.intent_fields() == intent_fields

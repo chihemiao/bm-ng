@@ -39,6 +39,13 @@ def _history(intent, *, attempts=0, frozen=False):
     return ReplayedDecisionHistory(intent.client_order_id, attempts, frozen)
 
 
+def _request(intent, recorded_ns=110):
+    return order_request_record(
+        intent, recorded_ns=recorded_ns, account_digest="a" * 64,
+        lease_epoch=1, writer_instance_id="writer-one",
+    )
+
+
 def _decide(intent, evidence, *, request=None, history=None, now_ns=120):
     return decide_submission(
         intent,
@@ -71,7 +78,7 @@ def test_request_record_must_exist_and_match_before_submit() -> None:
     evidence = _evidence()
     assert _decide(intent, evidence) == "persist"
 
-    request = order_request_record(intent, recorded_ns=110)
+    request = _request(intent)
     assert request.client_order_id == intent.client_order_id
     assert request.intent_fields() == {
         "strategy_id": "funding-carry",
@@ -82,7 +89,7 @@ def test_request_record_must_exist_and_match_before_submit() -> None:
     }
     assert _decide(intent, evidence, request=request) == "submit"
 
-    wrong_request = order_request_record(_intent(leg="bybit"), recorded_ns=110)
+    wrong_request = _request(_intent(leg="bybit"))
     with pytest.raises(OrderContractError, match="request does not match intent"):
         _decide(intent, evidence, request=wrong_request)
 
@@ -123,7 +130,7 @@ def test_ambiguous_state_reconciles_before_staleness_and_then_freezes(status) ->
 
 def test_replayed_freeze_is_an_absorbing_state() -> None:
     intent = _intent()
-    request = order_request_record(intent, recorded_ns=110)
+    request = _request(intent)
     frozen = _history(intent, frozen=True)
     assert _decide(intent, _evidence(), request=request, history=frozen) == "freeze"
 
@@ -138,7 +145,7 @@ def test_any_known_order_state_holds_the_same_intent(status) -> None:
 
 def test_only_authoritative_absence_can_reject_or_submit_a_stale_signal() -> None:
     intent = _intent()
-    request = order_request_record(intent, recorded_ns=110)
+    request = _request(intent)
     assert _decide(intent, _evidence(), request=request, now_ns=150) == "submit"
     assert _decide(intent, _evidence(), request=request, now_ns=151) == "reject_stale"
 
