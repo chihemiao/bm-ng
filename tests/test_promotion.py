@@ -1,5 +1,4 @@
 import hashlib
-import json
 from pathlib import Path
 
 import pytest
@@ -174,14 +173,11 @@ def test_ready_admission_records_exact_decision_and_promotes(tmp_path: Path) -> 
     authority = promote_writer(
         lease, AdmissionDecision("ready", ()), recorded.append, now_ns=101
     )
-    admission_json = json.dumps(
-        {"action": "ready", "reasons": []}, sort_keys=True, separators=(",", ":")
-    )
     expected = WriterPromotionDecision(
         hashlib.sha256(_identity().account_id.encode()).hexdigest(),
         "writer-one", "boot-one", 1, "pending_reconciliation", "risk_increasing",
         "promoted", "admission_ready", "ready",
-        hashlib.sha256(admission_json.encode()).hexdigest(), 101,
+        hashlib.sha256(b'{"action":"ready","reasons":[]}').hexdigest(), 101,
     )
     assert recorded == [expected]
     assert authority == lease.authority and authority.mode == "risk_increasing"
@@ -193,14 +189,13 @@ def test_ready_recorder_failure_preserves_pending_mode(tmp_path: Path) -> None:
     failure = OSError("promotion record failed")
     observed = []
 
-    def fail(decision: WriterPromotionDecision) -> None:
-        observed.append((decision, lease.authority.mode))
+    def fail(_decision: WriterPromotionDecision) -> None:
+        observed.append(lease.authority.mode)
         raise failure
 
     with pytest.raises(OSError) as raised:
         promote_writer(lease, AdmissionDecision("ready", ()), fail, now_ns=101)
-    assert raised.value is failure
-    assert observed[0][1] == "pending_reconciliation"
+    assert raised.value is failure and observed == ["pending_reconciliation"]
     assert lease.authority.mode == "pending_reconciliation"
     lease.release()
 
@@ -219,9 +214,9 @@ def test_freeze_records_denial_without_entering_elevation(tmp_path: Path) -> Non
     lease.release()
 
 
-@pytest.mark.parametrize("admission", [AdmissionDecision("ready", ()), AdmissionDecision(
-    "cancel_only_freeze", ("freeze",)
-)])
+@pytest.mark.parametrize("admission", [
+    AdmissionDecision("ready", ()), AdmissionDecision("cancel_only_freeze", ("freeze",)),
+])
 def test_cancel_only_records_not_promotable_for_either_admission(
     tmp_path: Path, admission: AdmissionDecision
 ) -> None:
