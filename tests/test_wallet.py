@@ -47,6 +47,12 @@ def test_registration_rejects_invalid_structure(changes: dict[str, object], mess
         _registration(**changes)
 
 
+@pytest.mark.parametrize("expires_ns", [float(ISSUED_NS + VALIDITY_NS), True])
+def test_registration_requires_an_exact_integer_expiry(expires_ns: object) -> None:
+    with pytest.raises(TypeError, match="expires_ns"):
+        _registration(expires_ns=expires_ns)
+
+
 @pytest.mark.parametrize(
     ("now_ns", "expected"),
     [
@@ -68,3 +74,8 @@ def test_assess_rejects_clock_rollback_and_non_integer_time() -> None:
         assess(_registration(), ISSUED_NS - 1)
     with pytest.raises(TypeError, match="now_ns"):
         assess(_registration(), True)
+
+
+def test_assess_rejects_an_uncontrolled_registration_type() -> None:
+    with pytest.raises(TypeError, match="registration"):
+        assess(object(), ISSUED_NS)
