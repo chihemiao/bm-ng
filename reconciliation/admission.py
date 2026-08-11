@@ -8,6 +8,22 @@ from reconciliation.state import AdmissionDecision
 EXPOSURE_STATES = frozenset({"flat", "naked", "unknown"})
 PAIR_STATES = frozenset({"balanced", "unfilled", "imbalanced", "overfilled", "unknown"})
 WALLET_STATUSES = frozenset({"active", "rotation_due", "expired"})
+CONTINUOUS_ADMISSION_REASONS = {
+    name: f"continuous_admission:{name}"
+    for name in (
+        "exposure_unobserved",
+        "exposure_unknown",
+        "naked_duration_exceeded",
+        "naked_duration_unknown",
+        "obligation_unobserved",
+        "obligation_duration_exceeded",
+        "obligation_duration_unknown",
+        "pair_unknown",
+        "agent_wallet_expired",
+        "nonce_frozen",
+    )
+}
+CONTINUOUS_ADMISSION_REASON_KEYS = frozenset(CONTINUOUS_ADMISSION_REASONS.values())
 
 
 def _validate_clock(value: object, expected: type, states: frozenset[str], name: str) -> None:
@@ -45,24 +61,24 @@ def _validate_inputs(
 
 def _exposure_reasons(exposure: ExposureClock | None) -> list[str]:
     if exposure is None:
-        return ["continuous_admission:exposure_unobserved"]
+        return [CONTINUOUS_ADMISSION_REASONS["exposure_unobserved"]]
     reasons = []
     if exposure.state == "unknown":
-        reasons.append("continuous_admission:exposure_unknown")
+        reasons.append(CONTINUOUS_ADMISSION_REASONS["exposure_unknown"])
     if exposure.duration_exceeded is True:
-        reasons.append("continuous_admission:naked_duration_exceeded")
+        reasons.append(CONTINUOUS_ADMISSION_REASONS["naked_duration_exceeded"])
     elif exposure.duration_exceeded is None:
-        reasons.append("continuous_admission:naked_duration_unknown")
+        reasons.append(CONTINUOUS_ADMISSION_REASONS["naked_duration_unknown"])
     return reasons
 
 
 def _obligation_reasons(obligation: StateClock | None) -> list[str]:
     if obligation is None:
-        return ["continuous_admission:obligation_unobserved"]
+        return [CONTINUOUS_ADMISSION_REASONS["obligation_unobserved"]]
     if obligation.duration_exceeded is True:
-        return ["continuous_admission:obligation_duration_exceeded"]
+        return [CONTINUOUS_ADMISSION_REASONS["obligation_duration_exceeded"]]
     if obligation.duration_exceeded is None:
-        return ["continuous_admission:obligation_duration_unknown"]
+        return [CONTINUOUS_ADMISSION_REASONS["obligation_duration_unknown"]]
     return []
 
 
@@ -78,11 +94,11 @@ def decide_continuous_admission(
     _validate_inputs(exposure, obligation, pair, agent_wallet_status, nonce_freeze_reason)
     reasons = [*_exposure_reasons(exposure), *_obligation_reasons(obligation)]
     if pair.state == "unknown":
-        reasons.append("continuous_admission:pair_unknown")
+        reasons.append(CONTINUOUS_ADMISSION_REASONS["pair_unknown"])
     if agent_wallet_status == "expired":
-        reasons.append("continuous_admission:agent_wallet_expired")
+        reasons.append(CONTINUOUS_ADMISSION_REASONS["agent_wallet_expired"])
     if nonce_freeze_reason is not None:
-        reasons.append(f"continuous_admission:nonce_frozen:{nonce_freeze_reason}")
+        reasons.append(f"{CONTINUOUS_ADMISSION_REASONS['nonce_frozen']}:{nonce_freeze_reason}")
     ordered = tuple(sorted(set(reasons)))
     action = "cancel_only_freeze" if ordered else "ready"
     return AdmissionDecision(action, ordered)

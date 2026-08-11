@@ -71,6 +71,7 @@ AUTHORIZATION_DENIAL_REASONS = frozenset(
 )
 WRITER_DECISIONS = {
     ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
+    ("demote", "cancel_only"): frozenset(),
     ("deny", "cancel_only"): frozenset({"incumbent_other_wallet"}),
     ("deny", "terminated"): frozenset(
         {"shared_writer_identity", "unknown_incumbent", "unsafe_lock_file"}
