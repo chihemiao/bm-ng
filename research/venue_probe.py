@@ -151,3 +151,52 @@ def validate_probe_dataset(rows: object) -> tuple[str, ...]:
     if len(digests) != 1:
         errors.append("mixed run_digest")
     return tuple(errors)
+
+
+def _validated_index(
+    rows: object,
+) -> dict[tuple[object, object, object], Mapping[object, object]]:
+    errors = validate_probe_dataset(rows)
+    if errors:
+        raise ValueError("invalid probe dataset: " + "; ".join(errors))
+    return {
+        _probe_row_identity(row): row
+        for row in rows
+        if isinstance(row, Mapping)
+    }
+
+
+def _conclusive(row: Mapping[object, object]) -> bool:
+    status = row["venue_status"]
+    return row["http_status"] == 200 and (
+        status == "ok" or status == "err" and row["venue_error_code"] is not None
+    )
+
+
+def _conclusive_ok(row: Mapping[object, object]) -> bool:
+    return _conclusive(row) and row["venue_status"] == "ok"
+
+
+def _single_probe_verdict(
+    control: Mapping[object, object], experimental: Mapping[object, object]
+) -> str:
+    if not _conclusive_ok(control) or not _conclusive(experimental):
+        return "inconclusive"
+    return "confirms" if experimental["venue_status"] == "err" else "refutes"
+
+
+def single_probe_verdicts(rows: object) -> dict[str, str]:
+    """Classify the three probes with one control and one experimental result."""
+    index = _validated_index(rows)
+    duplicate_control = index[("B1_duplicate", 1, None)]
+    return {
+        "B1_stale": _single_probe_verdict(
+            duplicate_control, index[("B1_stale", 1, None)]
+        ),
+        "B1_duplicate": _single_probe_verdict(
+            duplicate_control, index[("B1_duplicate", 2, None)]
+        ),
+        "B2_revoked": _single_probe_verdict(
+            index[("B2_revoked", 1, None)], index[("B2_revoked", 2, None)]
+        ),
+    }

@@ -47,6 +47,23 @@ def _dataset():
     ]
 
 
+def _probe_row(rows, probe_id, ordinal, slot=None):
+    return next(
+        row
+        for row in rows
+        if (row["probe_id"], row["attempt_ordinal"], row["signer_slot"])
+        == (probe_id, ordinal, slot)
+    )
+
+
+def _set_outcome(row, status, code=None, http_status=200):
+    row.update(
+        http_status=http_status,
+        venue_status=status,
+        venue_error_code=code,
+    )
+
+
 @pytest.mark.parametrize(
     ("probe_id", "ordinal", "slot"),
     [
@@ -151,3 +168,70 @@ def test_probe_dataset_delegates_to_the_pinned_row_validator():
         venue_probe.validate_probe_dataset.__globals__["venue_probe_row_errors"]
         is venue_probe.venue_probe_row_errors
     )
+
+
+def test_single_probe_verdicts_reject_an_invalid_experiment():
+    rows = _dataset()
+    rows.pop()
+    expected_errors = venue_probe.validate_probe_dataset(rows)
+    with pytest.raises(ValueError, match="invalid probe dataset") as raised:
+        venue_probe.single_probe_verdicts(rows)
+    assert all(error in str(raised.value) for error in expected_errors)
+
+
+def test_single_probe_verdicts_never_classify_a_complete_mixed_run():
+    rows = _dataset()
+    rows[-1]["run_digest"] = "def01234"
+    with pytest.raises(ValueError, match="mixed run_digest"):
+        venue_probe.single_probe_verdicts(rows)
+
+
+def test_single_probe_verdicts_return_exact_keys_and_reachable_refutes():
+    assert venue_probe.single_probe_verdicts(_dataset()) == {
+        "B1_stale": "refutes",
+        "B1_duplicate": "refutes",
+        "B2_revoked": "refutes",
+    }
+
+
+@pytest.mark.parametrize(
+    ("probe_id", "ordinal", "verdict_key"),
+    [
+        ("B1_stale", 1, "B1_stale"),
+        ("B1_duplicate", 2, "B1_duplicate"),
+        ("B2_revoked", 2, "B2_revoked"),
+    ],
+)
+def test_coded_experimental_rejection_confirms_single_probe(
+    probe_id, ordinal, verdict_key
+):
+    rows = _dataset()
+    _set_outcome(_probe_row(rows, probe_id, ordinal), "err", "rejected")
+    assert venue_probe.single_probe_verdicts(rows)[verdict_key] == "confirms"
+
+
+@pytest.mark.parametrize(
+    ("control", "experimental", "verdict_key"),
+    [
+        (("B1_duplicate", 1), ("B1_stale", 1), "B1_stale"),
+        (("B1_duplicate", 1), ("B1_duplicate", 2), "B1_duplicate"),
+        (("B2_revoked", 1), ("B2_revoked", 2), "B2_revoked"),
+    ],
+)
+def test_failed_control_makes_single_probe_inconclusive(
+    control, experimental, verdict_key
+):
+    rows = _dataset()
+    _set_outcome(_probe_row(rows, *control), "err", "control_failed")
+    _set_outcome(_probe_row(rows, *experimental), "err", "rejected")
+    assert venue_probe.single_probe_verdicts(rows)[verdict_key] == "inconclusive"
+
+
+@pytest.mark.parametrize(
+    ("http_status", "code"), [(500, "rejected"), (200, None)]
+)
+def test_transport_failure_or_uncoded_error_is_inconclusive(http_status, code):
+    rows = _dataset()
+    experimental = _probe_row(rows, "B1_duplicate", 2)
+    _set_outcome(experimental, "err", code, http_status)
+    assert venue_probe.single_probe_verdicts(rows)["B1_duplicate"] == "inconclusive"
