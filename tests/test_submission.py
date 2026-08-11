@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from execution import orders
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
+    OrderContractError,
     ReconciliationEvidence,
     ReplayedDecisionHistory,
     make_order_intent,
@@ -78,6 +80,17 @@ def _submit(runtime, intent, **changes):
     return orders.submit_order(**values)
 
 
+def _request(runtime, intent, **changes):
+    lease, allocator, _ = runtime
+    authority = lease.authority
+    built = order_request_record(
+        intent, 110, account_digest=allocator.account_digest,
+        lease_epoch=authority.lease_epoch, writer_instance_id=INSTANCE,
+        wallet_fingerprint=WALLET, allocated_nonce=501,
+    )
+    return replace(built, **changes)
+
+
 def test_hyperliquid_persist_allocates_records_then_transports(submission_runtime) -> None:
     lease, allocator, effects = submission_runtime
     assert _submit(submission_runtime, _intent()) == ("persist", "accepted")
@@ -104,17 +117,32 @@ def test_bybit_persist_skips_nonce_but_uses_the_bound_account(submission_runtime
 
 
 def test_submit_resume_transports_the_existing_request_only(submission_runtime) -> None:
-    lease, allocator, effects = submission_runtime
+    _, allocator, effects = submission_runtime
     intent = _intent()
-    authority = lease.authority
-    existing = order_request_record(
-        intent, 110, account_digest=allocator.account_digest,
-        lease_epoch=authority.lease_epoch, writer_instance_id=INSTANCE,
-        wallet_fingerprint=WALLET, allocated_nonce=501,
-    )
+    existing = _request(submission_runtime, intent)
     assert _submit(submission_runtime, intent, request=existing) == ("submit", "accepted")
     assert effects == [("transport", existing)]
     assert effects[0][1] is existing and allocator.last_nonce == 0
+
+
+@pytest.mark.parametrize("field", ["account_digest", "wallet_fingerprint"])
+def test_submit_resume_rejects_current_binding_mismatch(
+    submission_runtime, field: str
+) -> None:
+    intent = _intent()
+    existing = _request(submission_runtime, intent, **{field: "c" * 64})
+    with pytest.raises(OrderContractError, match=f"resume request {field} mismatch"):
+        _submit(submission_runtime, intent, request=existing)
+    assert submission_runtime[2] == [] and submission_runtime[1].last_nonce == 0
+
+
+def test_submit_resume_allows_prior_instance_and_epoch(submission_runtime) -> None:
+    intent = _intent()
+    existing = _request(
+        submission_runtime, intent, writer_instance_id="prior-writer", lease_epoch=99
+    )
+    assert _submit(submission_runtime, intent, request=existing) == ("submit", "accepted")
+    assert submission_runtime[2] == [("transport", existing)]
 
 
 @pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
