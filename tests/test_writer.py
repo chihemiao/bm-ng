@@ -76,7 +76,8 @@ def _lease_for_mode(root: Path, mode: str) -> WriterLease:
     identity = _identity()
     if mode == "cancel_only":
         authority = WriterAuthority(identity, mode, 1)
-        return WriterLease(WriterLease.path_for(root, identity.account_id), authority, None, [].append, True)
+        path = WriterLease.path_for(root, identity.account_id)
+        return WriterLease(path, authority, None, [].append, True)
     lease, _ = _acquire(root, identity)
     if mode == "risk_increasing":
         lease._authority = lease.authority._replace(mode=mode)
@@ -153,6 +154,16 @@ def test_writer_authorization_matrix(
         with pytest.raises(WriterLeaseError, match=reason):
             lease.authorize(action)
     lease.release()
+
+
+def test_pending_and_cancel_only_have_the_same_allowed_actions() -> None:
+    def allowed(mode):
+        return {
+            action for candidate, action, decision in AUTHORIZATION_MATRIX
+            if candidate == mode and decision
+        }
+
+    assert allowed("pending_reconciliation") == allowed("cancel_only") == {"cancel", "cancel_all"}
 
 
 @pytest.mark.parametrize(("action", "error"), (("typo", ValueError), (None, TypeError)))
