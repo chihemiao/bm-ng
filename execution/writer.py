@@ -120,9 +120,10 @@ def _contended(
 class WriterLease:
     def __init__(
         self, path: Path, authority: WriterAuthority, fd: int | None, recorder: Recorder,
-        prior_epoch_valid: bool):
+        prior_epoch_valid: bool, *, acquired_ns: int | None):
         self.path, self._authority, self._fd = path, authority, fd
         self._recorder, self._prior_epoch_valid = recorder, prior_epoch_valid
+        self._acquired_ns = acquired_ns
 
     @staticmethod
     def path_for(root: Path, account_id: str) -> Path:
@@ -131,7 +132,13 @@ class WriterLease:
         return base / f"{digest}.writer.lock"
 
     @classmethod
-    def acquire(cls, root: Path, identity: WriterIdentity, recorder: Recorder) -> "WriterLease":
+    def acquire(
+        cls, root: Path, identity: WriterIdentity, recorder: Recorder, *, acquired_ns: int
+    ) -> "WriterLease":
+        if type(acquired_ns) is not int:
+            raise TypeError("acquired_ns must be an integer")
+        if acquired_ns <= 0:
+            raise ValueError("acquired_ns must be positive")
         _require(isinstance(identity, WriterIdentity), "invalid writer identity")
         _require(callable(recorder), "invalid writer recorder")
         metadata = identity._asdict()
@@ -157,7 +164,7 @@ class WriterLease:
             _require(_same_inode(fd, path), "lock inode changed")
         except BlockingIOError:
             authority = _contended(fd, path, identity, fingerprint, recorder)
-            return cls(path, authority, None, recorder, True)
+            return cls(path, authority, None, recorder, True, acquired_ns=None)
         except (OSError, WriterLeaseError) as exc:
             os.close(fd)
             decision = _decision(
@@ -182,7 +189,7 @@ class WriterLease:
         except WriterLeaseError:
             os.close(fd)
             raise
-        return cls(path, authority, fd, recorder, prior)
+        return cls(path, authority, fd, recorder, prior, acquired_ns=acquired_ns)
 
     @property
     def authority(self) -> WriterAuthority:
@@ -221,6 +228,26 @@ class WriterLease:
         if action not in allowed:
             raise WriterLeaseError("writer action not authorized")
         return authority
+
+    def elevate_to_risk_increasing(
+        self, *, promotion_ns: int,
+        before_elevate: Callable[[WriterAuthority], None],
+    ) -> WriterAuthority:
+        authority = self.revalidate()
+        _require(authority.mode == "pending_reconciliation", "writer lease not promotable")
+        if type(promotion_ns) is not int:
+            raise TypeError("promotion_ns must be an integer")
+        if promotion_ns <= 0:
+            raise ValueError("promotion_ns must be positive")
+        _require(self._acquired_ns is not None, "missing writer acquisition time")
+        if promotion_ns < self._acquired_ns:
+            raise ValueError("promotion_ns predates acquisition")
+        if not callable(before_elevate):
+            raise TypeError("before_elevate must be callable")
+        before_elevate(authority)
+        elevated = authority._replace(mode="risk_increasing")
+        self._authority = elevated
+        return elevated
 
     def release(self) -> None:
         if self._fd is not None:
