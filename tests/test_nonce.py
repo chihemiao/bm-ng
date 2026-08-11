@@ -76,6 +76,26 @@ def test_real_process_contention_release_and_crash_takeover(tmp_path: Path) -> N
     SignerFence.acquire(tmp_path, FINGERPRINT, "post-crash").release()
 
 
+def test_failed_contender_cannot_mutate_the_held_lock_file(tmp_path: Path) -> None:
+    owner = _holder(tmp_path)
+    path = path_for(tmp_path, FINGERPRINT)
+    path.write_bytes(b"x")
+    path.chmod(0o640)
+    fixed_ns = 1_700_000_000_000_000_000
+    os.utime(path, ns=(fixed_ns, fixed_ns))
+    before = path.stat()
+    with pytest.raises(SignerFenceError, match="signer fence contended"):
+        SignerFence.acquire(tmp_path, FINGERPRINT, "contender")
+    after = path.stat()
+    owner.communicate("\n", timeout=5)
+    assert (after.st_size, after.st_mode & 0o777, after.st_mtime_ns) == (
+        before.st_size, before.st_mode & 0o777, before.st_mtime_ns,
+    )
+    takeover = SignerFence.acquire(tmp_path, FINGERPRINT, "takeover")
+    assert path.stat().st_size == 0 and path.stat().st_mode & 0o777 == 0o600
+    takeover.release()
+
+
 def test_symlink_and_replaced_inode_permanently_invalidate(tmp_path: Path) -> None:
     path = path_for(tmp_path, FINGERPRINT)
     target = tmp_path / "target"
