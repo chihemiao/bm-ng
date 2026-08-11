@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from data.schema_nonce import DAY_MS
 from execution import orders
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
@@ -91,10 +92,11 @@ def _submit(runtime, intent, **changes):
 def _request(runtime, intent, **changes):
     lease, allocator, _ = runtime
     authority = lease.authority
+    nonce = None if intent.leg == "bybit" else 501
     built = order_request_record(
         intent, 110, account_digest=allocator.account_digest,
         lease_epoch=authority.lease_epoch, writer_instance_id=INSTANCE,
-        wallet_fingerprint=WALLET, allocated_nonce=501,
+        wallet_fingerprint=WALLET, allocated_nonce=nonce,
     )
     return replace(built, **changes)
 
@@ -157,6 +159,49 @@ def test_submit_resume_allows_prior_instance_and_epoch(submission_runtime) -> No
         submission_runtime, intent, writer_instance_id="prior-writer", lease_epoch=99
     )
     assert _submit(submission_runtime, intent, request=existing) == ("submit", "accepted")
+    assert submission_runtime[2] == [("transport", existing)]
+
+
+@pytest.mark.parametrize(
+    "offset", [-2 * DAY_MS - 1, -2 * DAY_MS, DAY_MS, DAY_MS + 1],
+)
+def test_hyperliquid_resume_rejects_nonce_outside_strict_time_window(
+    submission_runtime, offset: int,
+) -> None:
+    intent = _intent()
+    now_ms = 3 * DAY_MS
+    existing = _request(
+        submission_runtime, intent, allocated_nonce=now_ms + offset,
+    )
+    with pytest.raises(
+        OrderContractError,
+        match="^resume request allocated_nonce outside time window$",
+    ):
+        _submit(submission_runtime, intent, request=existing, now_ms=now_ms)
+    assert submission_runtime[2] == []
+
+
+@pytest.mark.parametrize("offset", [-2 * DAY_MS + 1, DAY_MS - 1])
+def test_hyperliquid_resume_accepts_nonce_inside_strict_time_window(
+    submission_runtime, offset: int,
+) -> None:
+    intent = _intent()
+    now_ms = 3 * DAY_MS
+    existing = _request(
+        submission_runtime, intent, allocated_nonce=now_ms + offset,
+    )
+    assert _submit(
+        submission_runtime, intent, request=existing, now_ms=now_ms,
+    ) == ("submit", "accepted")
+    assert submission_runtime[2] == [("transport", existing)]
+
+
+def test_bybit_resume_has_no_signer_nonce_time_window(submission_runtime) -> None:
+    intent = _intent("bybit")
+    existing = _request(submission_runtime, intent, allocated_nonce=None)
+    assert _submit(
+        submission_runtime, intent, request=existing, now_ms=3 * DAY_MS,
+    ) == ("submit", "accepted")
     assert submission_runtime[2] == [("transport", existing)]
 
 
