@@ -4,12 +4,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from reconciliation.clock import StateClock, advance_state_clock
 from reconciliation.state import (
     VENUES,
     SurfaceEvidence,
     surface_is_authoritative,
     validate_surface_evidence,
 )
+
+EXPOSURE_STATES = {"flat": "inactive", "naked": "active", "unknown": "unknown"}
+CORE_EXPOSURE_STATES = {value: key for key, value in EXPOSURE_STATES.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,29 +71,25 @@ def delta_state(delta: Decimal | None, *, tolerance: Decimal) -> str:
     return "flat" if abs(delta) <= tolerance else "naked"
 
 
-def _validate_clock_inputs(
-    previous: ExposureClock | None,
-    state: str,
-    observed_ns: int,
-    max_naked_ns: int,
-) -> int:
-    if previous is not None and not isinstance(previous, ExposureClock):
-        raise TypeError("previous must be ExposureClock or None")
+def _core_exposure_state(state: str) -> str:
     if type(state) is not str:
         raise TypeError("state must be a string")
-    if state not in {"flat", "naked", "unknown"}:
+    if state not in EXPOSURE_STATES:
         raise ValueError("state is invalid")
-    observed = _positive_int(observed_ns, "observed_ns")
-    if type(max_naked_ns) is not int:
-        raise TypeError("max_naked_ns must be an integer")
-    if max_naked_ns < 0:
-        raise ValueError("max_naked_ns must be non-negative")
-    if previous is not None:
-        if observed < previous.observed_ns:
-            raise ValueError("observed_ns cannot move backward")
-        if observed == previous.observed_ns and state != previous.state:
-            raise ValueError("different state at same observed_ns")
-    return observed
+    return EXPOSURE_STATES[state]
+
+
+def _core_exposure_clock(previous: ExposureClock | None) -> StateClock | None:
+    if previous is not None and not isinstance(previous, ExposureClock):
+        raise TypeError("previous must be ExposureClock or None")
+    if previous is None:
+        return None
+    return StateClock(
+        _core_exposure_state(previous.state),
+        previous.observed_ns,
+        previous.naked_since_ns,
+        previous.duration_exceeded,
+    )
 
 
 def advance_exposure_clock(
@@ -100,16 +100,18 @@ def advance_exposure_clock(
     max_naked_ns: int,
 ) -> ExposureClock:
     """Advance naked-exposure duration using authoritative observations only."""
-    observed = _validate_clock_inputs(previous, state, observed_ns, max_naked_ns)
-    if state == "flat":
-        return ExposureClock(state, observed, None, False)
-    naked_since = previous.naked_since_ns if previous is not None else None
-    if state == "naked" and naked_since is None:
-        naked_since = observed
-    if naked_since is None:
-        return ExposureClock(state, observed, None, None)
-    exceeded = observed - naked_since > max_naked_ns
-    return ExposureClock(state, observed, naked_since, exceeded)
+    result = advance_state_clock(
+        _core_exposure_clock(previous),
+        state=_core_exposure_state(state),
+        observed_ns=observed_ns,
+        max_active_ns=max_naked_ns,
+    )
+    return ExposureClock(
+        CORE_EXPOSURE_STATES[result.state],
+        result.observed_ns,
+        result.active_since_ns,
+        result.duration_exceeded,
+    )
 
 
 def net_delta(
