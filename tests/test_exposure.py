@@ -202,18 +202,14 @@ def test_non_finite_leg_quantity_is_rejected_with_value_error(quantity):
         ("unknown", None, None),
     ],
 )
-def test_first_exposure_sample_has_a_closed_clock_state(
-    state, naked_since_ns, duration_exceeded
-):
+def test_first_exposure_sample_has_a_closed_clock_state(state, naked_since_ns, duration_exceeded):
     assert advance_exposure_clock(
         None, state=state, observed_ns=100, max_naked_ns=0
     ) == ExposureClock(state, 100, naked_since_ns, duration_exceeded)
 
 
 def test_continuous_naked_samples_preserve_the_first_observed_time():
-    started = advance_exposure_clock(
-        None, state="naked", observed_ns=100, max_naked_ns=10
-    )
+    started = advance_exposure_clock(None, state="naked", observed_ns=100, max_naked_ns=10)
     assert advance_exposure_clock(
         started, state="naked", observed_ns=105, max_naked_ns=10
     ) == ExposureClock("naked", 105, 100, False)
@@ -259,17 +255,13 @@ def test_naked_sample_after_unknown_without_a_timer_starts_at_that_observation()
 def test_observation_clock_cannot_move_backward():
     previous = ExposureClock("flat", 100, None, False)
     with pytest.raises(ValueError, match="observed_ns"):
-        advance_exposure_clock(
-            previous, state="flat", observed_ns=99, max_naked_ns=10
-        )
+        advance_exposure_clock(previous, state="flat", observed_ns=99, max_naked_ns=10)
 
 
 def test_same_timestamp_and_state_is_an_idempotent_recalculation():
     previous = ExposureClock("naked", 100, 100, False)
     assert (
-        advance_exposure_clock(
-            previous, state="naked", observed_ns=100, max_naked_ns=10
-        )
+        advance_exposure_clock(previous, state="naked", observed_ns=100, max_naked_ns=10)
         == previous
     )
 
@@ -277,9 +269,7 @@ def test_same_timestamp_and_state_is_an_idempotent_recalculation():
 def test_same_timestamp_with_a_different_state_is_contradictory():
     previous = ExposureClock("flat", 100, None, False)
     with pytest.raises(ValueError, match="same observed_ns"):
-        advance_exposure_clock(
-            previous, state="naked", observed_ns=100, max_naked_ns=10
-        )
+        advance_exposure_clock(previous, state="naked", observed_ns=100, max_naked_ns=10)
 
 
 @pytest.mark.parametrize(
