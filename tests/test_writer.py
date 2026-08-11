@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from data.contracts import ContractError, validate_envelope
 from data.shard import ShardWriter, replay_event_window
 from execution.writer import (
     AUTHORITY_MODES,
@@ -53,6 +54,25 @@ sys.stdin.readline(); lease.release()
 
 def _identity(instance="one", fingerprint="a" * 64):
     return WriterIdentity("hyperliquid:test-account", instance, fingerprint, "boot-one")
+
+
+def _promotion_event(**changes) -> dict:
+    payload = {
+        "account_digest": "a" * 64, "instance_id": "writer-one",
+        "boot_id": "identity-boot", "lease_epoch": 1,
+        "from_mode": "pending_reconciliation", "to_mode": "risk_increasing",
+        "outcome": "promoted", "reason": "admission_ready",
+        "admission_action": "ready", "admission_digest": "b" * 64,
+        "decided_ns": 900,
+    }
+    payload.update(changes)
+    return {
+        "schema_ver": 1, "event_kind": "decision",
+        "payload_schema": "writer_authority_promotion", "venue": "hyperliquid",
+        "conn_id": "writer-one", "boot_id": "boot-one",
+        "recv_wall_ns": 1_000, "recv_mono_ns": 900,
+        "source": "writer_promotion", "seq_within_boot": 10, "payload": payload,
+    }
 
 
 def _holder(root: Path, identity: WriterIdentity) -> subprocess.Popen[str]:
@@ -103,6 +123,48 @@ def _shard_recorder(root: Path):
         )
 
     return writer, record
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {},
+        {
+            "outcome": "denied", "to_mode": "pending_reconciliation",
+            "reason": "admission_freeze", "admission_action": "cancel_only_freeze",
+        },
+        {
+            "outcome": "denied", "from_mode": "cancel_only", "to_mode": "cancel_only",
+            "reason": "not_promotable_mode", "admission_action": "ready",
+        },
+        {
+            "outcome": "denied", "from_mode": "cancel_only", "to_mode": "cancel_only",
+            "reason": "not_promotable_mode", "admission_action": "cancel_only_freeze",
+        },
+    ],
+)
+def test_writer_authority_promotion_has_a_closed_decision_matrix(changes: dict) -> None:
+    assert validate_envelope(_promotion_event(**changes))["payload"]
+
+
+def test_writer_authority_promotion_rejects_invalid_fields_and_combinations() -> None:
+    invalid = [
+        _promotion_event(to_mode="pending_reconciliation"),
+        _promotion_event(account_digest="raw-account"),
+        _promotion_event(admission_digest="raw-admission"),
+        _promotion_event(lease_epoch=0),
+        _promotion_event(decided_ns=0),
+    ]
+    missing = _promotion_event()
+    missing["payload"].pop("admission_action")
+    invalid.append(missing)
+    for event in invalid:
+        with pytest.raises(ContractError):
+            validate_envelope(event)
+    wrong_kind = _promotion_event()
+    wrong_kind["event_kind"] = "ops"
+    with pytest.raises(ContractError, match="event kind"):
+        validate_envelope(wrong_kind)
 
 
 def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> None:

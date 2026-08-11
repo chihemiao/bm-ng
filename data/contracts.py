@@ -24,6 +24,7 @@ PAYLOAD_SCHEMAS = frozenset(
         "subscription_send",
         "venue_down",
         "venue_recovered",
+        "writer_authority_promotion",
         "writer_lease_decision",
     }
 )
@@ -31,7 +32,9 @@ IDENTITY_STATUSES = frozenset({"known", "unknown"})
 RECONCILIATION_SCHEMAS = frozenset(
     {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
 )
-DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {"order_request", "writer_lease_decision"}
+DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
+    "order_request", "writer_authority_promotion", "writer_lease_decision",
+}
 ORDER_LEASE_FIELDS = ("account_digest", "lease_epoch", "writer_instance_id")
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
@@ -43,6 +46,14 @@ WRITER_DECISIONS = {
     ),
     ("release", "released"): frozenset({"lease_released"}),
     ("revalidate", "invalidated"): frozenset({"lock_inode_changed"}),
+}
+PROMOTION_DECISIONS = {
+    ("promoted", "pending_reconciliation", "risk_increasing", "admission_ready"):
+        frozenset({"ready"}),
+    ("denied", "pending_reconciliation", "pending_reconciliation", "admission_freeze"):
+        frozenset({"cancel_only_freeze"}),
+    ("denied", "cancel_only", "cancel_only", "not_promotable_mode"):
+        frozenset({"ready", "cancel_only_freeze"}),
 }
 COMMON_FIELDS = (
     "schema_ver",
@@ -112,6 +123,8 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
         _validate_reconciliation(event)
     if event["payload_schema"] == "writer_lease_decision":
         _validate_writer_decision(event)
+    if event["payload_schema"] == "writer_authority_promotion":
+        _validate_writer_promotion(event)
     return event
 
 
@@ -170,6 +183,26 @@ def _validate_writer_decision(event: dict[str, Any]) -> None:
     _require(payload["reason"] in reasons, "invalid writer decision combination")
     needs_epoch = payload["outcome"] not in {"terminated"}
     _require(not needs_epoch or epoch is not None, "writer decision needs lease_epoch")
+
+
+def _validate_writer_promotion(event: dict[str, Any]) -> None:
+    _require(event["event_kind"] == "decision", "invalid writer promotion event kind")
+    _require(event["schema_ver"] == 1, "unsupported writer promotion schema version")
+    fields = set(
+        "account_digest admission_action admission_digest boot_id decided_ns from_mode "
+        "instance_id lease_epoch outcome reason to_mode".split()
+    )
+    payload = _exact_fields(event["payload"], fields, "writer authority promotion")
+    for field in ("account_digest", "admission_digest"):
+        _require(_valid_digest(payload[field]), f"invalid {field}")
+    for field in ("instance_id", "boot_id"):
+        _require(_nonempty_text(payload[field]), f"invalid promotion {field}")
+    valid_epoch = type(payload["lease_epoch"]) is int and payload["lease_epoch"] > 0
+    _require(valid_epoch, "invalid lease_epoch")
+    _require(type(payload["decided_ns"]) is int and payload["decided_ns"] > 0, "invalid decided_ns")
+    key = tuple(payload[field] for field in ("outcome", "from_mode", "to_mode", "reason"))
+    actions = PROMOTION_DECISIONS.get(key, frozenset())
+    _require(payload["admission_action"] in actions, "invalid writer promotion combination")
 
 
 def _validate_surface(event: dict[str, Any]) -> None:

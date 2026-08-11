@@ -36,6 +36,7 @@ FROZEN_PAYLOAD_SCHEMAS = LEGACY_PAYLOAD_SCHEMAS | {
     "reconciliation_decision",
     "reconciliation_surface",
     "writer_lease_decision",
+    "writer_authority_promotion",
 }
 ROOT = Path(__file__).parents[1]
 
@@ -252,6 +253,7 @@ def test_versioned_reconciliation_payloads_are_structurally_validated() -> None:
         ("reconciliation_decision", {"action": "ready"}),
         ("reconciliation_surface", {"surface": "balances"}),
         ("writer_lease_decision", {"action": "acquire"}),
+        ("writer_authority_promotion", {"outcome": "promoted"}),
     ],
 )
 def test_incomplete_reconciliation_payloads_are_rejected(schema: str, payload: dict) -> None:
