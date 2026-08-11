@@ -27,6 +27,14 @@ class InjectedNonceAllocator(NonceAllocator):
     pass
 
 
+class CountingNonceAllocator(NonceAllocator):
+    allocate_calls: int
+
+    def allocate(self, *, now_ms: int, decided_ns: int) -> int:
+        self.allocate_calls += 1
+        return super().allocate(now_ms=now_ms, decided_ns=decided_ns)
+
+
 def _intent(leg: str = "hyperliquid"):
     return make_order_intent("funding-carry", "git-deadbeef", 100, leg)
 
@@ -89,6 +97,13 @@ def _request(runtime, intent, **changes):
         wallet_fingerprint=WALLET, allocated_nonce=501,
     )
     return replace(built, **changes)
+
+
+def _count_allocations(runtime) -> CountingNonceAllocator:
+    allocator = runtime[1]
+    allocator.__class__ = CountingNonceAllocator
+    allocator.allocate_calls = 0
+    return allocator
 
 
 def test_hyperliquid_persist_allocates_records_then_transports(submission_runtime) -> None:
@@ -213,3 +228,121 @@ def test_non_submission_decisions_have_zero_side_effects(
         changes["now_ns"] = 151
     assert _submit(submission_runtime, intent, **changes) == (decision, None)
     assert submission_runtime[2] == [] and submission_runtime[1].last_nonce == 0
+
+
+def test_nonce_record_failure_propagates_before_any_durable_effect(
+    submission_runtime,
+) -> None:
+    allocator = _count_allocations(submission_runtime)
+    failure = OSError("nonce recorder failed")
+
+    def fail_nonce_record(_payload) -> None:
+        raise failure
+
+    allocator._recorder = fail_nonce_record
+    with pytest.raises(OSError) as caught:
+        _submit(submission_runtime, _intent())
+    assert caught.value is failure
+    assert allocator.allocate_calls == 1 and allocator.last_nonce == 0
+    assert submission_runtime[2] == []
+
+
+def test_request_record_failure_propagates_after_nonce_before_transport(
+    submission_runtime,
+) -> None:
+    allocator = _count_allocations(submission_runtime)
+    failure = OSError("request recorder failed")
+    request_calls = []
+
+    def fail_request_record(request) -> None:
+        request_calls.append(request)
+        raise failure
+
+    with pytest.raises(OSError) as caught:
+        _submit(
+            submission_runtime, _intent(), request_recorder=fail_request_record,
+        )
+    assert caught.value is failure
+    assert allocator.allocate_calls == 1 and allocator.last_nonce == 501
+    assert len(request_calls) == 1
+    assert [kind for kind, _ in submission_runtime[2]] == ["nonce"]
+
+
+def test_inode_replacement_during_request_record_has_no_second_revalidation(
+    submission_runtime,
+) -> None:
+    lease, _, effects = submission_runtime
+    allocator = _count_allocations(submission_runtime)
+
+    def replace_inode(request) -> None:
+        effects.append(("request", request))
+        lease.path.unlink()
+        lease.path.write_text("{}")
+
+    assert _submit(
+        submission_runtime, _intent(), request_recorder=replace_inode,
+    ) == ("persist", "accepted")
+    assert allocator.allocate_calls == 1 and allocator.last_nonce == 501
+    assert [kind for kind, _ in effects] == ["nonce", "request", "transport"]
+    with pytest.raises(WriterLeaseError, match="lock inode changed"):
+        lease.revalidate()
+
+
+def test_transport_failure_propagates_once_after_durable_request(
+    submission_runtime,
+) -> None:
+    allocator = _count_allocations(submission_runtime)
+    failure = OSError("transport failed")
+    transport_calls = []
+
+    def fail_transport(request):
+        transport_calls.append(request)
+        raise failure
+
+    with pytest.raises(OSError) as caught:
+        _submit(submission_runtime, _intent(), transport=fail_transport)
+    assert caught.value is failure
+    assert allocator.allocate_calls == 1 and allocator.last_nonce == 501
+    assert len(transport_calls) == 1
+    assert [kind for kind, _ in submission_runtime[2]] == ["nonce", "request"]
+
+
+def test_unrecognized_transport_result_is_returned_without_interpretation(
+    submission_runtime,
+) -> None:
+    allocator = _count_allocations(submission_runtime)
+    opaque = object()
+    transport_calls = []
+
+    def opaque_transport(request):
+        transport_calls.append(request)
+        return opaque
+
+    decision, result = _submit(
+        submission_runtime, _intent(), transport=opaque_transport,
+    )
+    assert decision == "persist" and result is opaque
+    assert allocator.allocate_calls == 1 and allocator.last_nonce == 501
+    assert len(transport_calls) == 1
+    assert [kind for kind, _ in submission_runtime[2]] == ["nonce", "request"]
+
+
+def test_bybit_request_record_failure_has_no_nonce_or_transport_effect(
+    submission_runtime,
+) -> None:
+    allocator = _count_allocations(submission_runtime)
+    failure = OSError("bybit request recorder failed")
+    request_calls = []
+
+    def fail_request_record(request) -> None:
+        request_calls.append(request)
+        raise failure
+
+    with pytest.raises(OSError) as caught:
+        _submit(
+            submission_runtime, _intent("bybit"),
+            request_recorder=fail_request_record,
+        )
+    assert caught.value is failure
+    assert allocator.allocate_calls == 0 and allocator.last_nonce == 0
+    assert len(request_calls) == 1 and submission_runtime[2] == []
