@@ -1,6 +1,7 @@
 """Format and semantic checks for signer nonce allocation evidence."""
 
 from collections.abc import Mapping
+from typing import NamedTuple
 
 # Venue rule (retrieved 2026-08-11):
 # https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/nonces-and-api-wallets
@@ -22,6 +23,18 @@ OUTCOMES = frozenset({"allocated", "frozen"})
 REASONS = frozenset(
     {"nonce_allocated", "clock_backward", "fence_invalidated"}
 )
+
+
+class NonceWindowBounds(NamedTuple):
+    lower_ok: bool
+    upper_ok: bool
+
+
+def signer_nonce_window_bounds(*, nonce: int, now_ms: int) -> NonceWindowBounds:
+    return NonceWindowBounds(
+        nonce > now_ms - 2 * DAY_MS,
+        nonce < now_ms + DAY_MS,
+    )
 
 
 def _positive_int(value: object) -> bool:
@@ -71,11 +84,12 @@ def signer_nonce_allocation_errors(payload: Mapping[str, object]) -> tuple[str, 
     )
     errors.extend(message for valid, message in relations if not valid)
     if outcome == "allocated" and allocated is not None:
+        window = signer_nonce_window_bounds(nonce=allocated, now_ms=now_ms)
         bounds = (
             (allocated > previous, "allocated_nonce must exceed previous_nonce"),
-            (allocated > now_ms - 2 * DAY_MS,
+            (window.lower_ok,
              "allocated_nonce must be strictly within now_ms minus two days"),
-            (allocated < now_ms + DAY_MS,
+            (window.upper_ok,
              "allocated_nonce must be strictly within now_ms plus one day"),
         )
         errors.extend(message for valid, message in bounds if not valid)
