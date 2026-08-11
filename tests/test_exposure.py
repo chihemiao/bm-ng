@@ -3,7 +3,7 @@ from decimal import Decimal
 
 import pytest
 
-from reconciliation.exposure import LegPosition, net_delta
+from reconciliation.exposure import LegPosition, delta_state, net_delta
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 
@@ -127,3 +127,64 @@ def test_clock_inputs_are_strictly_positive_integers(field, value, error):
     values[field] = value
     with pytest.raises(error, match=field):
         net_delta(_positions(), **values)
+
+
+@pytest.mark.parametrize(
+    ("delta", "tolerance", "expected"),
+    [
+        ("0", "0", "flat"),
+        ("0.01", "0.01", "flat"),
+        ("-0.01", "0.01", "flat"),
+        ("0.0101", "0.01", "naked"),
+        ("-0.0101", "0.01", "naked"),
+    ],
+)
+def test_delta_state_uses_an_inclusive_absolute_tolerance(delta, tolerance, expected):
+    assert delta_state(Decimal(delta), tolerance=Decimal(tolerance)) == expected
+
+
+def test_unknown_delta_has_a_distinct_closed_state():
+    assert delta_state(None, tolerance=Decimal("0")) == "unknown"
+
+
+@pytest.mark.parametrize("value", ["NaN", "sNaN", "Infinity", "-Infinity"])
+def test_non_finite_delta_is_rejected_with_value_error(value):
+    with pytest.raises(ValueError) as raised:
+        delta_state(Decimal(value), tolerance=Decimal("0.01"))
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize("value", ["NaN", "sNaN", "Infinity", "-Infinity"])
+def test_non_finite_tolerance_is_rejected_with_value_error(value):
+    with pytest.raises(ValueError) as raised:
+        delta_state(Decimal("0"), tolerance=Decimal(value))
+    assert type(raised.value) is ValueError
+
+
+def test_tolerance_is_validated_before_unknown_delta_short_circuit():
+    with pytest.raises(ValueError) as raised:
+        delta_state(None, tolerance=Decimal("NaN"))
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize(
+    ("delta", "tolerance"),
+    [(0.0, Decimal("0.01")), (Decimal("0"), 0.01)],
+)
+def test_delta_state_requires_exact_decimal_instances(delta, tolerance):
+    with pytest.raises(TypeError):
+        delta_state(delta, tolerance=tolerance)
+
+
+def test_negative_tolerance_is_rejected():
+    with pytest.raises(ValueError):
+        delta_state(Decimal("0"), tolerance=Decimal("-0.01"))
+
+
+@pytest.mark.parametrize("quantity", ["NaN", "sNaN", "Infinity", "-Infinity"])
+def test_non_finite_leg_quantity_is_rejected_with_value_error(quantity):
+    positions = _positions()
+    positions[0] = replace(positions[0], signed_quantity=Decimal(quantity))
+    with pytest.raises(ValueError) as raised:
+        net_delta(positions, symbol="BTC", now_ns=110, max_age_ns=10)
+    assert type(raised.value) is ValueError
