@@ -156,6 +156,7 @@ def test_success_record_failure_exposes_the_new_lease_for_cleanup(
             lease, old, new, record, reacquire, now_ns=DUE_NS,
         )
     assert caught.value.lease is acquired[0]
+    assert caught.value.lease._fd is not None
     expected = ProcessInterrupt if interrupt else ContractError
     assert isinstance(caught.value.__cause__, expected)
     caught.value.lease.release()
@@ -234,6 +235,7 @@ def test_reacquired_identity_is_checked_before_recorded_cleanup(
 
     def record(decision):
         assert acquired[-1].authority.mode == "pending_reconciliation"
+        assert acquired[-1]._fd is not None
         decisions.append(decision)
 
     with pytest.raises(WriterLeaseError, match=r"^rotation aborted: identity_changed$"):
@@ -269,9 +271,12 @@ def test_process_interrupt_is_not_recorded_as_rotation_failure(
     assert decisions == []
 
 
-@pytest.mark.parametrize("branch", ["cancel_only", "identity_changed"])
+@pytest.mark.parametrize(
+    ("branch", "interrupt"),
+    [("cancel_only", False), ("identity_changed", False), ("identity_changed", True)],
+)
 def test_abort_record_failure_exposes_new_lease_for_caller_cleanup(
-    tmp_path: Path, branch: str
+    tmp_path: Path, branch: str, interrupt: bool
 ) -> None:
     old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
     lease, acquired = _lease(tmp_path, old.wallet_fingerprint), []
@@ -291,13 +296,21 @@ def test_abort_record_failure_exposes_new_lease_for_caller_cleanup(
     def record(_):
         expected_mode = "cancel_only" if branch == "cancel_only" else "pending_reconciliation"
         assert acquired[-1].authority.mode == expected_mode
+        if interrupt:
+            raise ProcessInterrupt
         closed.append(b"decision", DUE_NS)
 
-    with pytest.raises(wallet_module.RotationRecordError) as caught:
+    error = ProcessInterrupt if interrupt else wallet_module.RotationRecordError
+    with pytest.raises(error) as caught:
         wallet_module.rotate_agent_wallet(
             lease, old, new, record, reacquire, now_ns=DUE_NS)
+    if interrupt:
+        acquired[0].release()
+        return
     assert caught.value.lease is acquired[0]
     assert isinstance(caught.value.__cause__, ContractError)
+    if branch == "identity_changed":
+        assert caught.value.lease._fd is not None
     caught.value.lease.release()
     takeover = _lease(tmp_path, new.wallet_fingerprint)
     takeover.release()
