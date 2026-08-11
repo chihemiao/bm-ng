@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from reconciliation.fx import FxRate, MarkPrice, convert_usdt_to_usdc, naked_notional
+from reconciliation.fx import FxRate, MarkPrice, Notional, convert_usdt_to_usdc, naked_notional
 
 
 def _rate(value="1.001", **changes) -> FxRate:
@@ -129,7 +129,7 @@ def test_fx_clock_inputs_are_strictly_positive_integers(changes, error):
 
 
 def test_naked_notional_uses_the_exact_mark_product():
-    assert _notional() == Decimal("1000.0050")
+    assert _notional() == Notional(Decimal("1000.0050"), "USDC")
 
 
 @pytest.mark.parametrize(
@@ -147,7 +147,9 @@ def test_stale_or_future_mark_is_unknown(observed_ns):
 
 
 def test_mark_at_the_inclusive_age_limit_is_still_fresh():
-    assert _notional(mark=_mark(observed_ns=100), now_ns=110, max_age_ns=10) == Decimal("1000.0050")
+    assert _notional(mark=_mark(observed_ns=100), now_ns=110, max_age_ns=10) == Notional(
+        Decimal("1000.0050"), "USDC"
+    )
 
 
 @pytest.mark.parametrize(
@@ -188,14 +190,36 @@ def test_notional_rejects_non_decimal_numbers(delta, mark):
 
 
 def test_negative_delta_becomes_positive_notional_and_venue_is_only_evidence():
-    expected = Decimal("1000.0050")
+    expected = Notional(Decimal("1000.0050"), "USDC")
     assert _notional("-0.02") == expected
     assert _notional(mark=_mark(venue="bybit")) == expected
-    assert _notional("0") == Decimal(0)
+    assert _notional("0") == Notional(Decimal(0), "USDC")
 
 
 def test_notional_does_not_round_or_quantize_the_decimal_product():
-    assert _notional("0.123456789", mark=_mark("65432.109876")) == Decimal("8078.038182786148164")
+    assert _notional("0.123456789", mark=_mark("65432.109876")) == Notional(
+        Decimal("8078.038182786148164"), "USDC"
+    )
+
+
+@pytest.mark.parametrize(
+    ("amount", "quote", "error"),
+    [
+        (1.0, "USDC", TypeError),
+        (Decimal("-1"), "USDC", ValueError),
+        (Decimal("NaN"), "USDC", ValueError),
+        (Decimal("Infinity"), "USDC", ValueError),
+        (Decimal("1"), "", ValueError),
+        (Decimal("1"), None, TypeError),
+    ],
+)
+def test_notional_binds_a_finite_nonnegative_amount_to_a_quote(amount, quote, error):
+    with pytest.raises(error):
+        Notional(amount, quote)
+
+
+def test_naked_notional_carries_the_validated_mark_quote():
+    assert _notional(mark=_mark(quote="USDT"), expected_quote="USDT").quote == "USDT"
 
 
 @pytest.mark.parametrize(
