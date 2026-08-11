@@ -128,6 +128,18 @@ def validate_surface_evidence(evidence: SurfaceEvidence, now_ns: int) -> Surface
     return evidence
 
 
+def surface_is_authoritative(evidence: SurfaceEvidence, *, now_ns: int, max_age_ns: int) -> bool:
+    """Report whether validated evidence is complete, known, and fresh."""
+    age_ns = now_ns - evidence.observed_ns
+    return (
+        evidence.page_complete
+        and not evidence.truncated
+        and evidence.unknown_count == 0
+        and evidence.mismatch_count == 0
+        and 0 <= age_ns <= max_age_ns
+    )
+
+
 def _validate_expected_surface(expected: ExpectedSurface) -> None:
     _require(isinstance(expected, ExpectedSurface), "invalid expected surface")
     _validate_canonical(expected.entities)
@@ -314,9 +326,7 @@ def decide_startup_admission(
     validated_venues = dict(validated.venues)
     validated_expectations = dict(validated.expectations)
     _validate_previous_freeze(previous_freeze)
-    nonce_reasons = list(
-        _signer_nonce_reasons(signer_nonce_events, signer_wallet_fingerprint)
-    )
+    nonce_reasons = list(_signer_nonce_reasons(signer_nonce_events, signer_wallet_fingerprint))
     reasons = nonce_reasons
     if previous_freeze is not None:
         reasons.append("startup:previous_freeze")

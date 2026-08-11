@@ -62,12 +62,11 @@ def test_missing_filled_quantity_is_unknown_not_none_filled():
         ({"observed_ns": 111}, 110, 10),
     ],
 )
-def test_non_authoritative_or_nonfresh_fill_surface_is_unknown(
-    changes, now_ns, max_age_ns
-):
-    assert _completion(
-        "1", evidence=_evidence(**changes), now_ns=now_ns, max_age_ns=max_age_ns
-    ) == "unknown"
+def test_non_authoritative_or_nonfresh_fill_surface_is_unknown(changes, now_ns, max_age_ns):
+    assert (
+        _completion("1", evidence=_evidence(**changes), now_ns=now_ns, max_age_ns=max_age_ns)
+        == "unknown"
+    )
 
 
 def test_non_authoritative_exact_fill_is_unknown_before_arithmetic():
