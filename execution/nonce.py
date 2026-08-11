@@ -4,13 +4,19 @@ import fcntl
 import hashlib
 import os
 import stat
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+
+from data.schema_nonce import DAY_MS
 
 NONCE_EVENT_SCHEMA = "signer_nonce_allocation"
 
 
 class SignerFenceError(RuntimeError):
+    pass
+
+
+class NonceAllocationError(RuntimeError):
     pass
 
 
@@ -27,6 +33,21 @@ def _validate_instance(instance_id: str) -> None:
         raise TypeError("instance_id must be str")
     if not instance_id:
         raise ValueError("instance_id must be nonempty")
+
+
+def _validate_account_digest(account_digest: str) -> None:
+    if not isinstance(account_digest, str):
+        raise TypeError("account_digest must be str")
+    is_hex = all(char in "0123456789abcdef" for char in account_digest)
+    if len(account_digest) != 64 or not is_hex:
+        raise ValueError("account_digest must be 64 lowercase hex")
+
+
+def _validate_positive(value: int, name: str) -> None:
+    if type(value) is not int:
+        raise TypeError(f"{name} must be int")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive")
 
 
 def path_for(root: Path, wallet_fingerprint: str) -> Path:
@@ -125,3 +146,52 @@ class SignerFence:
         self.revalidate()
         os.close(self._fd)
         self._fd = None
+
+
+class NonceAllocator:
+    def __init__(
+        self, fence: SignerFence, *, account_digest: str, instance_id: str,
+        replayed_last: int, recorder: Callable[[Mapping[str, object]], None],
+    ) -> None:
+        if not isinstance(fence, SignerFence):
+            raise TypeError("fence must be SignerFence")
+        _validate_account_digest(account_digest)
+        _validate_instance(instance_id)
+        if type(replayed_last) is not int:
+            raise TypeError("replayed_last must be int")
+        if replayed_last < 0:
+            raise ValueError("replayed_last must be nonnegative")
+        if not callable(recorder):
+            raise TypeError("recorder must be callable")
+        self._fence = fence
+        self._account_digest = account_digest
+        self._instance_id = instance_id
+        self._last = replayed_last
+        self._recorder = recorder
+
+    @property
+    def last_nonce(self) -> int:
+        return self._last
+
+    def allocate(self, *, now_ms: int, decided_ns: int) -> int:
+        _validate_positive(now_ms, "now_ms")
+        _validate_positive(decided_ns, "decided_ns")
+        self._fence.revalidate()
+        candidate = max(self._last, now_ms) + 1
+        if candidate >= now_ms + DAY_MS:
+            raise NonceAllocationError("candidate nonce exceeds Hyperliquid time window")
+        assert candidate > now_ms - 2 * DAY_MS  # Unreachable lower bound by construction.
+        payload = {
+            "wallet_fingerprint": self._fence.wallet_fingerprint,
+            "account_digest": self._account_digest,
+            "instance_id": self._instance_id,
+            "allocated_nonce": candidate,
+            "previous_nonce": self._last,
+            "now_ms": now_ms,
+            "outcome": "allocated",
+            "reason": "nonce_allocated",
+            "decided_ns": decided_ns,
+        }
+        self._recorder(payload)
+        self._last = candidate
+        return candidate
