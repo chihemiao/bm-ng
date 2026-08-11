@@ -118,6 +118,42 @@ def test_persist_requires_current_submit_authority(submission_runtime, mode: str
     assert effects == [] and allocator.last_nonce == 0
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("lease", object(), "lease must be WriterLease"),
+        ("allocator", object(), "allocator must be NonceAllocator"),
+        ("transport", None, "transport must be callable"),
+        ("request_recorder", None, "request_recorder must be callable"),
+    ],
+)
+def test_submission_dependencies_fail_preflight_without_effects(
+    submission_runtime, field: str, value: object, message: str
+) -> None:
+    with pytest.raises(TypeError, match=f"^{message}$"):
+        _submit(submission_runtime, _intent(), **{field: value})
+    assert submission_runtime[2] == [] and submission_runtime[1].last_nonce == 0
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("now_ns", True, TypeError), ("now_ns", 0, ValueError),
+        ("max_signal_age_ns", True, TypeError), ("max_signal_age_ns", 0, ValueError),
+        ("max_reconcile_attempts", True, TypeError),
+        ("max_reconcile_attempts", 0, ValueError),
+        ("now_ms", True, TypeError), ("now_ms", 0, ValueError),
+        ("decided_ns", True, TypeError), ("decided_ns", 0, ValueError),
+    ],
+)
+def test_submission_scalars_fail_preflight_without_effects(
+    submission_runtime, field: str, value: object, error: type[Exception]
+) -> None:
+    with pytest.raises(error, match=field):
+        _submit(submission_runtime, _intent(), **{field: value})
+    assert submission_runtime[2] == [] and submission_runtime[1].last_nonce == 0
+
+
 @pytest.mark.parametrize("decision", ["freeze", "reconcile", "hold", "reject_stale"])
 def test_non_submission_decisions_have_zero_side_effects(
     submission_runtime, decision: str
