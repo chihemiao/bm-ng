@@ -282,6 +282,10 @@ class NonceAllocator:
         return self._last
 
     @property
+    def account_digest(self) -> str:
+        return self._account_digest
+
+    @property
     def frozen_reason(self) -> str | None:
         return self._frozen_reason
 
