@@ -167,10 +167,7 @@ def _validated_index(
 
 
 def _conclusive(row: Mapping[object, object]) -> bool:
-    status = row["venue_status"]
-    return row["http_status"] == 200 and (
-        status == "ok" or status == "err" and row["venue_error_code"] is not None
-    )
+    return row["http_status"] == 200 and row["venue_status"] in {"ok", "err"}
 
 
 def _conclusive_ok(row: Mapping[object, object]) -> bool:
