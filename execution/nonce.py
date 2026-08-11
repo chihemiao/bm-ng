@@ -109,6 +109,65 @@ def replay_freeze_reason(
     return reason
 
 
+def _matching_nonce_payload(
+    event: Mapping[str, object], wallet_fingerprint: str,
+) -> Mapping[str, object] | None:
+    if event.get("payload_schema") != NONCE_EVENT_SCHEMA:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, Mapping):
+        raise ValueError("signer nonce payload must be a mapping")
+    if payload.get("wallet_fingerprint") != wallet_fingerprint:
+        return None
+    return payload
+
+
+def _validated_nonce_row(payload: Mapping[str, object]) -> tuple[str, str, int | None, int]:
+    previous = payload.get("previous_nonce")
+    if type(previous) is not int:
+        raise ValueError("previous_nonce must be int")
+    outcome = payload.get("outcome")
+    reason = payload.get("reason")
+    allocated = payload.get("allocated_nonce")
+    if outcome == "allocated":
+        if reason != "nonce_allocated":
+            raise ValueError("invalid allocated reason")
+        if type(allocated) is not int:
+            raise ValueError("allocated_nonce must be int")
+    elif outcome == "frozen":
+        if not isinstance(reason, str) or reason not in FROZEN_REASONS:
+            raise ValueError("invalid frozen reason")
+        if allocated is not None:
+            raise ValueError("frozen allocated_nonce must be null")
+    else:
+        raise ValueError("invalid nonce outcome")
+    return outcome, reason, allocated, previous  # type: ignore[return-value]
+
+
+def replay_signer_nonce_conflict(
+    events: Iterable[Mapping[str, object]], wallet_fingerprint: str,
+) -> str | None:
+    """Return the first signer chain conflict after validating the full stream."""
+    _validate_fingerprint(wallet_fingerprint)
+    last = None
+    frozen_reason = None
+    conflict = None
+    for event in events:
+        payload = _matching_nonce_payload(event, wallet_fingerprint)
+        if payload is None:
+            continue
+        outcome, reason, allocated, previous = _validated_nonce_row(payload)
+        if outcome == "allocated":
+            if frozen_reason is not None and conflict is None:
+                conflict = f"signer_nonce_conflict:allocation_after_freeze:{frozen_reason}"
+            elif last is not None and previous != last and conflict is None:
+                conflict = f"signer_nonce_conflict:chain_break:{last}:{previous}"
+            last = allocated
+        elif frozen_reason is None:
+            frozen_reason = reason
+    return conflict
+
+
 class SignerFence:
     def __init__(self, path: Path, wallet_fingerprint: str, instance_id: str, fd: int):
         self.path = path
