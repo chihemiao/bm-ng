@@ -127,10 +127,8 @@ def venue_probe_row_errors(row: object) -> tuple[str, ...]:
     return tuple(errors)
 
 
-def normalize_venue_status(*, http_status: int, status_field: object) -> str:
+def normalize_venue_status(*, status_field: object) -> str:
     """Reduce a response to a closed status without inspecting response prose."""
-    if type(http_status) is not int or http_status != 200:
-        return "absent"
     if type(status_field) is str and status_field in ("ok", "err"):
         return status_field
     return "absent"

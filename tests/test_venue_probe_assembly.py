@@ -70,26 +70,24 @@ def test_assembly_rejects_any_row_contract_error():
     )
 
 
+def test_status_normalization_is_a_single_input_keyword_only_boundary():
+    parameters = inspect.signature(venue_probe.normalize_venue_status).parameters
+    assert tuple(parameters) == ("status_field",)
+    assert parameters["status_field"].kind is inspect.Parameter.KEYWORD_ONLY
+
+
 @pytest.mark.parametrize(
-    ("http_status", "status_field", "expected"),
+    ("status_field", "expected"),
     [
-        (200, "ok", "ok"),
-        (200, "err", "err"),
-        (200, None, "absent"),
-        (200, "", "absent"),
-        (200, "request rejected", "absent"),
-        (200, 123, "absent"),
-        (500, "err", "absent"),
-        (True, "ok", "absent"),
-        (None, "ok", "absent"),
+        ("ok", "ok"),
+        ("err", "err"),
+        (None, "absent"),
+        ("", "absent"),
+        ("request rejected", "absent"),
+        (123, "absent"),
+        (True, "absent"),
+        ({"status": "err"}, "absent"),
     ],
 )
-def test_status_normalization_uses_only_closed_primitive_values(
-    http_status, status_field, expected
-):
-    assert (
-        venue_probe.normalize_venue_status(
-            http_status=http_status, status_field=status_field
-        )
-        == expected
-    )
+def test_status_normalization_uses_only_the_exact_status_field(status_field, expected):
+    assert venue_probe.normalize_venue_status(status_field=status_field) == expected
