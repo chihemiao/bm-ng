@@ -160,6 +160,7 @@ def _bound_order_request(**changes) -> dict:
         "account_digest": "a" * 64,
         "lease_epoch": 1,
         "writer_instance_id": "writer-one",
+        "wallet_fingerprint": "b" * 64,
     }
     payload.update(changes)
     event = market_event()
@@ -288,6 +289,7 @@ def test_order_request_lease_binding_is_atomic_and_structurally_valid() -> None:
         _bound_order_request(account_digest="raw-account"),
         _bound_order_request(lease_epoch=0),
         _bound_order_request(writer_instance_id=""),
+        _bound_order_request(wallet_fingerprint="b" * 32),
     ]
     seq_only = _bound_order_request()
     seq_only["payload"] = {}
@@ -296,7 +298,7 @@ def test_order_request_lease_binding_is_atomic_and_structurally_valid() -> None:
     no_seq.pop("seq_within_boot")
     invalid.append(no_seq)
     partial = _bound_order_request()
-    partial["payload"].pop("writer_instance_id")
+    partial["payload"].pop("wallet_fingerprint")
     invalid.append(partial)
     for event in invalid:
         with pytest.raises(ContractError, match="lease binding"):

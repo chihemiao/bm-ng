@@ -42,7 +42,7 @@ def _history(intent, *, attempts=0, frozen=False):
 def _request(intent, recorded_ns=110):
     return order_request_record(
         intent, recorded_ns=recorded_ns, account_digest="a" * 64,
-        lease_epoch=1, writer_instance_id="writer-one",
+        lease_epoch=1, writer_instance_id="writer-one", wallet_fingerprint="b" * 64,
     )
 
 
@@ -97,12 +97,21 @@ def test_request_record_must_exist_and_match_before_submit() -> None:
 def test_request_record_binds_the_writer_lease_snapshot() -> None:
     request = order_request_record(
         _intent(), recorded_ns=110, account_digest="a" * 64,
-        lease_epoch=3, writer_instance_id="writer-one",
+        lease_epoch=3, writer_instance_id="writer-one", wallet_fingerprint="b" * 64,
     )
 
     assert request.account_digest == "a" * 64
     assert request.lease_epoch == 3
     assert request.writer_instance_id == "writer-one"
+    assert request.wallet_fingerprint == "b" * 64
+
+
+def test_request_record_rejects_a_truncated_wallet_fingerprint() -> None:
+    with pytest.raises(OrderContractError, match="wallet_fingerprint"):
+        order_request_record(
+            _intent(), recorded_ns=110, account_digest="a" * 64,
+            lease_epoch=1, writer_instance_id="writer-one", wallet_fingerprint="b" * 32,
+        )
 
 
 @pytest.mark.parametrize(
