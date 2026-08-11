@@ -133,7 +133,10 @@ def test_rotation_releases_reacquires_records_and_returns(
     result.release()
 
 
-def test_success_record_failure_exposes_the_new_lease_for_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_success_record_failure_exposes_the_new_lease_for_cleanup(
+    tmp_path: Path, interrupt: bool
+) -> None:
     old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
     lease, acquired = _lease(tmp_path, old.wallet_fingerprint), []
     closed = ShardWriter(tmp_path / "closed", "boot")
@@ -143,14 +146,21 @@ def test_success_record_failure_exposes_the_new_lease_for_cleanup(tmp_path: Path
         acquired.append(_lease(tmp_path, registration.wallet_fingerprint))
         return acquired[-1]
 
+    def record(_):
+        if interrupt:
+            raise ProcessInterrupt
+        closed.append(b"decision", DUE_NS)
+
     with pytest.raises(wallet_module.RotationRecordError) as caught:
         wallet_module.rotate_agent_wallet(
-            lease, old, new, lambda _: closed.append(b"decision", DUE_NS),
-            reacquire, now_ns=DUE_NS,
+            lease, old, new, record, reacquire, now_ns=DUE_NS,
         )
     assert caught.value.lease is acquired[0]
-    assert isinstance(caught.value.__cause__, ContractError)
+    expected = ProcessInterrupt if interrupt else ContractError
+    assert isinstance(caught.value.__cause__, expected)
     caught.value.lease.release()
+    takeover = _lease(tmp_path, new.wallet_fingerprint)
+    takeover.release()
 
 
 def test_true_release_failure_is_recorded_before_reraising(tmp_path: Path) -> None:
@@ -257,3 +267,62 @@ def test_process_interrupt_is_not_recorded_as_rotation_failure(
         wallet_module.rotate_agent_wallet(
             lease, old, new, decisions.append, reacquire, now_ns=DUE_NS)
     assert decisions == []
+
+
+@pytest.mark.parametrize("branch", ["cancel_only", "identity_changed"])
+def test_abort_record_failure_exposes_new_lease_for_caller_cleanup(
+    tmp_path: Path, branch: str
+) -> None:
+    old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
+    lease, acquired = _lease(tmp_path, old.wallet_fingerprint), []
+    closed = ShardWriter(tmp_path / "closed", "boot")
+    closed.close()
+
+    def reacquire(_):
+        if branch == "cancel_only":
+            incumbent = _identity("c" * 64, instance="competitor")
+            candidate = _under_contention(
+                tmp_path, incumbent, lambda: _lease(tmp_path, new.wallet_fingerprint))
+        else:
+            candidate = _lease(tmp_path, new.wallet_fingerprint, instance="writer-two")
+        acquired.append(candidate)
+        return candidate
+
+    def record(_):
+        expected_mode = "cancel_only" if branch == "cancel_only" else "pending_reconciliation"
+        assert acquired[-1].authority.mode == expected_mode
+        closed.append(b"decision", DUE_NS)
+
+    with pytest.raises(wallet_module.RotationRecordError) as caught:
+        wallet_module.rotate_agent_wallet(
+            lease, old, new, record, reacquire, now_ns=DUE_NS)
+    assert caught.value.lease is acquired[0]
+    assert isinstance(caught.value.__cause__, ContractError)
+    caught.value.lease.release()
+    takeover = _lease(tmp_path, new.wallet_fingerprint)
+    takeover.release()
+
+
+def test_release_evidence_failure_is_suppressed_and_rotation_continues(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    old, new = _registration("a" * 64), _registration("b" * 64, ISSUED_NS + 1)
+    closed = ShardWriter(tmp_path / "closed", "boot")
+
+    def writer_record(decision):
+        if decision.action == "release":
+            closed.append(b"decision", DUE_NS)
+
+    lease = WriterLease.acquire(
+        tmp_path, _identity(old.wallet_fingerprint), writer_record, acquired_ns=100)
+    closed.close()
+    decisions = []
+    result = wallet_module.rotate_agent_wallet(
+        lease, old, new, decisions.append,
+        lambda registration: _lease(tmp_path, registration.wallet_fingerprint),
+        now_ns=DUE_NS,
+    )
+    assert decisions == [_expected(
+        old, new, DUE_NS, "rotation_due", "rotated", "rotation_completed")]
+    assert "writer evidence recording failed" in capsys.readouterr().err
+    result.release()
