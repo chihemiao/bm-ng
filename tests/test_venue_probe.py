@@ -1,5 +1,6 @@
 import pytest
 
+import data.schema_nonce as schema_nonce
 import research.venue_probe as venue_probe
 from research.venue_probe import DAY_MS, venue_probe_row_errors
 
@@ -319,3 +320,52 @@ def test_b4_is_blocked_when_either_control_is_not_conclusive_ok(control):
     _set_outcome(_probe_row(rows, "B2_revoked", 2), "err", "agent_revoked")
     _set_outcome(_probe_row(rows, *control), "err", "control_failed")
     assert venue_probe.classify_probe_dataset(rows)["B4_error_class"] == "inconclusive"
+
+
+def test_probe_nonces_use_exact_offsets_inside_shared_window():
+    now_ms = 3 * schema_nonce.DAY_MS
+    margin_ms = 123
+    nonces = venue_probe.probe_nonces(
+        now_ms=now_ms,
+        stale_margin_ms=margin_ms,
+    )
+
+    assert nonces == venue_probe.ProbeNonces(
+        fresh=now_ms + 1,
+        stale=now_ms - 2 * schema_nonce.DAY_MS - margin_ms,
+    )
+    assert nonces._fields == ("fresh", "stale")
+    assert schema_nonce.signer_nonce_window_bounds(
+        nonce=nonces.fresh, now_ms=now_ms
+    ) == schema_nonce.NonceWindowBounds(lower_ok=True, upper_ok=True)
+    stale_bounds = schema_nonce.signer_nonce_window_bounds(
+        nonce=nonces.stale, now_ms=now_ms
+    )
+    assert stale_bounds.lower_ok is False
+    assert stale_bounds.upper_ok is True
+
+
+@pytest.mark.parametrize("now_ms", [0, -1, True])
+def test_probe_nonces_reject_invalid_now(now_ms):
+    with pytest.raises((TypeError, ValueError)):
+        venue_probe.probe_nonces(now_ms=now_ms, stale_margin_ms=1)
+
+
+@pytest.mark.parametrize("margin_ms", [0, -1, True])
+def test_probe_nonces_reject_invalid_stale_margin(margin_ms):
+    with pytest.raises((TypeError, ValueError)):
+        venue_probe.probe_nonces(now_ms=3 * schema_nonce.DAY_MS, stale_margin_ms=margin_ms)
+
+
+def test_probe_nonces_reject_nonpositive_stale_and_positional_arguments():
+    with pytest.raises(ValueError):
+        venue_probe.probe_nonces(now_ms=2 * schema_nonce.DAY_MS + 1, stale_margin_ms=1)
+    with pytest.raises(TypeError):
+        venue_probe.probe_nonces(3 * schema_nonce.DAY_MS, 1)
+
+
+def test_probe_nonce_window_helper_is_pinned_to_schema_module():
+    assert (
+        venue_probe.signer_nonce_window_bounds
+        is schema_nonce.signer_nonce_window_bounds
+    )
