@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from decimal import Decimal, InvalidOperation
 
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
+from reconciliation.exposure import LegPosition
 from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
 
 _fingerprint = canonical_fingerprint
@@ -53,7 +54,7 @@ def _result(payload: Mapping) -> Mapping:
     return result
 
 
-def _position_row(row: object, symbol: str) -> tuple[str, str] | None:
+def _signed_position_quantity(row: object, symbol: str) -> Decimal | None:
     if not isinstance(row, Mapping) or not ROW_FIELDS <= set(row):
         return None
     if type(row["positionIdx"]) is not int or row["positionIdx"] != 0:
@@ -71,11 +72,20 @@ def _position_row(row: object, symbol: str) -> tuple[str, str] | None:
         return None
     side = row["side"]
     # Bybit size is unsigned; unlike HL szi, direction belongs only to side.
-    if not (side == "" and quantity == 0 or side in {"Buy", "Sell"} and quantity > 0):
+    if side == "" and quantity == 0:
+        return Decimal(0)
+    if quantity > 0 and side in {"Buy", "Sell"}:
+        return quantity if side == "Buy" else -quantity
+    return None
+
+
+def _position_row(row: object, symbol: str) -> tuple[str, str] | None:
+    quantity = _signed_position_quantity(row, symbol)
+    if quantity is None:
         return None
     try:
         return _fingerprint(row), _fingerprint({"symbol": symbol})
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -114,3 +124,17 @@ def parse_bybit_positions_surface(
         entities=CanonicalSet(STATE_SCHEME, 1, frozenset(states.values())),
         identities=CanonicalSet(IDENTITY_SCHEME, 1, frozenset(states)),
     )
+
+
+def build_bybit_leg_position(
+    payload: Mapping[str, object], *, symbol: str, observed_ns: int
+) -> LegPosition:
+    """Build one Bybit position value and its evidence from the same snapshot."""
+    evidence = parse_bybit_positions_surface(payload, symbol=symbol, observed_ns=observed_ns)
+    quantity = Decimal(0)
+    for row in payload["result"]["list"]:
+        signed_quantity = _signed_position_quantity(row, symbol)
+        if signed_quantity is not None:
+            quantity = signed_quantity
+            break
+    return LegPosition("bybit", symbol, quantity, evidence)
