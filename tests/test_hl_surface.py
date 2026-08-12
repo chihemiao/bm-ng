@@ -187,3 +187,129 @@ def test_order_observation_time_must_be_a_positive_integer(observed_ns):
     error = TypeError if observed_ns is True else ValueError
     with pytest.raises(error, match="observed_ns"):
         _parse_orders([], observed_ns=observed_ns)
+
+
+USDC_BALANCE = {
+    "coin": "USDC", "token": 0, "hold": "0.0", "total": "14.625485",
+    "entryNtl": "0.0",
+}
+HYPE_BALANCE = {
+    "coin": "HYPE", "token": 150, "hold": "0", "total": "2", "entryNtl": "1",
+}
+
+
+def _spot_payload(*balances):
+    return {"balances": list(balances), "tokenToAvailableAfterMaintenance": []}
+
+
+def _parse_balances(payload, *, mode="unifiedAccount", observed_ns=100):
+    module = importlib.import_module("reconciliation.hl_surface")
+    return module.parse_balances_surface(payload, mode=mode, observed_ns=observed_ns)
+
+
+def _assert_balance_count_invariant(evidence):
+    assert evidence.fetched_count == len(evidence.identities.fingerprints) + evidence.unknown_count
+
+
+def test_unified_usdc_balance_is_the_only_entity_in_a_multi_token_payload():
+    evidence = _parse_balances(_spot_payload(HYPE_BALANCE, USDC_BALANCE), observed_ns=321)
+
+    assert evidence.observed_ns == 321
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (1, 0, 0)
+    assert evidence.page_complete is True and evidence.truncated is False
+    assert (evidence.entities.scheme_id, evidence.identities.scheme_id) == (
+        "hyperliquid.balances.state", "hyperliquid.balances.identity",
+    )
+    assert evidence.entities.fingerprints == frozenset({_fingerprint(USDC_BALANCE)})
+    assert evidence.identities.fingerprints == frozenset({_fingerprint({"token": 0})})
+    _assert_balance_count_invariant(evidence)
+
+
+@pytest.mark.parametrize("balances", [(), (HYPE_BALANCE,)])
+def test_missing_usdc_balance_cannot_establish_a_complete_surface(balances):
+    evidence = _parse_balances(_spot_payload(*balances))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (0, 0, 0)
+    assert evidence.page_complete is False and evidence.truncated is False
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    _assert_balance_count_invariant(evidence)
+
+
+def test_unsupported_mode_does_not_interpret_any_balance_rows():
+    evidence = _parse_balances(_spot_payload(USDC_BALANCE), mode="portfolioMargin")
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (0, 0, 0)
+    assert evidence.page_complete is False and evidence.truncated is False
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    _assert_balance_count_invariant(evidence)
+
+
+@pytest.mark.parametrize("mode,error", [(None, TypeError), ("", ValueError)])
+def test_balance_mode_must_be_a_nonempty_string(mode, error):
+    with pytest.raises(error, match="mode"):
+        _parse_balances(_spot_payload(USDC_BALANCE), mode=mode)
+
+
+def test_non_mapping_balance_payload_is_a_type_error():
+    with pytest.raises(TypeError, match="payload"):
+        _parse_balances([])
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"balances": []},
+        {"balances": [], "tokenToAvailableAfterMaintenance": [], "new": 1},
+        {"balances": {}, "tokenToAvailableAfterMaintenance": []},
+    ],
+)
+def test_balance_top_level_schema_is_exact(payload):
+    with pytest.raises(ValueError, match="balance"):
+        _parse_balances(payload)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {key: value for key, value in USDC_BALANCE.items() if key != "hold"},
+        {**USDC_BALANCE, "new": "drift"},
+        {**USDC_BALANCE, "token": False},
+        {**USDC_BALANCE, "token": 0.0},
+        {**USDC_BALANCE, "total": object()},
+    ],
+)
+def test_unusable_usdc_balance_rows_are_unknown_and_still_fetched(row):
+    evidence = _parse_balances(_spot_payload(row))
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert evidence.page_complete is True
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    _assert_balance_count_invariant(evidence)
+
+
+@pytest.mark.parametrize(
+    "row",
+    [{**USDC_BALANCE, "coin": "USD"}, {**HYPE_BALANCE, "coin": "USDC"}],
+)
+def test_token_zero_and_usdc_name_must_agree(row):
+    evidence = _parse_balances(_spot_payload(row))
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert evidence.page_complete is True
+    _assert_balance_count_invariant(evidence)
+
+
+def test_duplicate_usdc_token_is_one_unknown_mismatch_and_keeps_first():
+    evidence = _parse_balances(_spot_payload(USDC_BALANCE, {**USDC_BALANCE, "total": "2"}))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 1)
+    assert evidence.entities.fingerprints == frozenset({_fingerprint(USDC_BALANCE)})
+    assert len(evidence.identities.fingerprints) == 1
+    _assert_balance_count_invariant(evidence)
+
+
+@pytest.mark.parametrize("observed_ns", [True, 0])
+def test_balance_observation_time_must_be_a_positive_integer(observed_ns):
+    error = TypeError if observed_ns is True else ValueError
+    with pytest.raises(error, match="observed_ns"):
+        _parse_balances(_spot_payload(USDC_BALANCE), observed_ns=observed_ns)
