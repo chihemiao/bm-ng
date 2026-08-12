@@ -116,3 +116,74 @@ def test_position_snapshots_pin_the_documented_no_pagination_assumption():
 
     assert evidence.page_complete is True
     assert evidence.truncated is False
+
+
+ORDER = {
+    "coin": "BTC", "limitPx": "29792.0", "oid": 91490942,
+    "side": "A", "sz": "5.0", "timestamp": 1681247412573,
+}
+
+
+def _parse_orders(payload, observed_ns=100):
+    module = importlib.import_module("reconciliation.hl_surface")
+    return module.parse_orders_surface(payload, observed_ns=observed_ns)
+
+
+def test_observed_empty_orders_are_complete_and_empty():
+    evidence = _parse_orders([])
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (0, 0, 0)
+    assert evidence.page_complete is True and evidence.truncated is False
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+
+
+def test_documented_order_shape_uses_all_state_fields_and_oid_identity():
+    evidence = _parse_orders([ORDER], observed_ns=321)
+
+    assert evidence.observed_ns == 321 and evidence.fetched_count == 1
+    assert (evidence.entities.scheme_id, evidence.identities.scheme_id) == (
+        "hyperliquid.orders.state", "hyperliquid.orders.identity",
+    )
+    assert evidence.entities.fingerprints == frozenset({_fingerprint(ORDER)})
+    assert evidence.identities.fingerprints == frozenset({_fingerprint({"oid": 91490942})})
+
+
+def test_non_list_orders_payload_is_a_type_error():
+    with pytest.raises(TypeError, match="payload"):
+        _parse_orders({})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"extra": "drift"}, {"coin": "SOL"}, {"side": "long"},
+        {"oid": True}, {"limitPx": object()},
+    ],
+)
+def test_unusable_orders_are_unknown_without_being_discarded(change):
+    evidence = _parse_orders([{**ORDER, **change}])
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+
+
+def test_duplicate_oid_is_one_unknown_mismatch_and_keeps_first_order():
+    evidence = _parse_orders([ORDER, {**ORDER, "sz": "4.0"}])
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 1)
+    assert len(evidence.entities.fingerprints) == len(evidence.identities.fingerprints) == 1
+
+
+def test_raw_account_order_count_drives_the_conservative_truncation_threshold():
+    payload = [{**ORDER, "coin": "SOL", "oid": oid} for oid in range(1000)]
+    evidence = _parse_orders(payload)
+
+    assert evidence.fetched_count == evidence.unknown_count == 1000
+    assert evidence.page_complete is False and evidence.truncated is True
+
+
+@pytest.mark.parametrize("observed_ns", [True, 0])
+def test_order_observation_time_must_be_a_positive_integer(observed_ns):
+    error = TypeError if observed_ns is True else ValueError
+    with pytest.raises(error, match="observed_ns"):
+        _parse_orders([], observed_ns=observed_ns)
