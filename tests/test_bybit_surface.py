@@ -5,6 +5,8 @@ import pytest
 
 from reconciliation.state import surface_is_authoritative
 
+ROW = {"positionIdx": 0, "symbol": "BTCUSDT", "side": "Buy", "size": "0.01"}
+
 
 def _module():
     return importlib.import_module("reconciliation.bybit_surface")
@@ -129,3 +131,102 @@ def test_parser_signature_exposes_only_snapshot_symbol_and_observation_time():
 def test_non_mapping_payload_is_a_type_error():
     with pytest.raises(TypeError, match="payload"):
         _parse([])
+
+
+@pytest.mark.parametrize("side", ["Buy", "Sell"])
+def test_directional_position_row_has_full_state_and_canonical_identity(side):
+    state = importlib.import_module("reconciliation.state")
+    row = {**ROW, "side": side, "unconsumed": "still-hashed"}
+    evidence = _parse(_payload(row))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (1, 0, 0)
+    assert evidence.entities.fingerprints == frozenset({state.canonical_fingerprint(row)})
+    identity = state.canonical_fingerprint({"symbol": "BTC"})
+    assert evidence.identities.fingerprints == frozenset({identity})
+    assert surface_is_authoritative(evidence, now_ns=100, max_age_ns=1)
+
+
+@pytest.mark.parametrize("size", ["0", "0E+2", "-0"])
+def test_empty_side_is_known_only_with_exact_numeric_zero(size):
+    evidence = _parse(_payload({**ROW, "side": "", "size": size}))
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+    assert len(evidence.entities.fingerprints) == len(evidence.identities.fingerprints) == 1
+
+
+@pytest.mark.parametrize("size", ["+1", "1E+2"])
+def test_positive_finite_scientific_sizes_remain_known(size):
+    evidence = _parse(_payload({**ROW, "size": size}))
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "side,size",
+    [
+        ("", "1"),
+        ("", "abc"),
+        ("Unknown", "1"),
+        ("Buy", "0"),
+        ("Sell", "-1"),
+        ("Buy", ""),
+        ("Buy", "abc"),
+        ("Buy", "NaN"),
+        ("Buy", "sNaN"),
+        ("Buy", "Infinity"),
+        ("Buy", "-Infinity"),
+    ],
+)
+def test_unprovable_side_and_size_combinations_are_unknown(side, size):
+    evidence = _parse(_payload({**ROW, "side": side, "size": size}))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (1, 1, 0)
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    assert evidence.fetched_count == len(evidence.entities.fingerprints) + evidence.unknown_count
+
+
+@pytest.mark.parametrize("size", [None, 1, 1.0, True])
+def test_size_must_be_a_string(size):
+    evidence = _parse(_payload({**ROW, "size": size}))
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize("position_idx", [1, 2, True, "0"])
+def test_only_exact_integer_one_way_mode_is_known(position_idx):
+    evidence = _parse(_payload({**ROW, "positionIdx": position_idx}))
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize("field", ["positionIdx", "symbol", "side", "size"])
+def test_missing_consumed_row_field_is_unknown(field):
+    row = dict(ROW)
+    row.pop(field)
+    evidence = _parse(_payload(row))
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize("row", [[], {**ROW, "symbol": "ETHUSDT"}])
+def test_non_mapping_or_wrong_wire_symbol_is_unknown(row):
+    evidence = _parse(_payload(row))
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize("second_size", ["0.01", "0.02"])
+def test_duplicate_valid_symbol_keeps_first_and_marks_mismatch(second_size):
+    evidence = _parse(_payload(ROW, {**ROW, "size": second_size}))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 1)
+    assert len(evidence.entities.fingerprints) == len(evidence.identities.fingerprints) == 1
+
+
+def test_invalid_row_does_not_claim_identity_before_a_later_valid_row():
+    evidence = _parse(_payload({**ROW, "size": "bad"}, ROW))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 0)
+    assert len(evidence.entities.fingerprints) == 1
+
+
+def test_two_invalid_rows_do_not_invent_a_duplicate_identity():
+    evidence = _parse(_payload({**ROW, "size": "bad"}, {**ROW, "side": "Other"}))
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 2, 0)
