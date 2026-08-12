@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
@@ -63,6 +63,25 @@ def _valid_observed_ns(observed_ns: object) -> int:
     return observed_ns
 
 
+def _canonical_rows(
+    rows: Iterable[object], normalize: Callable[[object], tuple[str, str] | None]
+) -> tuple[dict[str, str], int, int]:
+    states: dict[str, str] = {}
+    unknown = mismatch = 0
+    for row in rows:
+        parsed = normalize(row)
+        if parsed is None:
+            unknown += 1
+            continue
+        state, identity = parsed
+        if identity in states:
+            unknown += 1
+            mismatch += 1
+            continue
+        states[identity] = state
+    return states, unknown, mismatch
+
+
 def parse_positions_surface(
     payload: Mapping[str, object], *, observed_ns: int
 ) -> SurfaceEvidence:
@@ -74,19 +93,7 @@ def parse_positions_surface(
     if not isinstance(rows, list):
         raise ValueError("assetPositions must be a list")
 
-    states: dict[str, str] = {}
-    unknown = mismatch = 0
-    for row in rows:
-        parsed = _position_row(row)
-        if parsed is None:
-            unknown += 1
-            continue
-        state, identity = parsed
-        if identity in states:
-            unknown += 1
-            mismatch += 1
-            continue
-        states[identity] = state
+    states, unknown, mismatch = _canonical_rows(rows, _position_row)
 
     # HL documents no pagination for this snapshot; this is an accepted assumption,
     # not proof that the endpoint can never truncate.
@@ -107,19 +114,7 @@ def parse_orders_surface(payload: list[object], *, observed_ns: int) -> SurfaceE
     if not isinstance(payload, list):
         raise TypeError("payload must be a list")
     _valid_observed_ns(observed_ns)
-    states: dict[str, str] = {}
-    unknown = mismatch = 0
-    for row in payload:
-        parsed = _order_row(row)
-        if parsed is None:
-            unknown += 1
-            continue
-        state, identity = parsed
-        if identity in states:
-            unknown += 1
-            mismatch += 1
-            continue
-        states[identity] = state
+    states, unknown, mismatch = _canonical_rows(payload, _order_row)
     # The 1000 minimum account limit is a conservative completeness inference.
     truncated = len(payload) >= 1000
     return SurfaceEvidence(
