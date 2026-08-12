@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from data.contracts import ContractError, bybit_update_gap, validate_envelope
+from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
 from data.session import (
     BybitLivenessEvidence,
     DecodedFrame,
@@ -57,14 +58,14 @@ def _bybit_decode(message: str | bytes) -> DecodedFrame:
 def _protocols() -> tuple[SessionProtocol, SessionProtocol]:
     hl = {}
     bybit = {}
-    for coin in ("BTC", "ETH"):
+    for coin, wire_symbol in BYBIT_WIRE_SYMBOLS.items():
         for feed in ("l2Book", "trades", "bbo", "activeAssetCtx"):
             stream = f"{feed}:{coin}"
             hl[stream] = json.dumps(
                 {"method": "subscribe", "subscription": {"type": feed, "coin": coin}}
             )
         for feed in ("orderbook.50", "publicTrade", "tickers"):
-            topic = f"{feed}.{coin}USDT"
+            topic = f"{feed}.{wire_symbol}"
             bybit[topic] = json.dumps({"op": "subscribe", "req_id": topic, "args": [topic]})
     return SessionProtocol(hl, _hl_decode), SessionProtocol(bybit, _bybit_decode)
 

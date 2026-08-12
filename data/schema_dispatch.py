@@ -2,6 +2,7 @@
 
 VALIDITY_NS = 30 * 86_400 * 1_000_000_000
 ROTATION_LEAD_NS = 7 * 86_400 * 1_000_000_000
+BYBIT_WIRE_SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
