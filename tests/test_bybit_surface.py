@@ -1,8 +1,12 @@
+import ast
 import importlib
 import inspect
+import textwrap
+from decimal import Decimal
 
 import pytest
 
+from reconciliation.exposure import LegPosition
 from reconciliation.state import surface_is_authoritative
 
 ROW = {"positionIdx": 0, "symbol": "BTCUSDT", "side": "Buy", "size": "0.01"}
@@ -32,6 +36,11 @@ def _payload(*rows, cursor=""):
 def _parse(payload=None, *, symbol="BTC", observed_ns=100):
     value = _payload({"unparsed": "row"}) if payload is None else payload
     return _module().parse_bybit_positions_surface(value, symbol=symbol, observed_ns=observed_ns)
+
+
+def _build(payload=None, *, symbol="BTC", observed_ns=100):
+    value = _payload(ROW) if payload is None else payload
+    return _module().build_bybit_leg_position(value, symbol=symbol, observed_ns=observed_ns)
 
 
 def test_valid_envelope_preserves_all_rows_as_unknown_until_row_contract_lands():
@@ -230,3 +239,72 @@ def test_two_invalid_rows_do_not_invent_a_duplicate_identity():
     evidence = _parse(_payload({**ROW, "size": "bad"}, {**ROW, "side": "Other"}))
 
     assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 2, 0)
+
+
+@pytest.mark.parametrize(
+    "side,size,quantity",
+    [("Buy", "+1" , Decimal("1")), ("Sell", "1E+2", Decimal("-1E+2")),
+     ("", "-0", Decimal("0"))],
+)
+def test_leg_uses_bybit_side_for_signed_quantity_from_the_same_snapshot(side, size, quantity):
+    payload = _payload({**ROW, "side": side, "size": size})
+    leg = _build(payload, observed_ns=321)
+
+    assert isinstance(leg, LegPosition)
+    assert (leg.venue, leg.symbol, leg.signed_quantity) == ("bybit", "BTC", quantity)
+    assert leg.evidence == _module().parse_bybit_positions_surface(
+        payload, symbol="BTC", observed_ns=321
+    )
+    assert surface_is_authoritative(leg.evidence, now_ns=321, max_age_ns=1)
+
+
+def test_invalid_row_then_valid_row_uses_valid_quantity_but_not_authority():
+    leg = _build(_payload({**ROW, "size": "bad"}, {**ROW, "side": "Sell", "size": "2"}))
+
+    assert leg.signed_quantity == Decimal("-2")
+    assert leg.evidence.unknown_count == 1
+    assert not surface_is_authoritative(leg.evidence, now_ns=100, max_age_ns=1)
+
+
+def test_duplicate_valid_rows_keep_first_quantity_and_lose_authority():
+    leg = _build(_payload({**ROW, "size": "1"}, {**ROW, "size": "2"}))
+
+    assert leg.signed_quantity == Decimal("1")
+    assert (leg.evidence.unknown_count, leg.evidence.mismatch_count) == (1, 1)
+    assert not surface_is_authoritative(leg.evidence, now_ns=100, max_age_ns=1)
+
+
+@pytest.mark.parametrize(
+    "payload", [_payload(), _payload({**ROW, "size": "bad"}),
+                _payload({**ROW, "symbol": "ETHUSDT"})]
+)
+def test_no_valid_target_returns_zero_with_non_authoritative_evidence(payload):
+    leg = _build(payload)
+
+    assert leg.signed_quantity == Decimal(0)
+    assert not surface_is_authoritative(leg.evidence, now_ns=100, max_age_ns=1)
+
+
+def test_leg_builder_signature_has_no_caller_controlled_venue_or_evidence():
+    signature = inspect.signature(_module().build_bybit_leg_position)
+    assert tuple(signature.parameters) == ("payload", "symbol", "observed_ns")
+
+
+def _direct_calls(function):
+    source = textwrap.dedent(inspect.getsource(function))
+    return [node.func.id for node in ast.walk(ast.parse(source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+
+
+def test_parser_and_builder_directly_share_quantity_normalization():
+    assert "_signed_position_quantity" in _direct_calls(_module()._position_row)
+    builder_calls = _direct_calls(_module().build_bybit_leg_position)
+    assert "_signed_position_quantity" in builder_calls
+    assert "parse_bybit_positions_surface" in builder_calls
+
+
+@pytest.mark.parametrize("payload", [[], {}, {"result": []}])
+def test_leg_builder_propagates_position_payload_contract_errors(payload):
+    error = TypeError if isinstance(payload, list) else ValueError
+    with pytest.raises(error):
+        _build(payload)
