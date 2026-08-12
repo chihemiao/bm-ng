@@ -189,13 +189,8 @@ def test_order_observation_time_must_be_a_positive_integer(observed_ns):
         _parse_orders([], observed_ns=observed_ns)
 
 
-USDC_BALANCE = {
-    "coin": "USDC", "token": 0, "hold": "0.0", "total": "14.625485",
-    "entryNtl": "0.0",
-}
-HYPE_BALANCE = {
-    "coin": "HYPE", "token": 150, "hold": "0", "total": "2", "entryNtl": "1",
-}
+USDC_BALANCE = {"coin": "USDC", "token": 0, "hold": "0.0", "total": "14.625485", "entryNtl": "0.0"}
+HYPE_BALANCE = {"coin": "HYPE", "token": 150, "hold": "0", "total": "2", "entryNtl": "1"}
 
 
 def _spot_payload(*balances):
@@ -214,8 +209,8 @@ def _assert_balance_count_invariant(evidence):
 def test_unified_usdc_balance_is_the_only_entity_in_a_multi_token_payload():
     evidence = _parse_balances(_spot_payload(HYPE_BALANCE, USDC_BALANCE), observed_ns=321)
 
-    assert evidence.observed_ns == 321
-    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (1, 0, 0)
+    assert evidence.observed_ns == 321 and evidence.fetched_count == 1
+    assert (evidence.unknown_count, evidence.mismatch_count) == (0, 0)
     assert evidence.page_complete is True and evidence.truncated is False
     assert (evidence.entities.scheme_id, evidence.identities.scheme_id) == (
         "hyperliquid.balances.state", "hyperliquid.balances.identity",
@@ -283,7 +278,7 @@ def test_unusable_usdc_balance_rows_are_unknown_and_still_fetched(row):
 
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
     assert evidence.page_complete is True
-    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    assert not evidence.entities.fingerprints and not evidence.identities.fingerprints
     _assert_balance_count_invariant(evidence)
 
 
