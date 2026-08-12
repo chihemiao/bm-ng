@@ -2,6 +2,10 @@
 
 import re
 from collections.abc import Mapping
+from typing import NamedTuple
+
+from data.schema_nonce import DAY_MS as NONCE_DAY_MS
+from data.schema_nonce import signer_nonce_window_bounds as signer_nonce_window_bounds
 
 DAY_MS = 86_400_000
 ROW_FIELDS = frozenset(
@@ -40,8 +44,26 @@ EXPECTED_PROBE_ROWS = frozenset(
 )
 
 
+class ProbeNonces(NamedTuple):
+    fresh: int
+    stale: int
+
+
 def _exact_int(value: object) -> bool:
     return type(value) is int
+
+
+def probe_nonces(*, now_ms: int, stale_margin_ms: int) -> ProbeNonces:
+    """Return one in-window nonce and one deliberately stale nonce."""
+    for name, value in (("now_ms", now_ms), ("stale_margin_ms", stale_margin_ms)):
+        if not _exact_int(value):
+            raise TypeError(f"{name} must be an integer")
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    stale = now_ms - 2 * NONCE_DAY_MS - stale_margin_ms
+    if stale <= 0:
+        raise ValueError("stale nonce must be positive")
+    return ProbeNonces(fresh=now_ms + 1, stale=stale)
 
 
 def _string_shape_errors(row: Mapping[object, object]) -> list[str]:
