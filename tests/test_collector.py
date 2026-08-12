@@ -10,6 +10,7 @@ from websockets.asyncio.server import serve
 from data.shard import replay_records
 
 collector = import_module("data.collector")
+schema_dispatch = import_module("data.schema_dispatch")
 CollectorConfig = collector.CollectorConfig
 run_collector = collector.run_collector
 
@@ -62,6 +63,14 @@ def _config(root: Path, hl_uri: str, bybit_uri: str, **changes):
 
 def _events(root: Path) -> list[dict]:
     return [json.loads(record) for record in replay_records(root)]
+
+
+def test_bybit_wire_symbols_have_one_shared_closed_source() -> None:
+    assert schema_dispatch.BYBIT_WIRE_SYMBOLS == {
+        "BTC": "BTCUSDT",
+        "ETH": "ETHUSDT",
+    }
+    assert collector.BYBIT_WIRE_SYMBOLS is schema_dispatch.BYBIT_WIRE_SYMBOLS
 
 
 async def _normal_handler(websocket, venue: str) -> None:
