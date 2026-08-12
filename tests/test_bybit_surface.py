@@ -117,8 +117,9 @@ def test_envelope_types_and_success_semantics_are_closed(path, value, error):
         _parse(payload)
 
 
-@pytest.mark.parametrize("symbol,error", [(None, TypeError), (1, TypeError), ("", ValueError),
-                                             ("SOL", ValueError)])
+@pytest.mark.parametrize(
+    "symbol,error", [(None, TypeError), (1, TypeError), ("", ValueError), ("SOL", ValueError)]
+)
 def test_symbol_is_a_canonical_supported_asset(symbol, error):
     with pytest.raises(error, match="symbol"):
         _parse(symbol=symbol)
@@ -243,8 +244,7 @@ def test_two_invalid_rows_do_not_invent_a_duplicate_identity():
 
 @pytest.mark.parametrize(
     "side,size,quantity",
-    [("Buy", "+1" , Decimal("1")), ("Sell", "1E+2", Decimal("-1E+2")),
-     ("", "-0", Decimal("0"))],
+    [("Buy", "+1", Decimal("1")), ("Sell", "1E+2", Decimal("-1E+2")), ("", "-0", Decimal("0"))],
 )
 def test_leg_uses_bybit_side_for_signed_quantity_from_the_same_snapshot(side, size, quantity):
     payload = _payload({**ROW, "side": side, "size": size})
@@ -275,8 +275,8 @@ def test_duplicate_valid_rows_keep_first_quantity_and_lose_authority():
 
 
 @pytest.mark.parametrize(
-    "payload", [_payload(), _payload({**ROW, "size": "bad"}),
-                _payload({**ROW, "symbol": "ETHUSDT"})]
+    "payload",
+    [_payload(), _payload({**ROW, "size": "bad"}), _payload({**ROW, "symbol": "ETHUSDT"})],
 )
 def test_no_valid_target_returns_zero_with_non_authoritative_evidence(payload):
     leg = _build(payload)
@@ -292,8 +292,11 @@ def test_leg_builder_signature_has_no_caller_controlled_venue_or_evidence():
 
 def _direct_calls(function):
     source = textwrap.dedent(inspect.getsource(function))
-    return [node.func.id for node in ast.walk(ast.parse(source))
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+    return [
+        node.func.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
 
 
 def test_parser_and_builder_directly_share_quantity_normalization():
