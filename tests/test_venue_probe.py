@@ -31,8 +31,6 @@ def _dataset():
         ("B1_stale", 1, None),
         ("B1_duplicate", 1, None),
         ("B1_duplicate", 2, None),
-        ("B2_revoked", 1, None),
-        ("B2_revoked", 2, None),
         ("B3_concurrent", 1, "A"),
         ("B3_concurrent", 1, "B"),
     ]
@@ -70,7 +68,6 @@ def _set_outcome(row, status, code=None, http_status=200):
     [
         ("B1_stale", 1, None),
         ("B1_duplicate", 2, None),
-        ("B2_revoked", 2, None),
         ("B3_concurrent", 1, "A"),
         ("B3_concurrent", 1, "B"),
     ],
@@ -125,6 +122,17 @@ def test_all_string_values_reject_identifying_or_oversized_shapes():
 
 def test_exact_probe_dataset_is_valid():
     assert venue_probe.validate_probe_dataset(_dataset()) == ()
+
+
+def test_legacy_b2_rows_are_rejected_as_extra_identities():
+    rows = _dataset()
+    rows.extend(
+        [
+            _row(probe_id="B2_revoked", attempt_ordinal=1),
+            _row(probe_id="B2_revoked", attempt_ordinal=2),
+        ]
+    )
+    assert "invalid probe row set" in venue_probe.validate_probe_dataset(rows)
 
 
 @pytest.mark.parametrize("change", ["missing", "extra", "duplicate"])
@@ -191,7 +199,6 @@ def test_single_probe_verdicts_return_exact_keys_and_reachable_refutes():
     assert venue_probe.single_probe_verdicts(_dataset()) == {
         "B1_stale": "refutes",
         "B1_duplicate": "refutes",
-        "B2_revoked": "refutes",
     }
 
 
@@ -200,7 +207,6 @@ def test_single_probe_verdicts_return_exact_keys_and_reachable_refutes():
     [
         ("B1_stale", 1, "B1_stale"),
         ("B1_duplicate", 2, "B1_duplicate"),
-        ("B2_revoked", 2, "B2_revoked"),
     ],
 )
 def test_coded_experimental_rejection_confirms_single_probe(
@@ -216,7 +222,6 @@ def test_coded_experimental_rejection_confirms_single_probe(
     [
         (("B1_duplicate", 1), ("B1_stale", 1), "B1_stale"),
         (("B1_duplicate", 1), ("B1_duplicate", 2), "B1_duplicate"),
-        (("B2_revoked", 1), ("B2_revoked", 2), "B2_revoked"),
     ],
 )
 def test_failed_control_makes_single_probe_inconclusive(
@@ -249,7 +254,7 @@ def test_final_classifier_rejects_an_invalid_experiment():
         venue_probe.classify_probe_dataset(rows)
 
 
-def test_final_classifier_reuses_the_three_frozen_single_probe_verdicts():
+def test_final_classifier_returns_exact_five_row_verdict_keys():
     rows = _dataset()
     singles = venue_probe.single_probe_verdicts(rows)
     verdicts = venue_probe.classify_probe_dataset(rows)
@@ -257,7 +262,6 @@ def test_final_classifier_reuses_the_three_frozen_single_probe_verdicts():
     assert verdicts == {
         **singles,
         "B3_concurrent": "confirms",
-        "B4_error_class": "inconclusive",
     }
     assert (
         venue_probe.classify_probe_dataset.__globals__["single_probe_verdicts"]
@@ -298,28 +302,6 @@ def test_b3_error_is_inconclusive_and_never_refutes():
     rows = _dataset()
     _set_outcome(_probe_row(rows, "B3_concurrent", 1, "A"), "err", "busy")
     assert venue_probe.classify_probe_dataset(rows)["B3_concurrent"] == "inconclusive"
-
-
-@pytest.mark.parametrize(
-    ("nonce_code", "auth_code", "expected"),
-    [("nonce_stale", "agent_revoked", "confirms"), ("denied", "denied", "refutes")],
-)
-def test_b4_compares_only_conclusive_experimental_error_codes(
-    nonce_code, auth_code, expected
-):
-    rows = _dataset()
-    _set_outcome(_probe_row(rows, "B1_stale", 1), "err", nonce_code)
-    _set_outcome(_probe_row(rows, "B2_revoked", 2), "err", auth_code)
-    assert venue_probe.classify_probe_dataset(rows)["B4_error_class"] == expected
-
-
-@pytest.mark.parametrize("control", [("B1_duplicate", 1), ("B2_revoked", 1)])
-def test_b4_is_blocked_when_either_control_is_not_conclusive_ok(control):
-    rows = _dataset()
-    _set_outcome(_probe_row(rows, "B1_stale", 1), "err", "nonce_stale")
-    _set_outcome(_probe_row(rows, "B2_revoked", 2), "err", "agent_revoked")
-    _set_outcome(_probe_row(rows, *control), "err", "control_failed")
-    assert venue_probe.classify_probe_dataset(rows)["B4_error_class"] == "inconclusive"
 
 
 def test_probe_nonces_use_exact_offsets_inside_shared_window():

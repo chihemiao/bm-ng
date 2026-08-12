@@ -25,9 +25,11 @@ ROW_FIELDS = frozenset(
 PROBE_ORDINALS = {
     "B1_stale": frozenset({1}),
     "B1_duplicate": frozenset({1, 2}),
-    "B2_revoked": frozenset({1, 2}),
     "B3_concurrent": frozenset({1}),
 }
+# 2026-08-12: B2/B4 were removed before any B2 evidence existed.
+# A deregistered key can noop as itself, so noop cannot falsify revocation.
+# userRole proves mapping removal only, not execution-layer rejection.
 VENUE_STATUSES = frozenset({"ok", "err", "absent"})
 SIGNER_SLOTS = frozenset({"A", "B"})
 HEX_SHAPE = re.compile(r"0x[0-9a-fA-F]{38,}")
@@ -36,8 +38,6 @@ EXPECTED_PROBE_ROWS = frozenset(
         ("B1_stale", 1, None),
         ("B1_duplicate", 1, None),
         ("B1_duplicate", 2, None),
-        ("B2_revoked", 1, None),
-        ("B2_revoked", 2, None),
         ("B3_concurrent", 1, "A"),
         ("B3_concurrent", 1, "B"),
     }
@@ -194,7 +194,7 @@ def _probe_row_identity(row: object) -> tuple[object, object, object]:
 
 
 def validate_probe_dataset(rows: object) -> tuple[str, ...]:
-    """Validate the complete seven-row, single-run probe evidence set."""
+    """Validate the complete five-row, single-run probe evidence set."""
     if not isinstance(rows, list):
         return ("dataset must be a list",)
     errors = [
@@ -243,7 +243,7 @@ def _single_probe_verdict(
 
 
 def single_probe_verdicts(rows: object) -> dict[str, str]:
-    """Classify the three probes with one control and one experimental result."""
+    """Classify both probes with one control and one experimental result."""
     index = _validated_index(rows)
     duplicate_control = index[("B1_duplicate", 1, None)]
     return {
@@ -252,9 +252,6 @@ def single_probe_verdicts(rows: object) -> dict[str, str]:
         ),
         "B1_duplicate": _single_probe_verdict(
             duplicate_control, index[("B1_duplicate", 2, None)]
-        ),
-        "B2_revoked": _single_probe_verdict(
-            index[("B2_revoked", 1, None)], index[("B2_revoked", 2, None)]
         ),
     }
 
@@ -280,36 +277,13 @@ def _b3_verdict(
     return "inconclusive"
 
 
-def _error_code(row: Mapping[object, object]) -> object:
-    if _conclusive(row) and row["venue_status"] == "err":
-        return row["venue_error_code"]
-    return None
-
-
-def _b4_verdict(index: Mapping[tuple[object, object, object], Mapping]) -> str:
-    if not _conclusive_ok(index[("B1_duplicate", 1, None)]) or not _conclusive_ok(
-        index[("B2_revoked", 1, None)]
-    ):
-        return "inconclusive"
-    nonce_codes = {
-        code
-        for key in (("B1_stale", 1, None), ("B1_duplicate", 2, None))
-        if (code := _error_code(index[key])) is not None
-    }
-    auth_code = _error_code(index[("B2_revoked", 2, None)])
-    if not nonce_codes or auth_code is None:
-        return "inconclusive"
-    return "confirms" if auth_code not in nonce_codes else "refutes"
-
-
 def classify_probe_dataset(rows: object) -> dict[str, str]:
-    """Validate independently, then return all five precommitted verdicts."""
+    """Validate independently, then return all three precommitted verdicts."""
     index = _validated_index(rows)
     verdicts = single_probe_verdicts(rows)
     verdicts.update(
         B3_concurrent=_b3_verdict(
             index[("B3_concurrent", 1, "A")], index[("B3_concurrent", 1, "B")]
         ),
-        B4_error_class=_b4_verdict(index),
     )
     return verdicts

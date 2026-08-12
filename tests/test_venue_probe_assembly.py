@@ -47,8 +47,6 @@ def test_assembly_signature_is_a_closed_keyword_only_boundary():
         ("B1_stale", 1, None),
         ("B1_duplicate", 1, None),
         ("B1_duplicate", 2, None),
-        ("B2_revoked", 1, None),
-        ("B2_revoked", 2, None),
         ("B3_concurrent", 1, "A"),
         ("B3_concurrent", 1, "B"),
     ],
