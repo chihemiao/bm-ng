@@ -1,11 +1,13 @@
 """Normalize documented Bybit position responses into reconciliation evidence."""
 
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
 from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
 
 _fingerprint = canonical_fingerprint
+ROW_FIELDS = frozenset({"positionIdx", "symbol", "side", "size"})
 
 RESPONSE_FIELDS = frozenset({"retCode", "retMsg", "result", "retExtInfo", "time"})
 RESULT_FIELDS = frozenset({"category", "nextPageCursor", "list"})
@@ -51,6 +53,32 @@ def _result(payload: Mapping) -> Mapping:
     return result
 
 
+def _position_row(row: object, symbol: str) -> tuple[str, str] | None:
+    if not isinstance(row, Mapping) or not ROW_FIELDS <= set(row):
+        return None
+    if type(row["positionIdx"]) is not int or row["positionIdx"] != 0:
+        return None
+    if row["symbol"] != BYBIT_WIRE_SYMBOLS[symbol] or not isinstance(row["side"], str):
+        return None
+    size = row["size"]
+    if not isinstance(size, str) or not size:
+        return None
+    try:
+        quantity = Decimal(size)
+    except InvalidOperation:
+        return None
+    if not quantity.is_finite():
+        return None
+    side = row["side"]
+    # Bybit size is unsigned; unlike HL szi, direction belongs only to side.
+    if not (side == "" and quantity == 0 or side in {"Buy", "Sell"} and quantity > 0):
+        return None
+    try:
+        return _fingerprint(row), _fingerprint({"symbol": symbol})
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_bybit_positions_surface(
     payload: Mapping[str, object], *, symbol: str, observed_ns: int
 ) -> SurfaceEvidence:
@@ -64,15 +92,25 @@ def parse_bybit_positions_surface(
         raise TypeError("nextPageCursor must be a string")
     if type(rows) is not list:
         raise TypeError("list must be a list")
-    empty = frozenset()
     truncated = bool(cursor)
+    states: dict[str, str] = {}
+    unknown = mismatch = 0
+    for row in rows:
+        parsed = _position_row(row, symbol)
+        if parsed is not None:
+            state, identity = parsed
+            if identity not in states:
+                states[identity] = state
+                continue
+            mismatch += 1
+        unknown += 1
     return SurfaceEvidence(
         observed_ns=observed_ns,
         fetched_count=len(rows),
         page_complete=bool(rows) and not truncated,
         truncated=truncated,
-        unknown_count=len(rows),
-        mismatch_count=0,
-        entities=CanonicalSet(STATE_SCHEME, 1, empty),
-        identities=CanonicalSet(IDENTITY_SCHEME, 1, empty),
+        unknown_count=unknown,
+        mismatch_count=mismatch,
+        entities=CanonicalSet(STATE_SCHEME, 1, frozenset(states.values())),
+        identities=CanonicalSet(IDENTITY_SCHEME, 1, frozenset(states)),
     )
