@@ -3,7 +3,9 @@
 from collections.abc import Mapping
 
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
-from reconciliation.state import CanonicalSet, SurfaceEvidence
+from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
+
+_fingerprint = canonical_fingerprint
 
 RESPONSE_FIELDS = frozenset({"retCode", "retMsg", "result", "retExtInfo", "time"})
 RESULT_FIELDS = frozenset({"category", "nextPageCursor", "list"})

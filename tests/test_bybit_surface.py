@@ -10,6 +10,13 @@ def _module():
     return importlib.import_module("reconciliation.bybit_surface")
 
 
+def test_venue_parsers_share_the_canonical_fingerprint_definition():
+    hl = importlib.import_module("reconciliation.hl_surface")
+    state = importlib.import_module("reconciliation.state")
+    assert hl._fingerprint is state.canonical_fingerprint
+    assert _module()._fingerprint is state.canonical_fingerprint
+
+
 def _payload(*rows, cursor=""):
     return {
         "retCode": 0,
