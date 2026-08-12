@@ -1,5 +1,7 @@
 """Pure, fail-closed startup reconciliation contracts."""
 
+import hashlib
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -32,6 +34,12 @@ class SurfaceEvidence:
     mismatch_count: int
     entities: CanonicalSet
     identities: CanonicalSet
+
+
+def canonical_fingerprint(value: Mapping[str, object]) -> str:
+    """Hash a canonical JSON object for cross-venue reconciliation sets."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

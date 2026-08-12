@@ -1,12 +1,12 @@
 """Normalize documented Hyperliquid account snapshots into reconciliation evidence."""
 
-import hashlib
-import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 
 from reconciliation.exposure import LegPosition
-from reconciliation.state import CanonicalSet, SurfaceEvidence
+from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
+
+_fingerprint = canonical_fingerprint
 
 COINS = frozenset({"BTC", "ETH"})
 IDENTITY_SCHEME = "hyperliquid.positions.identity"
@@ -27,11 +27,6 @@ POSITION_FIELDS = frozenset(
         "maxLeverage", "positionValue", "returnOnEquity", "szi", "unrealizedPnl",
     }
 )
-
-
-def _fingerprint(value: Mapping[str, object]) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def _position_value(row: object) -> Mapping[str, object] | None:
