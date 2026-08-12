@@ -3,6 +3,7 @@
 import hashlib
 import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
@@ -42,11 +43,14 @@ def _position_row(row: object) -> tuple[str, str] | None:
     if set(position) != POSITION_FIELDS or position.get("coin") not in COINS:
         return None
     coin = position["coin"]
-    if not isinstance(coin, str):
+    szi = position["szi"]
+    if not isinstance(coin, str) or not isinstance(szi, str):
         return None
     try:
+        if not szi or not Decimal(szi).is_finite():
+            return None
         return _fingerprint(row), _fingerprint({"coin": coin})
-    except (TypeError, ValueError):
+    except (InvalidOperation, TypeError, ValueError):
         return None
 
 
