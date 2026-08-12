@@ -80,9 +80,24 @@ def test_unusable_rows_are_counted_as_unknown_not_discarded(row):
     assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
 
 
-def test_duplicate_coin_is_unknown_and_mismatched():
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"position": POSITION, "type": "hedged"},
+        {"position": {**POSITION, "newField": "drift"}, "type": "oneWay"},
+    ],
+)
+def test_unknown_position_mode_or_field_is_not_silently_absorbed(row):
+    evidence = _parse({"assetPositions": [row]})
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+
+
+@pytest.mark.parametrize("second_position", [POSITION, {**POSITION, "szi": "0.04"}])
+def test_each_duplicate_coin_is_one_unknown_mismatch(second_position):
     first = {"position": POSITION, "type": "oneWay"}
-    second = {"position": {**POSITION, "szi": "0.04"}, "type": "oneWay"}
+    second = {"position": second_position, "type": "oneWay"}
     evidence = _parse({"assetPositions": [first, second]})
 
     assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 1)
