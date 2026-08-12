@@ -4,7 +4,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from execution.writer import WriterAuthority, WriterLease, WriterLeaseError
-from reconciliation.admission import CONTINUOUS_ADMISSION_REASON_KEYS
+from reconciliation.admission import (
+    CONTINUOUS_ADMISSION_REASON_KEYS,
+    decide_continuous_admission,
+)
+from reconciliation.clock import StateClock
+from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
+from reconciliation.legs import PairState
 from reconciliation.state import AdmissionDecision, StartupContractError
 
 DEMOTION_PREFIX = "writer_demoted:"
@@ -99,6 +106,39 @@ def demote_writer(
         raise ValueError("now_ns must be positive")
     reason = demotion_reason(admission)
     return lease.demote_to_cancel_only(demotion_ns=now_ns, reason=reason)
+
+
+def apply_continuous_admission(
+    lease: WriterLease,
+    *,
+    exposure: ExposureClock | None,
+    obligation: StateClock | None,
+    pair: PairState,
+    agent_wallet_status: str,
+    nonce_freeze_reason: str | None,
+    naked_notional: Notional | None,
+    max_naked_notional: Notional,
+    now_ns: int,
+) -> AdmissionDecision:
+    """Decide and enforce continuous admission as one indivisible operation."""
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be a WriterLease")
+    if type(now_ns) is not int:
+        raise TypeError("now_ns must be an integer")
+    if now_ns <= 0:
+        raise ValueError("now_ns must be positive")
+    admission = decide_continuous_admission(
+        exposure=exposure,
+        obligation=obligation,
+        pair=pair,
+        agent_wallet_status=agent_wallet_status,
+        nonce_freeze_reason=nonce_freeze_reason,
+        naked_notional=naked_notional,
+        max_naked_notional=max_naked_notional,
+    )
+    if admission.action != "ready":
+        demote_writer(lease, admission, now_ns=now_ns)
+    return admission
 
 
 def _decision(
