@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import reconciliation.promotion as promotion
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
     ReconciliationEvidence,
@@ -24,7 +25,7 @@ WALLET = "b" * 64
 INSTANCE = "writer-one"
 
 
-def _continuous(**changes: object) -> AdmissionDecision:
+def _continuous_inputs(**changes: object) -> dict[str, object]:
     values = {
         "exposure": ExposureClock("flat", 100, None, False),
         "obligation": StateClock("inactive", 100, None, False),
@@ -35,7 +36,11 @@ def _continuous(**changes: object) -> AdmissionDecision:
         "max_naked_notional": Notional(Decimal("1000"), "USDC"),
     }
     values.update(changes)
-    return decide_continuous_admission(**values)  # type: ignore[arg-type]
+    return values
+
+
+def _continuous(**changes: object) -> AdmissionDecision:
+    return decide_continuous_admission(**_continuous_inputs(**changes))  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -141,14 +146,27 @@ def test_ready_authority_records_nonce_request_then_transports_once(
     assert allocator.last_nonce == 501
 
 
-def test_known_gap_freeze_without_control_loop_demotion_reaches_transport(
+def test_applied_continuous_freeze_prevents_transport(
     authorized_runtime,
 ) -> None:
     lease, allocator, writer_events, effects = authorized_runtime
-    admission = _continuous(exposure=ExposureClock("unknown", 100, None, False))
+    inputs = _continuous_inputs(exposure=ExposureClock("unknown", 100, None, False))
+    admission = promotion.apply_continuous_admission(lease, **inputs, now_ns=105)
     assert admission.action == "cancel_only_freeze"
-    assert lease.authority.mode == "risk_increasing" and writer_events == []
+    assert lease.authority.mode == "cancel_only"
+    assert [row.action for row in writer_events] == ["demote"]
 
-    assert _submit(authorized_runtime) == ("persist", "accepted")
-    assert [kind for kind, _ in effects] == ["nonce", "request", "transport"]
-    assert allocator.last_nonce == 501
+    with pytest.raises(WriterLeaseError, match="not authorized"):
+        _submit(authorized_runtime)
+    assert effects == [] and allocator.last_nonce == 0
+
+
+def test_continuous_admission_has_no_periodic_runtime_caller_yet() -> None:
+    runtime_roots = ("data", "execution", "reconciliation")
+    calls = {
+        str(path): path.read_text().count("apply_continuous_admission(")
+        for root in runtime_roots
+        for path in Path(root).glob("*.py")
+        if "apply_continuous_admission(" in path.read_text()
+    }
+    assert calls == {"reconciliation/promotion.py": 1}

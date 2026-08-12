@@ -1,10 +1,19 @@
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import reconciliation.promotion as promotion
 from data.contracts import ContractError, validate_envelope
 from execution.writer import WriterAuthority, WriterIdentity, WriterLease, WriterLeaseError
-from reconciliation.admission import CONTINUOUS_ADMISSION_REASON_KEYS
+from reconciliation.admission import (
+    CONTINUOUS_ADMISSION_REASON_KEYS,
+    decide_continuous_admission,
+)
+from reconciliation.clock import StateClock
+from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
+from reconciliation.legs import PairState
 from reconciliation.promotion import demote_writer, demotion_reason
 from reconciliation.state import AdmissionDecision
 
@@ -17,6 +26,20 @@ def _freeze(*reasons: str) -> AdmissionDecision:
 
 def _identity() -> WriterIdentity:
     return WriterIdentity("hyperliquid:test", "writer-one", "a" * 64, "boot-one")
+
+
+def _continuous_inputs(**changes: object) -> dict[str, object]:
+    values = {
+        "exposure": ExposureClock("flat", 100, None, False),
+        "obligation": StateClock("inactive", 100, None, False),
+        "pair": PairState("balanced", ()),
+        "agent_wallet_status": "active",
+        "nonce_freeze_reason": None,
+        "naked_notional": Notional(Decimal(0), "USDC"),
+        "max_naked_notional": Notional(Decimal("1000"), "USDC"),
+    }
+    values.update(changes)
+    return values
 
 
 def _lease_for_mode(root: Path, mode: str, recorder) -> WriterLease:
@@ -251,4 +274,98 @@ def test_low_level_demotion_rejects_invalid_reason_before_state_change(
     with pytest.raises(error):
         lease.demote_to_cancel_only(demotion_ns=101, reason=reason)
     assert lease.authority.mode == "risk_increasing"
+    lease.release()
+
+
+def test_apply_ready_returns_pure_decision_without_demotion(tmp_path: Path) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    inputs = _continuous_inputs()
+
+    decision = promotion.apply_continuous_admission(lease, **inputs, now_ns=101)
+
+    assert decision == decide_continuous_admission(**inputs)
+    assert decision == AdmissionDecision("ready", ())
+    assert lease.authority.mode == "risk_increasing" and recorded == []
+    lease.release()
+
+
+def test_apply_freeze_demotes_before_recording_and_return(tmp_path: Path) -> None:
+    holder, observed_modes, recorded = {}, [], []
+
+    def record(decision) -> None:
+        recorded.append(decision)
+        if decision.action == "demote":
+            observed_modes.append(holder["lease"].authority.mode)
+
+    lease = _lease_for_mode(tmp_path, "risk_increasing", record)
+    holder["lease"] = lease
+    recorded.clear()
+    inputs = _continuous_inputs(exposure=ExposureClock("unknown", 100, None, False))
+
+    decision = promotion.apply_continuous_admission(lease, **inputs, now_ns=101)
+
+    assert decision == decide_continuous_admission(**inputs)
+    assert decision.action == "cancel_only_freeze"
+    assert lease.authority.mode == "cancel_only"
+    assert observed_modes == ["cancel_only"]
+    assert [row.action for row in recorded] == ["demote"]
+    lease.release()
+
+
+@pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
+def test_apply_freeze_is_idempotent_for_non_risk_modes(
+    tmp_path: Path, mode: str
+) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, mode, recorded.append)
+    recorded.clear()
+    inputs = _continuous_inputs(pair=PairState("unknown", ()))
+
+    decision = promotion.apply_continuous_admission(lease, **inputs, now_ns=101)
+
+    assert decision == decide_continuous_admission(**inputs)
+    assert decision.action == "cancel_only_freeze"
+    assert lease.authority.mode == mode and recorded == []
+    lease.release()
+
+
+def test_apply_propagates_record_failure_after_demotion(tmp_path: Path) -> None:
+    failure = OSError("decision stream unavailable")
+
+    def fail_demotion(decision) -> None:
+        if decision.action == "demote":
+            raise failure
+
+    lease = _lease_for_mode(tmp_path, "risk_increasing", fail_demotion)
+    inputs = _continuous_inputs(pair=PairState("unknown", ()))
+    with pytest.raises(WriterLeaseError, match="demotion applied.*evidence") as caught:
+        promotion.apply_continuous_admission(lease, **inputs, now_ns=101)
+    assert caught.value.__cause__ is failure
+    assert lease.authority.mode == "cancel_only"
+    lease.release()
+
+
+def test_apply_validates_lease_before_time_and_decision_inputs() -> None:
+    inputs = _continuous_inputs(exposure=object())
+    with pytest.raises(TypeError, match="lease"):
+        promotion.apply_continuous_admission(object(), **inputs, now_ns=0)
+
+
+@pytest.mark.parametrize(
+    ("now_ns", "error"),
+    [(None, TypeError), (True, TypeError), ("101", TypeError), (0, ValueError), (-1, ValueError)],
+)
+def test_apply_rejects_invalid_time_before_deciding(
+    tmp_path: Path, now_ns: object, error: type[Exception]
+) -> None:
+    recorded = []
+    lease = _lease_for_mode(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    with pytest.raises(error):
+        promotion.apply_continuous_admission(
+            lease, **_continuous_inputs(exposure=object()), now_ns=now_ns
+        )
+    assert lease.authority.mode == "risk_increasing" and recorded == []
     lease.release()
