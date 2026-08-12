@@ -22,14 +22,11 @@ def _payload(*rows, cursor=""):
 
 def _parse(payload=None, *, symbol="BTC", observed_ns=100):
     value = _payload({"unparsed": "row"}) if payload is None else payload
-    return _module().parse_bybit_positions_surface(
-        value, symbol=symbol, observed_ns=observed_ns
-    )
+    return _module().parse_bybit_positions_surface(value, symbol=symbol, observed_ns=observed_ns)
 
 
 def test_valid_envelope_preserves_all_rows_as_unknown_until_row_contract_lands():
     evidence = _parse(_payload({"one": 1}, "opaque"), observed_ns=321)
-
     assert evidence.observed_ns == 321
     assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 2, 0)
     assert evidence.page_complete is True and evidence.truncated is False
@@ -70,9 +67,12 @@ def test_top_level_common_response_fields_are_exact(field):
 def test_consumed_result_fields_are_exact(field):
     payload = _payload()
     payload["result"].pop(field)
-
     with pytest.raises(ValueError, match="result fields"):
         _parse(payload)
+    extra = _payload()
+    extra["result"]["newField"] = 1
+    with pytest.raises(ValueError, match="result fields"):
+        _parse(extra)
 
 
 @pytest.mark.parametrize(
