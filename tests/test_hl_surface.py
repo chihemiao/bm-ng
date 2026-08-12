@@ -4,7 +4,6 @@ import json
 
 import pytest
 
-
 POSITION = {
     "coin": "ETH",
     "cumFunding": {"allTime": "514.085417", "sinceChange": "0.0", "sinceOpen": "0.0"},
