@@ -118,6 +118,34 @@ def test_position_snapshots_pin_the_documented_no_pagination_assumption():
     assert evidence.truncated is False
 
 
+@pytest.mark.parametrize("szi", ["0.0335", "-0.0335", "0", "1E+2"])
+def test_finite_string_signed_sizes_remain_known(szi):
+    row = {"position": {**POSITION, "szi": szi}, "type": "oneWay"}
+    evidence = _parse({"assetPositions": [row]})
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+    assert evidence.entities.fingerprints == frozenset({_fingerprint(row)})
+
+
+@pytest.mark.parametrize(
+    "szi", ["", "abc", "NaN", "sNaN", "Infinity", "-Infinity", 1, 1.0, None]
+)
+def test_unusable_signed_sizes_make_the_surface_unknown(szi):
+    row = {"position": {**POSITION, "szi": szi}, "type": "oneWay"}
+    evidence = _parse({"assetPositions": [row]})
+
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    assert evidence.fetched_count == len(evidence.identities.fingerprints) + evidence.unknown_count
+
+
+def test_out_of_scope_coin_with_bad_size_is_only_one_unknown():
+    position = {**POSITION, "coin": "SOL", "szi": "NaN"}
+    evidence = _parse({"assetPositions": [{"position": position, "type": "oneWay"}]})
+
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (1, 1, 0)
+
+
 ORDER = {
     "coin": "BTC", "limitPx": "29792.0", "oid": 91490942,
     "side": "A", "sz": "5.0", "timestamp": 1681247412573,
