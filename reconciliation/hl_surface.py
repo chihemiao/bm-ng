@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 
+from reconciliation.exposure import LegPosition
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 COINS = frozenset({"BTC", "ETH"})
@@ -33,7 +34,7 @@ def _fingerprint(value: Mapping[str, object]) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
-def _position_row(row: object) -> tuple[str, str] | None:
+def _position_value(row: object) -> Mapping[str, object] | None:
     # Non-empty row shape is sourced from the official example, not a live non-empty account.
     if not isinstance(row, Mapping) or set(row) != {"position", "type"}:
         return None
@@ -49,8 +50,18 @@ def _position_row(row: object) -> tuple[str, str] | None:
     try:
         if not szi or not Decimal(szi).is_finite():
             return None
-        return _fingerprint(row), _fingerprint({"coin": coin})
-    except (InvalidOperation, TypeError, ValueError):
+    except InvalidOperation:
+        return None
+    return position
+
+
+def _position_row(row: object) -> tuple[str, str] | None:
+    position = _position_value(row)
+    if position is None:
+        return None
+    try:
+        return _fingerprint(row), _fingerprint({"coin": position["coin"]})
+    except (TypeError, ValueError):
         return None
 
 
@@ -170,6 +181,24 @@ def parse_positions_surface(
         entities=CanonicalSet(STATE_SCHEME, 1, frozenset(states.values())),
         identities=CanonicalSet(IDENTITY_SCHEME, 1, frozenset(states)),
     )
+
+
+def build_hl_leg_position(
+    payload: Mapping[str, object], *, symbol: str, observed_ns: int
+) -> LegPosition:
+    """Build one HL position value and its evidence from the same snapshot."""
+    if not isinstance(symbol, str):
+        raise TypeError("symbol must be a string")
+    if symbol not in COINS:
+        raise ValueError("symbol must be BTC or ETH")
+    evidence = parse_positions_surface(payload, observed_ns=observed_ns)
+    quantity = Decimal(0)
+    for row in payload["assetPositions"]:
+        position = _position_value(row)
+        if position is not None and position["coin"] == symbol:
+            quantity = Decimal(position["szi"])
+            break
+    return LegPosition("hyperliquid", symbol, quantity, evidence)
 
 
 def parse_orders_surface(payload: list[object], *, observed_ns: int) -> SurfaceEvidence:
