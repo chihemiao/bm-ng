@@ -225,7 +225,13 @@ def test_order_request_serializer_emits_a_valid_complete_event(leg, quantity) ->
 )
 def test_serialize_rejects_an_intent_record_mismatch(changes) -> None:
     intent, _, _ = _serialized()
-    wrong = _request(_intent(**changes))
+    fields = (
+        "strategy_id", "strategy_version", "signal_ns", "leg",
+        "symbol", "side", "quantity", "replacement_ordinal",
+    )
+    values = {field: getattr(intent, field) for field in fields}
+    values.update(changes)
+    wrong = _request(orders.rehydrate_order_intent(**values))
     with pytest.raises(OrderContractError, match="record"):
         _serde().serialize_order_request(
             intent, wrong, conn_id="conn-1", boot_id="boot-1",
