@@ -251,8 +251,14 @@ def parse_hl_mark_price(payload: list[object], *, symbol: str, observed_ns: int)
     raw_price = context["markPx"]
     if type(raw_price) is not str:
         raise TypeError("markPx must be a string")
+    try:
+        price = Decimal(raw_price)
+    except InvalidOperation as error:
+        raise ValueError("markPx is invalid") from error
+    if not price.is_finite() or price <= 0:
+        raise ValueError("markPx must be finite and positive")
     # BTC/ETH marks are USDT-denominated; HL's 1:1 USDC quanto settlement is not market FX.
-    return MarkPrice(symbol, "hyperliquid", Decimal(raw_price), "USDT", observed_ns)
+    return MarkPrice(symbol, "hyperliquid", price, "USDT", observed_ns)
 
 
 def parse_orders_surface(payload: list[object], *, observed_ns: int) -> SurfaceEvidence:
