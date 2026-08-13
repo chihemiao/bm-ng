@@ -48,16 +48,17 @@ def observe_transport(
     seq_within_boot: int,
 ) -> Callable[[OrderRequestRecord], object]:
     """Decorate an opaque transport with durable observation recording."""
-    def record(request: OrderRequestRecord, observed: ObservedFields, *,
-               outcome: Literal["success", "failure"], result: object | None,
-               transport_error: BaseException | None) -> None:
-        event = serialize_order_observation(**asdict(observed),
+    def event(request: OrderRequestRecord, observed: ObservedFields) -> Mapping[str, object]:
+        return serialize_order_observation(**asdict(observed),
             venue=request.leg, client_order_id=request.client_order_id,
             observed_ns=observed_ns, conn_id=conn_id, boot_id=boot_id,
             recv_wall_ns=recv_wall_ns, recv_mono_ns=recv_mono_ns, source=source,
             seq_within_boot=seq_within_boot)
+
+    def record(observation: Mapping[str, object], *, outcome: Literal["success", "failure"],
+               result: object | None, transport_error: BaseException | None) -> None:
         try:
-            observation_recorder(event)
+            observation_recorder(observation)
         except Exception as error:
             raise ObservationRecordingError(outcome=outcome, result=result,
                                             transport_error=transport_error) from error
@@ -69,16 +70,17 @@ def observe_transport(
             unknown = ObservedFields(
                 venue_order_id=None, status="unknown",
                 observation_source="no_venue_response", venue_time_ms=None)
-            record(request, unknown, outcome="failure", result=None,
+            record(event(request, unknown), outcome="failure", result=None,
                    transport_error=transport_error)
             raise
         try:
             observed = success_mapper(result, request)
             if not isinstance(observed, ObservedFields):
                 raise TypeError("success_mapper must return ObservedFields")
+            observation = event(request, observed)
         except Exception as error:
             raise ObservationMappingError(result) from error
-        record(request, observed, outcome="success", result=result, transport_error=None)
+        record(observation, outcome="success", result=result, transport_error=None)
         return result
 
     return observed_transport
