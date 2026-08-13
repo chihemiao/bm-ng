@@ -118,6 +118,17 @@ def _fill_row(row: object) -> tuple[str, str] | None:
     valid_identity = row.get("coin") in COINS and all(type(value) is int for value in (tid, time))
     if not valid_fields or not valid_identity or tid < 0 or time < 0:
         return None
+    size = row["sz"]
+    if not isinstance(size, str) or not size:
+        return None
+    try:
+        parsed_size = Decimal(size)
+    except InvalidOperation:
+        return None
+    # Sz is an unsigned base-coin size; direction is carried separately by side.
+    # Zero remains known because the upstream fill contract does not forbid it.
+    if not parsed_size.is_finite() or parsed_size < 0:
+        return None
     identity = {"time": time, "coin": row["coin"], "tid": tid}
     try:
         return _fingerprint(row), _fingerprint(identity)
