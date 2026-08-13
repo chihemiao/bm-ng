@@ -15,6 +15,38 @@ from execution.orders import (
 )
 
 
+def serialize_order_observation(
+    *, venue: str, client_order_id: str, venue_order_id: str | None,
+    status: str, observation_source: str, observed_ns: int,
+    venue_time_ms: int | None, conn_id: str, boot_id: str,
+    recv_wall_ns: int, recv_mono_ns: int, source: str, seq_within_boot: int,
+) -> dict[str, object]:
+    """Build one validated durable observation with explicit envelope identity."""
+    return validate_envelope(
+        {
+            "schema_ver": 1,
+            "event_kind": "order",
+            "payload_schema": "order_observation",
+            "venue": venue,
+            "conn_id": conn_id,
+            "boot_id": boot_id,
+            "recv_wall_ns": recv_wall_ns,
+            "recv_mono_ns": recv_mono_ns,
+            "source": source,
+            "seq_within_boot": seq_within_boot,
+            "identity_status": "known",
+            "client_order_id": client_order_id,
+            "venue_order_id": venue_order_id,
+            "payload": {
+                "status": status,
+                "source": observation_source,
+                "observed_ns": observed_ns,
+                "venue_time_ms": venue_time_ms,
+            },
+        }
+    )
+
+
 def serialize_order_request(
     intent: OrderIntent,
     record: OrderRequestRecord,
