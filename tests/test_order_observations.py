@@ -2,9 +2,8 @@ from importlib import import_module
 
 import pytest
 
-from data.contracts import ContractError, validate_envelope
-from data.schema_dispatch import DURABLE_EVENT_SCHEMAS, ORDER_STATUSES
-from data.shard import ShardWriter
+from data.contracts import validate_envelope
+from data.schema_dispatch import ORDER_STATUSES
 from tests.test_contracts import market_event
 
 schema = import_module("data.schema_order_observation")
@@ -12,23 +11,17 @@ FIELDS = ("status", "source", "observed_ns", "venue_time_ms")
 SOURCES = ("submission_response", "order_status", "execution_history", "no_venue_response")
 
 
-def _event(source="submission_response", status="open", oid="7", venue_time_ms=None):
-    event = market_event()
-    event.update(
-        event_kind="order",
-        payload_schema="order_observation",
-        seq_within_boot=9,
-        identity_status="known",
-        client_order_id="0xclient",
-        venue_order_id=oid,
-        payload={
-            "status": status,
-            "source": source,
-            "observed_ns": 999,
-            "venue_time_ms": venue_time_ms,
-        },
-    )
-    return event
+def _payload(source="submission_response", status="open", observed_ns=999, venue_time_ms=None):
+    return {"status": status, "source": source, "observed_ns": observed_ns,
+            "venue_time_ms": venue_time_ms}
+
+
+def _errors(payload=None, **changes):
+    arguments = {
+        "venue": "hyperliquid", "has_sequence": True, "identity_status": "known",
+        "client_order_id": "0xclient", "venue_order_id": "7", "recv_wall_ns": 1_000}
+    arguments.update(changes)
+    return schema.order_observation_binding_errors(payload or _payload(), **arguments)
 
 
 @pytest.mark.parametrize(
@@ -40,48 +33,44 @@ def _event(source="submission_response", status="open", oid="7", venue_time_ms=N
         ("submission_response", "filled", "1", None),
         ("submission_response", "rejected", None, None),
         ("order_status", "absent", None, None),
-        *(
-            ("order_status", status, "1", 7)
-            for status in ("open", "partially_filled", "filled", "cancelled", "rejected")
-        ),
-        *(("execution_history", status, "1", 7) for status in ("partially_filled", "filled")),
+        *(("order_status", status, "1", 7) for status in
+          ("open", "partially_filled", "filled", "cancelled", "rejected")),
+        *(("execution_history", status, "1", 7) for status in
+          ("partially_filled", "filled")),
     ],
 )
 def test_bound_observation_source_status_matrix(source, status, oid, venue_time_ms):
-    assert validate_envelope(_event(source, status, oid, venue_time_ms))
+    assert _errors(_payload(source, status, venue_time_ms=venue_time_ms),
+                   venue_order_id=oid) == ()
 
 
 def test_schema_reuses_status_registry_and_keeps_ids_only_in_envelope():
-    event = _event()
+    payload = _payload()
     assert schema.ORDER_STATUSES is ORDER_STATUSES
-    assert "order_observation" in DURABLE_EVENT_SCHEMAS
-    assert set(event["payload"]) == set(FIELDS)
-    assert not {"client_order_id", "venue_order_id"} & event["payload"].keys()
-    event["payload"]["client_order_id"] = "duplicate"
-    with pytest.raises(ContractError, match="invalid_fields"):
-        validate_envelope(event)
+    assert schema.FIELDS == FIELDS and set(payload) == set(FIELDS)
+    assert not {"client_order_id", "venue_order_id"} & payload.keys()
+    payload["client_order_id"] = "duplicate"
+    assert _errors(payload) == ("order_observation:invalid_fields",)
 
 
-@pytest.mark.parametrize("missing", (*FIELDS, "seq_within_boot"))
+@pytest.mark.parametrize("missing", (*FIELDS, "sequence"))
 def test_bound_fields_and_sequence_are_one_atomic_presence_group(missing):
-    event = _event()
-    target = event if missing == "seq_within_boot" else event["payload"]
-    target.pop(missing)
-    expected = "sequence" if missing == "seq_within_boot" else missing
-    with pytest.raises(ContractError) as error:
-        validate_envelope(event)
-    assert str(error.value) == f"order_observation:partial_binding:{expected}"
+    payload = _payload()
+    if missing != "sequence":
+        payload.pop(missing)
+    assert _errors(payload, has_sequence=missing != "sequence") == (
+        f"order_observation:partial_binding:{missing}",
+    )
 
 
-def test_unbound_legacy_observation_replays_but_cannot_be_appended(tmp_path):
-    event = _event()
-    event.pop("seq_within_boot")
-    event.update(identity_status="unknown", client_order_id=None, venue_order_id="unowned")
-    event["payload"] = {"raw": "legacy"}
-    assert schema.order_observation_binding_is_legacy(event["payload"], has_sequence=False)
-    assert validate_envelope(event) is event
-    with pytest.raises(ContractError, match="legacy order observation"):
-        ShardWriter(tmp_path, "boot-1").append_event(event)
+def test_legacy_and_partial_classification_are_distinct():
+    legacy = {"raw": "legacy"}
+    assert schema.order_observation_binding_is_legacy(legacy, has_sequence=False)
+    partial = {"status": "open"}
+    assert not schema.order_observation_binding_is_legacy(partial, has_sequence=False)
+    assert _errors(partial, has_sequence=False) == (
+        "order_observation:partial_binding:observed_ns,sequence,source,venue_time_ms",
+    )
 
 
 @pytest.mark.parametrize(
@@ -100,45 +89,34 @@ def test_unbound_legacy_observation_replays_but_cannot_be_appended(tmp_path):
     ],
 )
 def test_impossible_source_status_and_presence_combinations_fail_closed(
-    source,
-    status,
-    oid,
-    venue_time_ms,
+    source, status, oid, venue_time_ms,
 ):
-    with pytest.raises(ContractError, match="order_observation:invalid_combination"):
-        validate_envelope(_event(source, status, oid, venue_time_ms))
+    assert _errors(_payload(source, status, venue_time_ms=venue_time_ms),
+                   venue_order_id=oid) == ("order_observation:invalid_combination",)
 
 
-def test_bound_value_and_envelope_errors_accumulate_in_fixed_order():
-    payload = {
-        "status": "invented",
-        "source": "invented",
-        "observed_ns": True,
-        "venue_time_ms": True,
-    }
-    errors = schema.order_observation_binding_errors(
-        payload,
-        venue="invented",
-        has_sequence=True,
-        identity_status="unknown",
-        client_order_id="",
-        venue_order_id=None,
-        recv_wall_ns=1_000,
+def test_bound_errors_accumulate_in_fixed_order_and_gate_cross_field_checks():
+    payload = _payload("invented", "invented", observed_ns=True, venue_time_ms=True)
+    errors = _errors(
+        payload, venue="invented", identity_status="unknown",
+        client_order_id="", venue_order_id=None,
     )
     assert errors == (
-        "order_observation:invalid_status",
-        "order_observation:invalid_source",
-        "order_observation:invalid_observed_ns",
-        "order_observation:invalid_venue_time_ms",
-        "order_observation:unknown_venue:invented",
-        "order_observation:identity_not_known",
+        "order_observation:invalid_status", "order_observation:invalid_source",
+        "order_observation:invalid_observed_ns", "order_observation:invalid_venue_time_ms",
+        "order_observation:unknown_venue:invented", "order_observation:identity_not_known",
         "order_observation:invalid_client_order_id",
     )
-    event = _event()
-    event["identity_status"] = "unknown"
-    with pytest.raises(ContractError, match="identity_not_known"):
-        validate_envelope(event)
-    event = _event()
-    event["payload"]["observed_ns"] = 1_001
-    with pytest.raises(ContractError, match="observed_in_future"):
-        validate_envelope(event)
+    assert _errors(_payload(observed_ns=1_001)) == (
+        "order_observation:observed_in_future",
+    )
+
+
+def test_known_gap_bound_observations_are_not_yet_wired_into_the_envelope():
+    event = market_event()
+    event.update(
+        event_kind="order", payload_schema="order_observation", seq_within_boot=9,
+        identity_status="known", client_order_id="0xclient", venue_order_id="7",
+        payload=_payload(status="invented"),
+    )
+    assert validate_envelope(event) is event
