@@ -3,6 +3,9 @@
 VALIDITY_NS = 30 * 86_400 * 1_000_000_000
 ROTATION_LEAD_NS = 7 * 86_400 * 1_000_000_000
 BYBIT_WIRE_SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
+ORDER_SYMBOLS = frozenset(BYBIT_WIRE_SYMBOLS)
+ORDER_SIDES = frozenset({"buy", "sell"})
+ORDER_LEGS = frozenset({"hyperliquid", "bybit"})
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
@@ -10,7 +13,11 @@ ORDER_LEASE_FIELDS = (
     "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
 )
 ORDER_SIGNER_FIELDS = ("allocated_nonce",)
-ORDER_BOUND_FIELDS = ORDER_LEASE_FIELDS + ORDER_SIGNER_FIELDS
+ORDER_INTENT_FIELDS = (
+    "strategy_id", "strategy_version", "signal_ns", "leg", "replacement_ordinal",
+    "symbol", "side", "quantity", "recorded_ns",
+)
+ORDER_BOUND_FIELDS = ORDER_LEASE_FIELDS + ORDER_SIGNER_FIELDS + ORDER_INTENT_FIELDS
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})
 LEDGER_KINDS = frozenset({"funding", "fee", "transfer", "adjustment"})
 COMMON_FIELDS = (

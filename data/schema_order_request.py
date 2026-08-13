@@ -2,19 +2,25 @@
 
 from collections.abc import Mapping
 
-from data.schema_dispatch import ORDER_BOUND_FIELDS, ORDER_LEASE_FIELDS
+from data.schema_dispatch import (
+    ORDER_BOUND_FIELDS,
+    ORDER_LEASE_FIELDS,
+    ORDER_LEGS,
+    ORDER_SIDES,
+    ORDER_SYMBOLS,
+)
 
 
 def _presence(
-    payload: Mapping[str, object], has_sequence: object
+    payload: Mapping[str, object], has_sequence: object, fields: tuple[str, ...],
 ) -> tuple[bool, tuple[str, ...]]:
     if type(has_sequence) is not bool:
         raise TypeError("has_sequence must be bool")
-    present = tuple(field in payload for field in ORDER_BOUND_FIELDS)
+    present = tuple(field in payload for field in fields)
     if not has_sequence and not any(present):
         return True, ()
     missing = [
-        field for field, exists in zip(ORDER_BOUND_FIELDS, present, strict=True) if not exists
+        field for field, exists in zip(fields, present, strict=True) if not exists
     ]
     if not has_sequence:
         missing.append("sequence")
@@ -35,14 +41,15 @@ def _valid_lease(payload: Mapping[str, object]) -> bool:
 def order_request_binding_is_legacy(
     payload: Mapping[str, object], *, has_sequence: object
 ) -> bool:
-    legacy, _ = _presence(payload, has_sequence)
+    legacy, _ = _presence(payload, has_sequence, ORDER_BOUND_FIELDS)
     return legacy
 
 
-def order_request_binding_errors(
+def order_request_lease_binding_errors(
     payload: Mapping[str, object], *, venue: object, has_sequence: object
 ) -> tuple[str, ...]:
-    legacy, missing = _presence(payload, has_sequence)
+    fields = ORDER_LEASE_FIELDS + ("allocated_nonce",)
+    legacy, missing = _presence(payload, has_sequence, fields)
     if legacy:
         return ()
     if missing:
@@ -51,9 +58,6 @@ def order_request_binding_errors(
         return (f"order_request:unknown_venue:{venue}",)
     if not _valid_lease(payload):
         return ("invalid order request lease binding",)
-    leg = payload.get("leg")
-    if leg is not None and leg != venue:
-        return (f"order_request:leg_venue_mismatch:{leg}:{venue}",)
     nonce = payload["allocated_nonce"]
     if venue == "hyperliquid" and nonce is None:
         return ("order_request:hyperliquid_nonce_null",)
@@ -61,4 +65,29 @@ def order_request_binding_errors(
         return ("order_request:hyperliquid_nonce_invalid",)
     if venue == "bybit" and nonce is not None:
         return ("order_request:bybit_nonce_not_null",)
+    return ()
+
+
+def order_request_binding_errors(
+    payload: Mapping[str, object], *, venue: object, has_sequence: object
+) -> tuple[str, ...]:
+    legacy, missing = _presence(payload, has_sequence, ORDER_BOUND_FIELDS)
+    if legacy:
+        return ()
+    if missing:
+        return (f"order_request:partial_binding:{','.join(missing)}",)
+    errors = order_request_lease_binding_errors(
+        payload, venue=venue, has_sequence=has_sequence,
+    )
+    if errors:
+        return errors
+    for field, allowed in (
+        ("symbol", ORDER_SYMBOLS), ("side", ORDER_SIDES), ("leg", ORDER_LEGS),
+    ):
+        value = payload[field]
+        if not isinstance(value, str) or value not in allowed:
+            return (f"order_request:invalid_{field}",)
+    leg = payload["leg"]
+    if leg != venue:
+        return (f"order_request:leg_venue_mismatch:{leg}:{venue}",)
     return ()
