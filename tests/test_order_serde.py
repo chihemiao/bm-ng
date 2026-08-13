@@ -48,6 +48,10 @@ def test_order_request_serializer_has_one_source_for_venue() -> None:
         "intent", "record", "conn_id", "boot_id", "recv_wall_ns",
         "recv_mono_ns", "source", "seq_within_boot",
     )
+    assert tuple(parameter.kind for parameter in parameters.values()) == (
+        Parameter.POSITIONAL_OR_KEYWORD, Parameter.POSITIONAL_OR_KEYWORD,
+        *(Parameter.KEYWORD_ONLY,) * 6,
+    )
 
 
 def test_order_observation_serializer_keeps_envelope_and_observation_sources_distinct() -> None:
@@ -82,10 +86,6 @@ def test_order_observation_serializer_delegates_invalid_combinations_to_contract
             venue_time_ms=None, conn_id="conn-1", boot_id="boot-1", recv_wall_ns=120,
             recv_mono_ns=90, source="execution", seq_within_boot=3,
         )
-    assert tuple(parameter.kind for parameter in parameters.values()) == (
-        Parameter.POSITIONAL_OR_KEYWORD, Parameter.POSITIONAL_OR_KEYWORD,
-        *(Parameter.KEYWORD_ONLY,) * 6,
-    )
 
 
 @pytest.mark.parametrize(("leg", "quantity"), [("hyperliquid", "1E+2"), ("bybit", "1.0")])
