@@ -89,3 +89,18 @@ def order_observation_binding_errors(
     if observed_valid and observed > recv_wall_ns:
         errors.append("order_observation:observed_in_future")
     return tuple(errors)
+
+
+def order_observation_event_binding(
+    event: Mapping[str, object],
+) -> tuple[bool, tuple[str, ...]]:
+    payload = event["payload"]
+    has_sequence = "seq_within_boot" in event
+    return order_observation_binding_is_legacy(
+        payload, has_sequence=has_sequence,
+    ), order_observation_binding_errors(
+        payload, venue=event.get("venue"), has_sequence=has_sequence,
+        identity_status=event.get("identity_status"),
+        client_order_id=event.get("client_order_id"),
+        venue_order_id=event.get("venue_order_id"), recv_wall_ns=event.get("recv_wall_ns"),
+    )

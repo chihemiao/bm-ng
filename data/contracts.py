@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from data import schema_order_request
+from data import schema_order_observation, schema_order_request
 from data.schema_dispatch import (
     COMMON_FIELDS,
     DURABLE_EVENT_SCHEMAS,
@@ -73,6 +73,9 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
     if event["event_kind"] == "ops" and event["payload_schema"] == "raw_quarantine":
         _require(_nonempty_text(event["payload"].get("raw")), "raw quarantine requires raw frame")
     legacy_order = event["payload_schema"] == "order_request" and order_request_is_legacy(event)
+    if event["payload_schema"] == "order_observation":
+        legacy_order, errors = schema_order_observation.order_observation_event_binding(event)
+        _require(not errors, errors[0] if errors else "")
     if event["payload_schema"] in DURABLE_EVENT_SCHEMAS and not legacy_order:
         _require(_valid_ns(event.get("seq_within_boot")), "invalid seq_within_boot")
     if event["payload_schema"] in RECONCILIATION_SCHEMAS:
