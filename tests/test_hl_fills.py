@@ -28,7 +28,8 @@ def _parse_fills(pages, *, observed_ns=100, page_complete=True, truncated=False)
 def _build_fills(pages, **changes):
     values = {
         "coin": "BTC", "intended_side": "buy",
-        "oids": frozenset({FILL["oid"]}), "since_ms": FILL["time"],
+        "oids": frozenset({FILL["oid"]}), "client_order_id": "client-1",
+        "since_ms": FILL["time"],
         "skew_allowance_ms": 0, "observed_ns": 100,
         "page_complete": True, "truncated": False,
     }
@@ -154,9 +155,10 @@ def test_fill_observation_time_must_be_a_positive_integer(observed_ns):
 
 def test_target_order_builds_quantity_and_evidence_from_one_snapshot():
     module = importlib.import_module("reconciliation.hl_fills")
-    result = _build_fills([[FILL]], observed_ns=321)
+    result = _build_fills([[FILL]], client_order_id="Client-1", observed_ns=321)
 
     assert isinstance(result, module.HLFilledQuantity)
+    assert result.client_order_id == "Client-1"
     assert result.quantity == Decimal("1")
     assert result.evidence == module.parse_fills_surface(
         [[FILL]], observed_ns=321, page_complete=True, truncated=False
@@ -249,6 +251,8 @@ def test_unhashable_fill_wire_values_are_unknown_not_parser_errors(change):
         ({"intended_side": "B"}, ValueError, "intended_side"),
         ({"oids": {1}}, TypeError, "oids"),
         ({"oids": frozenset({True})}, TypeError, "oids"),
+        ({"client_order_id": None}, TypeError, "client_order_id"),
+        ({"client_order_id": ""}, ValueError, "client_order_id"),
         ({"since_ms": True}, TypeError, "since_ms"),
         ({"since_ms": -1}, ValueError, "since_ms"),
         ({"skew_allowance_ms": True}, TypeError, "skew_allowance_ms"),
@@ -264,13 +268,25 @@ def test_fill_quantity_signature_and_shared_parser_boundary_are_pinned():
     module = importlib.import_module("reconciliation.hl_fills")
     function = module.build_hl_filled_quantity
     assert tuple(inspect.signature(function).parameters) == (
-        "pages", "coin", "intended_side", "oids", "since_ms", "skew_allowance_ms",
-        "observed_ns", "page_complete", "truncated",
+        "pages", "coin", "intended_side", "oids", "client_order_id", "since_ms",
+        "skew_allowance_ms", "observed_ns", "page_complete", "truncated",
     )
     source = textwrap.dedent(inspect.getsource(function))
     calls = [node.func.id for node in ast.walk(ast.parse(source))
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
-    assert "parse_fills_surface" in calls
+    assert {"parse_fills_surface", "_require_client_order_id"} <= set(calls)
+
+
+def test_hl_filled_quantity_requires_keyword_only_client_identity_value_and_evidence():
+    module = importlib.import_module("reconciliation.hl_fills")
+    assert tuple(module.HLFilledQuantity.__dataclass_fields__) == (
+        "client_order_id", "quantity", "evidence",
+    )
+    evidence = _parse_fills([[FILL]])
+    with pytest.raises(TypeError):
+        module.HLFilledQuantity(quantity=Decimal("1"), evidence=evidence)
+    with pytest.raises(TypeError):
+        module.HLFilledQuantity("client-1", Decimal("1"), evidence)
 
 
 @pytest.mark.parametrize(
@@ -341,4 +357,5 @@ def test_hl_order_ids_remain_a_source_not_fill_aggregation_assembly():
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+    assert "_require_client_order_id" in calls
     assert "build_hl_filled_quantity" not in calls

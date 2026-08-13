@@ -26,8 +26,9 @@ BYBIT_EXECUTION_TYPES = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class BybitFilledQuantity:
+    client_order_id: str
     quantity: Decimal | None
     evidence: SurfaceEvidence
 
@@ -276,7 +277,11 @@ def build_bybit_filled_quantity(
             canonical_side = row["side"].lower()
             signed += quantity if canonical_side == "buy" else -quantity
     aligned = signed if intended_side == "buy" else -signed
-    return BybitFilledQuantity(aligned if aligned >= 0 else None, evidence)
+    return BybitFilledQuantity(
+        client_order_id=order_link_id,
+        quantity=aligned if aligned >= 0 else None,
+        evidence=evidence,
+    )
 
 
 def build_intent_bybit_filled_quantity(

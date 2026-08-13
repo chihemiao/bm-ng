@@ -45,11 +45,13 @@ def _build(replay=REPLAY, pages=None, *, intent=INTENT):
 def test_replay_binding_is_the_only_order_id_source_for_fill_aggregation():
     expected = hl_fills.build_hl_filled_quantity(
         [[FILL]], coin="BTC", intended_side="buy",
-        oids=frozenset({FILL["oid"]}), since_ms=FILL["time"],
+        oids=frozenset({FILL["oid"]}), client_order_id=INTENT.client_order_id,
+        since_ms=FILL["time"],
         skew_allowance_ms=0, observed_ns=200,
         page_complete=True, truncated=False,
     )
     assert _build() == expected
+    assert _build().client_order_id == INTENT.client_order_id
 
 
 def test_missing_binding_is_unknown_without_running_the_fill_aggregator():

@@ -21,8 +21,9 @@ FILL_OPTIONAL_FIELDS = frozenset({"builderFee", "liquidation"})
 HL_UINT64_MAX = 2**64 - 1
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, kw_only=True)
 class HLFilledQuantity:
+    client_order_id: str
     quantity: Decimal | None
     evidence: SurfaceEvidence
 
@@ -108,6 +109,13 @@ def _nonnegative_int(value: object, name: str) -> None:
         raise ValueError(f"{name} must be non-negative")
 
 
+def _require_client_order_id(value: object) -> None:
+    if not isinstance(value, str):
+        raise TypeError("client_order_id must be a string")
+    if not value:
+        raise ValueError("client_order_id must not be empty")
+
+
 def hl_order_ids(
     bindings: tuple[OrderBinding, ...], *, client_order_id: str
 ) -> frozenset[int] | None:
@@ -116,10 +124,7 @@ def hl_order_ids(
         type(binding) is not OrderBinding for binding in bindings
     ):
         raise TypeError("bindings must be a tuple of OrderBinding values")
-    if not isinstance(client_order_id, str):
-        raise TypeError("client_order_id must be a string")
-    if not client_order_id:
-        raise ValueError("client_order_id must not be empty")
+    _require_client_order_id(client_order_id)
     wire_oids = [
         binding.venue_order_id
         for binding in bindings
@@ -143,7 +148,7 @@ def hl_order_ids(
 
 def build_hl_filled_quantity(
     pages: Sequence[list[object]], *, coin: str, intended_side: str,
-    oids: frozenset[int], since_ms: int, skew_allowance_ms: int,
+    oids: frozenset[int], client_order_id: str, since_ms: int, skew_allowance_ms: int,
     observed_ns: int, page_complete: bool, truncated: bool,
 ) -> HLFilledQuantity:
     """Build an oid-bound fill quantity and evidence from one response."""
@@ -159,6 +164,7 @@ def build_hl_filled_quantity(
         raise TypeError("oids must be a frozenset of integers")
     if any(oid < 0 for oid in oids):
         raise ValueError("oids must be non-negative")
+    _require_client_order_id(client_order_id)
     _nonnegative_int(since_ms, "since_ms")
     _nonnegative_int(skew_allowance_ms, "skew_allowance_ms")
     evidence = parse_fills_surface(
@@ -176,7 +182,11 @@ def build_hl_filled_quantity(
         if row["coin"] == coin and row["oid"] in oids and row["time"] >= earliest_ms:
             signed += Decimal(row["sz"]) * (1 if row["side"] == "B" else -1)
     aligned = signed * (1 if intended_side == "buy" else -1)
-    return HLFilledQuantity(aligned if aligned >= 0 else None, evidence)
+    return HLFilledQuantity(
+        client_order_id=client_order_id,
+        quantity=aligned if aligned >= 0 else None,
+        evidence=evidence,
+    )
 
 
 def build_replayed_hl_filled_quantity(
@@ -209,6 +219,7 @@ def build_replayed_hl_filled_quantity(
         coin=intent.symbol,
         intended_side=intent.side,
         oids=oids,
+        client_order_id=intent.client_order_id,
         since_ms=since_ms,
         skew_allowance_ms=skew_allowance_ms,
         observed_ns=observed_ns,
