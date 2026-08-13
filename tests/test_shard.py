@@ -295,6 +295,25 @@ def test_order_nonce_join_requires_allocation_to_precede_request(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
+    ("allocation_sequence", "request_sequence", "decided_ns", "recorded_ns", "expected"),
+    [
+        (1, 2, 999, 1, ()),
+        (2, 1, 1, 999, (f"order_request:nonce_allocation_not_prior:{WALLET}:8",)),
+    ],
+    ids=("allocation-first", "allocation-last"),
+)
+def test_order_nonce_join_uses_event_order_not_payload_clocks(
+    tmp_path: Path, allocation_sequence: int, request_sequence: int,
+    decided_ns: int, recorded_ns: int, expected: tuple[str, ...],
+) -> None:
+    # These payload clocks have no schema relationship, so only durable event order is authority.
+    allocation = _nonce_decision(allocation_sequence, 8, decided_ns=decided_ns)
+    request = _order_request(request_sequence, allocated_nonce=8, recorded_ns=recorded_ns)
+    events = sorted((allocation, request), key=lambda event: event["recv_wall_ns"])
+    assert _replay_reasons(tmp_path, *events) == expected
+
+
+@pytest.mark.parametrize(
     "changes", [{"account_digest": "d" * 64}, {"writer_instance_id": "writer-two"}]
 )
 def test_order_nonce_join_reports_signer_binding_mismatch(
