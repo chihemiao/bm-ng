@@ -99,6 +99,15 @@ def _order_request(
         "writer_instance_id": INSTANCE,
         "wallet_fingerprint": WALLET,
         "allocated_nonce": None if venue == "bybit" else 7,
+        "strategy_id": "funding-carry",
+        "strategy_version": "git-deadbeef",
+        "signal_ns": 1,
+        "leg": venue,
+        "replacement_ordinal": 0,
+        "symbol": "BTC",
+        "side": "buy",
+        "quantity": "1",
+        "recorded_ns": 2,
     }
     payload.update(changes)
     event.update(

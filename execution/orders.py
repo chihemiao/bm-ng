@@ -6,17 +6,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
+from data.schema_dispatch import ORDER_LEGS, ORDER_SIDES, ORDER_SYMBOLS
 from data.schema_nonce import signer_nonce_window_bounds
-from data.schema_order_request import order_request_binding_errors
+from data.schema_order_request import order_request_lease_binding_errors
 from execution.nonce import NonceAllocator
 from execution.writer import WriterLease
 
 ORDER_STATUSES = frozenset(
     {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
 )
-LEGS = frozenset({"hyperliquid", "bybit"})
-SIDES = frozenset({"buy", "sell"})
 REPLACEABLE_STATUSES = frozenset({"cancelled", "rejected"})
 HOLD_STATUSES = frozenset({"open", "partially_filled", "filled", "cancelled", "rejected"})
 INTENT_FIELDS = ("strategy_id", "strategy_version", "signal_ns", "leg", "replacement_ordinal")
@@ -106,7 +104,7 @@ def _validate_request_binding(
         "writer_instance_id": instance_id, "wallet_fingerprint": wallet_fingerprint,
         "allocated_nonce": allocated_nonce,
     }
-    errors = order_request_binding_errors(payload, venue=leg, has_sequence=True)
+    errors = order_request_lease_binding_errors(payload, venue=leg, has_sequence=True)
     _require(not errors, errors[0] if errors else "")
 
 
@@ -138,13 +136,13 @@ def _make_intent(
     valid_version = isinstance(strategy_version, str) and bool(strategy_version)
     _require(valid_version, "invalid strategy_version")
     _require(_valid_ns(signal_ns), "invalid signal_ns")
-    _require(leg in LEGS, "invalid leg")
+    _require(leg in ORDER_LEGS, "invalid leg")
     if not isinstance(symbol, str):
         raise TypeError("symbol must be a string")
-    _require(symbol in BYBIT_WIRE_SYMBOLS, "invalid symbol")
+    _require(symbol in ORDER_SYMBOLS, "invalid symbol")
     if not isinstance(side, str):
         raise TypeError("side must be a string")
-    _require(side in SIDES, "invalid side")
+    _require(side in ORDER_SIDES, "invalid side")
     if not isinstance(quantity, Decimal):
         raise TypeError("quantity must be Decimal")
     _require(quantity.is_finite() and quantity > 0, "invalid quantity")
