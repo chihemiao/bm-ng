@@ -5,11 +5,12 @@ from importlib import import_module
 import pytest
 
 from data import schema_order_request
-from data.contracts import validate_envelope
-from data.schema_dispatch import ORDER_STATUSES
+from data.contracts import ContractError, validate_envelope
+from data.schema_dispatch import DURABLE_EVENT_SCHEMAS, ORDER_STATUSES
 from tests.test_contracts import market_event
 
 schema = import_module("data.schema_order_observation")
+shard = import_module("data.shard")
 FIELDS = ("status", "source", "observed_ns", "venue_time_ms")
 SOURCES = ("submission_response", "order_status", "execution_history", "no_venue_response")
 
@@ -17,6 +18,16 @@ SOURCES = ("submission_response", "order_status", "execution_history", "no_venue
 def _payload(source="submission_response", status="open", observed_ns=999, venue_time_ms=None):
     return {"status": status, "source": source, "observed_ns": observed_ns,
             "venue_time_ms": venue_time_ms}
+
+
+def _event():
+    event = market_event()
+    event.update(
+        event_kind="order", payload_schema="order_observation", seq_within_boot=9,
+        identity_status="known", client_order_id="0xclient", venue_order_id="7",
+        payload=_payload(),
+    )
+    return event
 
 
 def _errors(payload=None, **changes):
@@ -130,11 +141,50 @@ def test_bound_errors_accumulate_in_fixed_order_and_gate_cross_field_checks():
     )
 
 
-def test_known_gap_bound_observations_are_not_yet_wired_into_the_envelope():
+def test_bound_observation_errors_are_enforced_by_the_envelope():
     event = market_event()
     event.update(
         event_kind="order", payload_schema="order_observation", seq_within_boot=9,
         identity_status="known", client_order_id="0xclient", venue_order_id="7",
         payload=_payload(status="invented"),
     )
-    assert validate_envelope(event) is event
+    with pytest.raises(ContractError, match="^order_observation:invalid_status$"):
+        validate_envelope(event)
+
+
+def test_bound_observation_requires_a_sequence_in_the_envelope():
+    event = market_event()
+    event.update(
+        event_kind="order", payload_schema="order_observation",
+        identity_status="known", client_order_id="0xclient", venue_order_id="7",
+        payload=_payload(),
+    )
+    with pytest.raises(ContractError, match="^order_observation:partial_binding:sequence$"):
+        validate_envelope(event)
+
+
+def test_order_observation_is_registered_as_durable_evidence():
+    assert "order_observation" in DURABLE_EVENT_SCHEMAS
+
+
+def test_bound_order_observation_uses_the_durable_writer(tmp_path):
+    event = _event()
+    writer = shard.ShardWriter(tmp_path, boot_id="boot-1")
+    writer.append_event(event)
+    writer.close()
+    assert shard.replay_event_window(tmp_path, 0, 2_000).events == (event,)
+
+
+def test_legacy_order_observation_replays_but_cannot_be_appended(tmp_path):
+    legacy = _event()
+    legacy.pop("seq_within_boot")
+    legacy["payload"] = {"raw": "legacy"}
+    writer = shard.ShardWriter(tmp_path, boot_id="boot-1")
+    writer.append(shard.encode_event(legacy), legacy["recv_wall_ns"])
+    writer.close()
+    assert shard.replay_event_window(tmp_path, 0, 2_000).events == (legacy,)
+
+    rejected = shard.ShardWriter(tmp_path / "legacy", boot_id="boot-1")
+    with pytest.raises(ContractError, match="legacy order observation"):
+        rejected.append_event(legacy)
+    rejected.close()

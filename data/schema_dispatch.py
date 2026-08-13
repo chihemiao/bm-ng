@@ -62,7 +62,7 @@ RECONCILIATION_SCHEMAS = frozenset(
     {"account_ledger_entry", "reconciliation_decision", "reconciliation_surface"}
 )
 DURABLE_EVENT_SCHEMAS = RECONCILIATION_SCHEMAS | {
-    "agent_wallet_rotation", "order_request", "writer_authority_promotion",
+    "agent_wallet_rotation", "order_observation", "order_request", "writer_authority_promotion",
     "signer_nonce_allocation", "writer_lease_decision",
 }
 AUTHORIZATION_DENIAL_REASONS = frozenset(

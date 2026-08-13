@@ -17,6 +17,7 @@ from data.contracts import (
     validate_envelope,
     validate_manifest,
 )
+from data.schema_order_observation import order_observation_binding_is_legacy
 
 MANIFEST_NAME = "manifest.jsonl"
 SHARD_DIRECTORY = "shards"
@@ -109,7 +110,11 @@ class ShardWriter:
         encoded = encode_event(event)
         _require(event["payload_schema"] in DURABLE_EVENT_SCHEMAS, "not a durable event")
         legacy = event["payload_schema"] == "order_request" and order_request_is_legacy(event)
-        _require(not legacy, "legacy order request cannot be appended")
+        if event["payload_schema"] == "order_observation":
+            legacy = order_observation_binding_is_legacy(
+                event["payload"], has_sequence="seq_within_boot" in event)
+        message = f"legacy {event['payload_schema'].replace('_', ' ')} cannot be appended"
+        _require(not legacy, message)
         _require(event["boot_id"] == self.boot_id, "event boot differs from writer")
         key = _event_key(event)
         if self._last_event_key is not None:
