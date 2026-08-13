@@ -1,12 +1,20 @@
 import ast
+import http.client
 import inspect
+import json
+import socket
+import threading
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import import_module
+from urllib.request import Request, urlopen
 
 import pytest
 
 from data import replay_order, schema_order_request
+from execution import order_serde
 from execution.orders import (
     ReconciliationEvidence,
     ReplayedDecisionHistory,
@@ -54,6 +62,73 @@ def _replay(root, *events):
 def _binding(venue="hyperliquid", client="0xrequest", oid="7"):
     return shard.OrderBinding(
         venue=venue, client_order_id=client, venue_order_id=oid,
+    )
+
+
+@contextmanager
+def _disconnect_fill_server():
+    truth = {"status": "open", "submission_hits": 0, "status_hits": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            truth["client_order_id"] = request["client_order_id"]
+            truth["submission_hits"] += 1
+            self._send({"status": "open", "observed_ns": 101})
+
+        def do_GET(self):
+            truth["status"] = "filled"
+            truth["status_hits"] += 1
+            body = json.dumps({"status": "filled", "observed_ns": 103}).encode()
+            if truth["status_hits"] == 1:
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body) + 5))
+                self.end_headers()
+                self.wfile.write(body[: len(body) // 2])
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            self._send({"status": "filled", "observed_ns": 103})
+
+        def _send(self, payload):
+            body = json.dumps(payload).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", truth
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def _append_serialized_observation(root, boot_id, sequence, **changes):
+    values = {
+        "venue": "hyperliquid", "client_order_id": "client", "venue_order_id": "7",
+        "status": "open", "observation_source": "submission_response",
+        "observed_ns": 101, "venue_time_ms": None, "conn_id": "local-http",
+        "boot_id": boot_id, "recv_wall_ns": 101 + sequence,
+        "recv_mono_ns": 101 + sequence, "source": "test_adapter",
+        "seq_within_boot": 1,
+    }
+    values.update(changes)
+    writer = shard.ShardWriter(root, boot_id=boot_id)
+    writer.append_event(order_serde.serialize_order_observation(**values))
+    writer.close()
+
+
+def _decision(intent, request, evidence):
+    return decide_submission(
+        intent, evidence, request,
+        ReplayedDecisionHistory(intent.client_order_id, 0, False), 120, 50, 3,
     )
 
 
@@ -238,3 +313,58 @@ def test_explicit_absence_cannot_invent_fill_or_position_query_times(tmp_path):
     )
     history = ReplayedDecisionHistory(intent.client_order_id, 0, False)
     assert decide_submission(intent, evidence, request, history, 120, 50, 3) == "reconcile"
+
+
+def test_real_disconnect_fill_reconciles_without_a_duplicate_submission(tmp_path):
+    intent = make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "hyperliquid",
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+    )
+    request = order_request_record(
+        intent, 100, account_digest="a" * 64, lease_epoch=1,
+        writer_instance_id="writer-one", wallet_fingerprint="b" * 64,
+        allocated_nonce=7,
+    )
+    root = tmp_path / "disconnect-fill"
+    with _disconnect_fill_server() as (base_url, truth):
+        body = json.dumps({"client_order_id": intent.client_order_id}).encode()
+        with urlopen(Request(base_url, data=body, method="POST"), timeout=1) as response:
+            opened = json.load(response)
+        _append_serialized_observation(
+            root, "boot-open", 0, client_order_id=intent.client_order_id,
+            status=opened["status"], observed_ns=opened["observed_ns"],
+        )
+        evidence = _assembled(
+            shard.replay_event_window(root, 0, 200), client=intent.client_order_id,
+        )
+        assert evidence == ReconciliationEvidence("open", 101, None, None)
+        assert _decision(intent, request, evidence) == "hold"
+
+        with pytest.raises(http.client.IncompleteRead):
+            with urlopen(f"{base_url}/orderStatus", timeout=1) as response:
+                response.read()
+        _append_serialized_observation(
+            root, "boot-unknown", 1, client_order_id=intent.client_order_id,
+            venue_order_id=None, status="unknown", observation_source="no_venue_response",
+            observed_ns=102,
+        )
+        unknown = _assembled(
+            shard.replay_event_window(root, 0, 200), client=intent.client_order_id,
+        )
+        assert unknown == ReconciliationEvidence("unknown", None, None, None)
+        assert _decision(intent, request, unknown) == "reconcile"
+
+        with urlopen(f"{base_url}/orderStatus", timeout=1) as response:
+            filled = json.load(response)
+        _append_serialized_observation(
+            root, "boot-filled", 2, client_order_id=intent.client_order_id,
+            status=filled["status"], observation_source="order_status",
+            observed_ns=filled["observed_ns"], venue_time_ms=1,
+        )
+        final = _assembled(
+            shard.replay_event_window(root, 0, 200), client=intent.client_order_id,
+        )
+        assert final == ReconciliationEvidence("filled", 103, None, None)
+        assert _decision(intent, request, final) == "hold"
+        assert truth == {"status": "filled", "submission_hits": 1, "status_hits": 2,
+                         "client_order_id": intent.client_order_id}

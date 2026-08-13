@@ -54,6 +54,40 @@ def test_order_request_serializer_has_one_source_for_venue() -> None:
     )
 
 
+def test_order_observation_serializer_keeps_envelope_and_observation_sources_distinct() -> None:
+    module = _serde()
+    parameters = signature(module.serialize_order_observation).parameters
+    assert tuple(parameters) == (
+        "venue", "client_order_id", "venue_order_id", "status", "observation_source",
+        "observed_ns", "venue_time_ms", "conn_id", "boot_id", "recv_wall_ns",
+        "recv_mono_ns", "source", "seq_within_boot",
+    )
+    assert all(parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters.values())
+    event = module.serialize_order_observation(
+        venue="bybit", client_order_id="startup-client", venue_order_id="order-7",
+        status="filled", observation_source="order_status", observed_ns=119,
+        venue_time_ms=1, conn_id="conn-1", boot_id="boot-1", recv_wall_ns=120,
+        recv_mono_ns=90, source="startup_reconciliation", seq_within_boot=3,
+    )
+    assert validate_envelope(event) is event
+    assert event["source"] == "startup_reconciliation"
+    assert event["payload"] == {
+        "status": "filled", "source": "order_status",
+        "observed_ns": 119, "venue_time_ms": 1,
+    }
+    assert event["client_order_id"] == "startup-client"
+
+
+def test_order_observation_serializer_delegates_invalid_combinations_to_contract() -> None:
+    with pytest.raises(ContractError, match="invalid_combination"):
+        _serde().serialize_order_observation(
+            venue="hyperliquid", client_order_id="client", venue_order_id="7",
+            status="unknown", observation_source="no_venue_response", observed_ns=119,
+            venue_time_ms=None, conn_id="conn-1", boot_id="boot-1", recv_wall_ns=120,
+            recv_mono_ns=90, source="execution", seq_within_boot=3,
+        )
+
+
 @pytest.mark.parametrize(("leg", "quantity"), [("hyperliquid", "1E+2"), ("bybit", "1.0")])
 def test_order_request_serializer_emits_a_valid_complete_event(leg, quantity) -> None:
     intent, request, event = _serialized(leg, quantity)
