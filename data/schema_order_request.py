@@ -128,3 +128,15 @@ def order_request_binding_errors(
     if leg in ORDER_LEGS and leg != venue:
         errors.append(f"order_request:leg_venue_mismatch:{leg}:{venue}")
     return tuple(errors)
+
+
+def order_request_event_binding(
+    event: Mapping[str, object],
+) -> tuple[bool, tuple[str, ...]]:
+    payload = event["payload"]
+    has_sequence = "seq_within_boot" in event
+    return order_request_binding_is_legacy(
+        payload, has_sequence=has_sequence,
+    ), order_request_binding_errors(
+        payload, venue=event.get("venue"), has_sequence=has_sequence,
+    )

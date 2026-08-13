@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from data import schema_order_request
 from data.schema_dispatch import (
     COMMON_FIELDS,
     DURABLE_EVENT_SCHEMAS,
@@ -21,7 +22,6 @@ from data.schema_dispatch import (
     WRITER_DECISIONS,
 )
 from data.schema_nonce import signer_nonce_allocation_errors as _nonce_errors
-from data.schema_order_request import order_request_binding_errors, order_request_binding_is_legacy
 from data.schema_wallet import wallet_rotation_semantic_errors as _wallet_errors
 
 
@@ -270,11 +270,7 @@ def _validate_order_identity(event: dict[str, Any]) -> None:
 
 
 def order_request_is_legacy(event: dict[str, Any]) -> bool:
-    payload = event["payload"]
-    has_sequence = "seq_within_boot" in event
-    legacy = order_request_binding_is_legacy(payload, has_sequence=has_sequence)
-    errors = order_request_binding_errors(
-        payload, venue=event.get("venue"), has_sequence=has_sequence)
+    legacy, errors = schema_order_request.order_request_event_binding(event)
     _require(not errors, errors[0] if errors else "")
     return legacy
 
