@@ -216,9 +216,16 @@ def test_order_request_serializer_emits_a_valid_complete_event(leg, quantity) ->
     assert "client_order_id" not in event["payload"]
 
 
-def test_serialize_rejects_an_intent_record_mismatch() -> None:
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"leg": "bybit"}, {"symbol": "ETH"},
+        {"side": "sell"}, {"quantity": Decimal("2")},
+    ],
+)
+def test_serialize_rejects_an_intent_record_mismatch(changes) -> None:
     intent, _, _ = _serialized()
-    wrong = _request(_intent(leg="bybit"))
+    wrong = _request(_intent(**changes))
     with pytest.raises(OrderContractError, match="record"):
         _serde().serialize_order_request(
             intent, wrong, conn_id="conn-1", boot_id="boot-1",
