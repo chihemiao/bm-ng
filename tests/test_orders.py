@@ -1,5 +1,7 @@
 import re
+from decimal import Decimal, localcontext
 from importlib import import_module
+from inspect import Parameter, signature
 
 import pytest
 
@@ -21,6 +23,9 @@ def _intent(**changes):
         "strategy_version": "git-deadbeef",
         "signal_ns": 100,
         "leg": "hyperliquid",
+        "symbol": "BTC",
+        "side": "buy",
+        "quantity": Decimal("1"),
     }
     values.update(changes)
     return make_order_intent(**values)
@@ -94,15 +99,59 @@ def test_client_order_id_is_cross_venue_and_binds_the_intent() -> None:
     intent = _intent()
     assert re.fullmatch(r"0x[0-9a-f]{32}", intent.client_order_id)
     assert _intent() == intent
+    assert (intent.symbol, intent.side, intent.quantity) == ("BTC", "buy", Decimal("1"))
 
     variants = {
         _intent(strategy_id="other").client_order_id,
         _intent(strategy_version="git-cafebabe").client_order_id,
         _intent(signal_ns=101).client_order_id,
         _intent(leg="bybit").client_order_id,
+        _intent(symbol="ETH").client_order_id,
+        _intent(side="sell").client_order_id,
+        _intent(quantity=Decimal("2")).client_order_id,
     }
     assert intent.client_order_id not in variants
-    assert len(variants) == 4
+    assert len(variants) == 7
+
+
+def test_order_quantity_identity_is_numeric_not_representational() -> None:
+    ids = {_intent(quantity=Decimal(value)).client_order_id for value in ("1", "1.0", "1E0")}
+    assert ids == {_intent().client_order_id}
+
+
+def test_order_quantity_identity_is_decimal_context_independent() -> None:
+    quantity = Decimal("123456789.123456789")
+    expected = _intent(quantity=quantity).client_order_id
+    with localcontext() as context:
+        context.prec = 5
+        assert _intent(quantity=quantity).client_order_id == expected
+
+
+def test_extreme_exponent_identity_is_bounded_and_numeric() -> None:
+    values = ("1E999999999", "10E999999998")
+    ids = {_intent(quantity=Decimal(value)).client_order_id for value in values}
+    assert len(ids) == 1 and re.fullmatch(r"0x[0-9a-f]{32}", ids.pop())
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"symbol": "SOL"}, ValueError), ({"symbol": 1}, TypeError),
+        ({"side": "long"}, ValueError), ({"side": 1}, TypeError),
+        ({"quantity": 1}, TypeError), ({"quantity": Decimal("NaN")}, ValueError),
+        ({"quantity": Decimal("Infinity")}, ValueError),
+        ({"quantity": Decimal("0")}, ValueError), ({"quantity": Decimal("-1")}, ValueError),
+    ],
+)
+def test_order_intent_rejects_invalid_trade_terms(changes, error) -> None:
+    with pytest.raises(error):
+        _intent(**changes)
+
+
+def test_new_order_trade_terms_are_required() -> None:
+    parameters = signature(make_order_intent).parameters
+    names = ("symbol", "side", "quantity")
+    assert all(parameters[name].default is Parameter.empty for name in names)
 
 
 def test_request_record_must_exist_and_match_before_submit() -> None:
@@ -320,15 +369,23 @@ def test_only_authoritative_absence_can_reject_or_submit_a_stale_signal() -> Non
 
 def test_replacement_requires_complete_cancelled_or_rejected_evidence() -> None:
     intent = _intent()
-    replacement = replacement_intent(intent, _evidence("cancelled"))
+    replacement = replacement_intent(intent, _evidence("cancelled"), quantity=Decimal("2"))
     assert replacement.replacement_ordinal == 1
     assert replacement.client_order_id != intent.client_order_id
+    assert (replacement.symbol, replacement.side) == (intent.symbol, intent.side)
+    assert replacement.quantity == Decimal("2")
+    parameters = signature(replacement_intent).parameters
+    assert set(parameters) == {"previous", "evidence", "quantity"}
+    assert parameters["quantity"].kind is Parameter.KEYWORD_ONLY
+    assert parameters["quantity"].default is Parameter.empty
+    with pytest.raises(TypeError):
+        replacement_intent(intent, _evidence("cancelled"))
 
     for status in ("pending", "unknown", "open", "partially_filled", "filled"):
         with pytest.raises(OrderContractError, match="not replaceable"):
-            replacement_intent(intent, _evidence(status))
+            replacement_intent(intent, _evidence(status), quantity=Decimal("1"))
     with pytest.raises(OrderContractError, match="authoritative terminal evidence"):
-        replacement_intent(intent, _evidence("rejected", fills_ns=None))
+        replacement_intent(intent, _evidence("rejected", fills_ns=None), quantity=Decimal("1"))
 
 
 def test_structural_invalidity_fails_closed() -> None:

@@ -4,7 +4,9 @@ import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 
+from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
 from data.schema_nonce import signer_nonce_window_bounds
 from data.schema_order_request import order_request_binding_errors
 from execution.nonce import NonceAllocator
@@ -14,6 +16,7 @@ ORDER_STATUSES = frozenset(
     {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
 )
 LEGS = frozenset({"hyperliquid", "bybit"})
+SIDES = frozenset({"buy", "sell"})
 REPLACEABLE_STATUSES = frozenset({"cancelled", "rejected"})
 HOLD_STATUSES = frozenset({"open", "partially_filled", "filled", "cancelled", "rejected"})
 INTENT_FIELDS = ("strategy_id", "strategy_version", "signal_ns", "leg", "replacement_ordinal")
@@ -29,6 +32,9 @@ class OrderIntent:
     strategy_version: str
     signal_ns: int
     leg: str
+    symbol: str
+    side: str
+    quantity: Decimal
     replacement_ordinal: int
     client_order_id: str
 
@@ -105,38 +111,67 @@ def _validate_request_binding(
 
 
 def _client_order_id(
-    strategy_id: str, strategy_version: str, signal_ns: int, leg: str, ordinal: int
+    strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
+    symbol: str, side: str, quantity: Decimal, ordinal: int,
 ) -> str:
-    identity = [strategy_id, strategy_version, signal_ns, leg, ordinal]
+    # Venue evidence preserves raw strings; our identity is numeric and context-independent.
+    sign, digits, exponent = quantity.as_tuple()
+    coefficient = list(digits)
+    while coefficient[-1] == 0:
+        coefficient.pop()
+        exponent += 1
+    canonical_quantity = [sign, "".join(map(str, coefficient)), exponent]
+    identity = [
+        strategy_id, strategy_version, signal_ns, leg,
+        symbol, side, canonical_quantity, ordinal,
+    ]
     payload = json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()
     digest = hashlib.blake2s(payload, digest_size=16, person=b"hlcarry").hexdigest()
     return f"0x{digest}"
 
 
 def _make_intent(
-    strategy_id: str, strategy_version: str, signal_ns: int, leg: str, ordinal: int
+    strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
+    symbol: str, side: str, quantity: Decimal, ordinal: int,
 ) -> OrderIntent:
     _require(isinstance(strategy_id, str) and bool(strategy_id), "invalid strategy_id")
     valid_version = isinstance(strategy_version, str) and bool(strategy_version)
     _require(valid_version, "invalid strategy_version")
     _require(_valid_ns(signal_ns), "invalid signal_ns")
     _require(leg in LEGS, "invalid leg")
+    if not isinstance(symbol, str):
+        raise TypeError("symbol must be a string")
+    _require(symbol in BYBIT_WIRE_SYMBOLS, "invalid symbol")
+    if not isinstance(side, str):
+        raise TypeError("side must be a string")
+    _require(side in SIDES, "invalid side")
+    if not isinstance(quantity, Decimal):
+        raise TypeError("quantity must be Decimal")
+    _require(quantity.is_finite() and quantity > 0, "invalid quantity")
     _require(_valid_ns(ordinal), "invalid replacement_ordinal")
-    client_order_id = _client_order_id(strategy_id, strategy_version, signal_ns, leg, ordinal)
-    return OrderIntent(strategy_id, strategy_version, signal_ns, leg, ordinal, client_order_id)
+    client_order_id = _client_order_id(
+        strategy_id, strategy_version, signal_ns, leg, symbol, side, quantity, ordinal,
+    )
+    return OrderIntent(
+        strategy_id, strategy_version, signal_ns, leg,
+        symbol, side, quantity, ordinal, client_order_id,
+    )
 
 
 def make_order_intent(
-    strategy_id: str, strategy_version: str, signal_ns: int, leg: str
+    strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
+    *, symbol: str, side: str, quantity: Decimal,
 ) -> OrderIntent:
-    return _make_intent(strategy_id, strategy_version, signal_ns, leg, 0)
+    return _make_intent(
+        strategy_id, strategy_version, signal_ns, leg, symbol, side, quantity, 0,
+    )
 
 
 def _validate_intent(intent: OrderIntent) -> None:
     _require(isinstance(intent, OrderIntent), "invalid intent")
     expected = _make_intent(*(
         intent.strategy_id, intent.strategy_version, intent.signal_ns,
-        intent.leg, intent.replacement_ordinal,
+        intent.leg, intent.symbol, intent.side, intent.quantity, intent.replacement_ordinal,
     ))
     _require(intent.client_order_id == expected.client_order_id, "invalid client_order_id")
 
@@ -336,7 +371,7 @@ def submit_order(
 
 
 def replacement_intent(
-    previous: OrderIntent, evidence: ReconciliationEvidence
+    previous: OrderIntent, evidence: ReconciliationEvidence, *, quantity: Decimal,
 ) -> OrderIntent:
     _validate_intent(previous)
     _validate_evidence(evidence)
@@ -345,5 +380,7 @@ def replacement_intent(
         _authoritative_after(previous, evidence),
         "authoritative terminal evidence required",
     )
-    values = [getattr(previous, field) for field in INTENT_FIELDS[:-1]]
-    return _make_intent(*values, previous.replacement_ordinal + 1)
+    return _make_intent(
+        previous.strategy_id, previous.strategy_version, previous.signal_ns, previous.leg,
+        previous.symbol, previous.side, quantity, previous.replacement_ordinal + 1,
+    )
