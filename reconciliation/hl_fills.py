@@ -6,6 +6,8 @@ from decimal import Decimal, InvalidOperation
 
 from data.replay_order import OrderBinding
 from data.schema_dispatch import ORDER_SIDES
+from data.shard import EventReplay
+from execution.orders import OrderIntent
 from reconciliation.hl_common import COINS, _fingerprint, _valid_observed_ns
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
@@ -175,3 +177,41 @@ def build_hl_filled_quantity(
             signed += Decimal(row["sz"]) * (1 if row["side"] == "B" else -1)
     aligned = signed * (1 if intended_side == "buy" else -1)
     return HLFilledQuantity(aligned if aligned >= 0 else None, evidence)
+
+
+def build_replayed_hl_filled_quantity(
+    replay: EventReplay,
+    pages: Sequence[list[object]],
+    *,
+    intent: OrderIntent,
+    since_ms: int,
+    skew_allowance_ms: int,
+    observed_ns: int,
+    page_complete: bool,
+    truncated: bool,
+) -> HLFilledQuantity | None:
+    """Own replay/intent validation; fill inputs validate only when aggregation runs.
+
+    Frozen read-only callers must call ``hl_order_ids`` separately with the
+    same intent.client_order_id; this decision path never aggregates frozen ids.
+    """
+    if type(replay) is not EventReplay:
+        raise TypeError("replay must be an EventReplay")
+    if not isinstance(intent, OrderIntent):
+        raise TypeError("intent must be an OrderIntent")
+    if intent.leg != "hyperliquid":
+        raise ValueError("intent must be for hyperliquid")
+    oids = hl_order_ids(replay.order_bindings, client_order_id=intent.client_order_id)
+    if replay.freeze_reasons or oids is None:
+        return None
+    return build_hl_filled_quantity(
+        pages,
+        coin=intent.symbol,
+        intended_side=intent.side,
+        oids=oids,
+        since_ms=since_ms,
+        skew_allowance_ms=skew_allowance_ms,
+        observed_ns=observed_ns,
+        page_complete=page_complete,
+        truncated=truncated,
+    )
