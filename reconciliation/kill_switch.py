@@ -29,16 +29,18 @@ class KillSwitchDecision:
 
 def decide_kill_switch(
     *, triggered: bool, orders_known: bool, positions_known: bool,
+    reconciliation_consistent: bool,
 ) -> KillSwitchDecision:
     """Choose a stop action without flattening through unknown venue state."""
     for name, value in (
         ("triggered", triggered),
         ("orders_known", orders_known),
         ("positions_known", positions_known),
+        ("reconciliation_consistent", reconciliation_consistent),
     ):
         if type(value) is not bool:
             raise TypeError(f"{name} must be a boolean")
-    if not orders_known or not positions_known:
+    if not orders_known or not positions_known or not reconciliation_consistent:
         return KillSwitchDecision("cancel_only_freeze")
     action = "flatten_and_stop" if triggered else "continue"
     return KillSwitchDecision(action)
