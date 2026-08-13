@@ -1,6 +1,5 @@
 import ast
 import inspect
-import textwrap
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -110,19 +109,15 @@ def _request(runtime, intent, **changes):
 
 def _count_allocations(runtime) -> CountingNonceAllocator:
     allocator = runtime[1]
-    allocator.__class__ = CountingNonceAllocator
-    allocator.allocate_calls = 0
+    allocator.__class__, allocator.allocate_calls = CountingNonceAllocator, 0
     return allocator
 
 
 def test_submission_module_owns_the_shared_order_orchestration() -> None:
-    source = textwrap.dedent(inspect.getsource(submission.submit_order))
-    calls = {
-        node.func.id for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert submission._require is orders._require
-    assert not hasattr(orders, "submit_order")
+    tree = ast.parse(inspect.getsource(submission.submit_order))
+    calls = {node.func.id for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    assert submission._require is orders._require and not hasattr(orders, "submit_order")
     assert {"decide_submission", "order_request_record"} <= calls
 
 
