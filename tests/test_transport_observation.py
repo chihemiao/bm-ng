@@ -76,6 +76,7 @@ def test_observer_surface_is_typed_and_success_is_durable_and_opaque(tmp_path, s
     assert tuple(f.name for f in fields(submission.ObservedFields)) == (
         "venue_order_id", "status", "observation_source", "venue_time_ms")
     assert submission.ObservedFields.__dataclass_params__.frozen
+    assert submission.ObservedFields.__slots__
     with pytest.raises(TypeError):
         submission.ObservedFields("7", "open", "submission_response", None)
     writer = shard.ShardWriter(tmp_path, boot_id="boot-1")
