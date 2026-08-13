@@ -241,25 +241,32 @@ def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> Non
 
 
 @pytest.mark.parametrize(
-    ("triggered", "orders_known", "positions_known", "action"),
+    (
+        "triggered", "orders_known", "positions_known",
+        "reconciliation_consistent", "action",
+    ),
     [
-        (False, True, True, "continue"),
-        (True, True, True, "flatten_and_stop"),
-        (False, False, True, "cancel_only_freeze"),
-        (True, False, True, "cancel_only_freeze"),
-        (False, True, False, "cancel_only_freeze"),
-        (True, True, False, "cancel_only_freeze"),
-        (False, False, False, "cancel_only_freeze"),
-        (True, False, False, "cancel_only_freeze"),
+        (triggered, orders_known, positions_known, reconciliation_consistent,
+         "flatten_and_stop" if all((
+             triggered, orders_known, positions_known, reconciliation_consistent,
+         )) else "continue" if all((
+             orders_known, positions_known, reconciliation_consistent,
+         )) else "cancel_only_freeze")
+        for triggered in (False, True)
+        for orders_known in (False, True)
+        for positions_known in (False, True)
+        for reconciliation_consistent in (False, True)
     ],
 )
 def test_kill_switch_decision_table(
-    triggered: bool, orders_known: bool, positions_known: bool, action: str,
+    triggered: bool, orders_known: bool, positions_known: bool,
+    reconciliation_consistent: bool, action: str,
 ) -> None:
     assert decide_kill_switch(
         triggered=triggered,
         orders_known=orders_known,
         positions_known=positions_known,
+        reconciliation_consistent=reconciliation_consistent,
     ) == KillSwitchDecision(action)
 
 
@@ -269,10 +276,16 @@ def test_kill_switch_decision_table(
         ("triggered", 1), ("triggered", None),
         ("orders_known", 1), ("orders_known", None),
         ("positions_known", 1), ("positions_known", None),
+        ("reconciliation_consistent", 1), ("reconciliation_consistent", None),
     ],
 )
 def test_kill_switch_decision_requires_exact_booleans(field, value) -> None:
-    values = {"triggered": False, "orders_known": True, "positions_known": True}
+    values = {
+        "triggered": False,
+        "orders_known": True,
+        "positions_known": True,
+        "reconciliation_consistent": True,
+    }
     values[field] = value
     with pytest.raises(TypeError, match=field):
         decide_kill_switch(**values)
@@ -291,7 +304,9 @@ def test_kill_switch_decision_has_one_frozen_closed_action() -> None:
         KillSwitchDecision("partial_flatten")
 
     signature = inspect.signature(decide_kill_switch)
-    assert tuple(signature.parameters) == ("triggered", "orders_known", "positions_known")
+    assert tuple(signature.parameters) == (
+        "triggered", "orders_known", "positions_known", "reconciliation_consistent",
+    )
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
         for parameter in signature.parameters.values()
