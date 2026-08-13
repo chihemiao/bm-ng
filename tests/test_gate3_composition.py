@@ -77,6 +77,18 @@ def _ack_loss_server():
         thread.join()
 
 
+def _order_status_event(observed):
+    return {
+        "schema_ver": 1, "event_kind": "order", "payload_schema": "order_observation",
+        "venue": "hyperliquid", "conn_id": "local-http", "boot_id": "boot-observation",
+        "recv_wall_ns": 112, "recv_mono_ns": 112, "source": "order_status",
+        "seq_within_boot": 1, "identity_status": "known",
+        "client_order_id": observed["client_order_id"], "venue_order_id": "7",
+        "payload": {"status": observed["status"], "source": "order_status",
+                    "observed_ns": observed["observed_ns"], "venue_time_ms": 1},
+    }
+
+
 def _continuous_inputs(**changes: object) -> dict[str, object]:
     values = {
         "exposure": ExposureClock("flat", 100, None, False),
@@ -269,15 +281,7 @@ def test_real_ack_loss_never_retransports_before_venue_truth_catches_up(
         with urlopen(f"{base_url}/orderStatus", timeout=1) as response:
             observed = json.load(response)
         observation_writer = shard.ShardWriter(event_root, boot_id="boot-observation")
-        observation_writer.append_event({
-            "schema_ver": 1, "event_kind": "order", "payload_schema": "order_observation",
-            "venue": "hyperliquid", "conn_id": "local-http", "boot_id": "boot-observation",
-            "recv_wall_ns": 112, "recv_mono_ns": 112, "source": "order_status",
-            "seq_within_boot": 1, "identity_status": "known",
-            "client_order_id": observed["client_order_id"], "venue_order_id": "7",
-            "payload": {"status": observed["status"], "source": "order_status",
-                        "observed_ns": observed["observed_ns"], "venue_time_ms": 1},
-        })
+        observation_writer.append_event(_order_status_event(observed))
         observation_writer.close()
         replay = shard.replay_event_window(event_root, 0, 200)
         filled = build_order_reconciliation_evidence(
