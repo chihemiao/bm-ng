@@ -154,6 +154,10 @@ def test_one_bybit_oid_bound_to_multiple_clients_freezes_without_int_coercion(tm
 
 
 def test_order_evidence_assembler_requires_a_replay_and_named_identity(tmp_path):
+    class ReplayLike:
+        events = ()
+        freeze_reasons = ()
+
     parameters = inspect.signature(build_order_reconciliation_evidence).parameters
     assert tuple(parameters) == ("replay", "client_order_id", "venue")
     assert all(parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
@@ -161,11 +165,15 @@ def test_order_evidence_assembler_requires_a_replay_and_named_identity(tmp_path)
     replay = _replay(tmp_path, _observation(1))
     with pytest.raises(TypeError, match="replay"):
         _assembled(object())
+    with pytest.raises(TypeError, match="replay"):
+        _assembled(ReplayLike())
     with pytest.raises(TypeError, match="client_order_id"):
         _assembled(replay, client=1)
     with pytest.raises(ValueError, match="client_order_id"):
         _assembled(replay, client="")
-    with pytest.raises((TypeError, ValueError), match="venue"):
+    with pytest.raises(TypeError, match="venue"):
+        _assembled(replay, venue=1)
+    with pytest.raises(ValueError, match="venue"):
         _assembled(replay, venue="invented")
 
 
