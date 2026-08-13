@@ -1,6 +1,6 @@
-"""Normalize documented Bybit position responses into reconciliation evidence."""
+"""Normalize documented Bybit REST responses into reconciliation evidence."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
@@ -14,6 +14,8 @@ RESPONSE_FIELDS = frozenset({"retCode", "retMsg", "result", "retExtInfo", "time"
 RESULT_FIELDS = frozenset({"category", "nextPageCursor", "list"})
 IDENTITY_SCHEME = "bybit.positions.identity"
 STATE_SCHEME = "bybit.positions.state"
+FILL_FIELDS = frozenset(
+    {"symbol", "orderLinkId", "side", "execId", "execQty", "execType", "execTime"})
 
 
 def _validate_inputs(payload: object, symbol: object, observed_ns: object) -> Mapping:
@@ -21,10 +23,9 @@ def _validate_inputs(payload: object, symbol: object, observed_ns: object) -> Ma
         raise TypeError("symbol must be a string")
     if symbol not in BYBIT_WIRE_SYMBOLS:
         raise ValueError("symbol must be BTC or ETH")
-    if type(observed_ns) is not int:
-        raise TypeError("observed_ns must be an integer")
-    if observed_ns <= 0:
-        raise ValueError("observed_ns must be positive")
+    if type(observed_ns) is not int or observed_ns <= 0:
+        error = TypeError if type(observed_ns) is not int else ValueError
+        raise error("observed_ns must be a positive integer")
     if not isinstance(payload, Mapping):
         raise TypeError("payload must be a mapping")
     return payload
@@ -138,3 +139,78 @@ def build_bybit_leg_position(
             quantity = signed_quantity
             break
     return LegPosition("bybit", symbol, quantity, evidence)
+
+
+def _execution_row(row: object) -> tuple[str, str] | None:
+    if not isinstance(row, Mapping) or not FILL_FIELDS <= set(row):
+        return None
+    symbol, link, side = row["symbol"], row["orderLinkId"], row["side"]
+    exec_id, quantity, exec_time = row["execId"], row["execQty"], row["execTime"]
+    valid = symbol in BYBIT_WIRE_SYMBOLS.values() and isinstance(link, str)
+    valid &= isinstance(side, str) and side in {"Buy", "Sell"}
+    valid &= isinstance(exec_id, str) and bool(exec_id)
+    canonical_time = isinstance(exec_time, str) and exec_time.isascii() and exec_time.isdecimal()
+    canonical_time = canonical_time and (exec_time == "0" or not exec_time.startswith("0"))
+    if not valid or not canonical_time or not isinstance(quantity, str) or not quantity:
+        return None
+    try:
+        parsed_quantity = Decimal(quantity)
+    except InvalidOperation:
+        return None
+    if not parsed_quantity.is_finite() or parsed_quantity < 0:
+        return None
+    try:
+        return _fingerprint(row), _fingerprint({"symbol": symbol, "execId": exec_id})
+    except (TypeError, ValueError):
+        return None
+
+
+def _fill_results(pages: object, observed_ns: object) -> list[Mapping]:
+    if not isinstance(pages, Sequence) or isinstance(pages, (str, bytes)):
+        raise TypeError("pages must be a sequence")
+    if not pages:
+        raise ValueError("pages must not be empty")
+    if not all(isinstance(page, Mapping) for page in pages):
+        raise TypeError("pages must contain mappings")
+    if type(observed_ns) is not int or observed_ns <= 0:
+        error = TypeError if type(observed_ns) is not int else ValueError
+        raise error("observed_ns must be a positive integer")
+    results = [_result(page) for page in pages]
+    for result in results:
+        if result["category"] != "linear":
+            raise ValueError("category must be linear")
+        if not isinstance(result["nextPageCursor"], str):
+            raise TypeError("nextPageCursor must be a string")
+        if type(result["list"]) is not list:
+            raise TypeError("list must be a list")
+    if any(not result["nextPageCursor"] for result in results[:-1]):
+        raise ValueError("non-terminal page has an empty cursor")
+    return results
+
+
+def parse_bybit_fills_surface(
+    pages: Sequence[Mapping[str, object]], *, observed_ns: int) -> SurfaceEvidence:
+    """Parse REST Trade executions; paginator cursor-chain proof remains external."""
+    results = _fill_results(pages, observed_ns)
+    states: dict[str, str] = {}
+    unknown = mismatch = 0
+    for row in (row for result in results for row in result["list"]):
+        if isinstance(row, Mapping) and isinstance(row.get("execType"), str) \
+                and row["execType"] != "Trade":
+            continue
+        parsed = _execution_row(row)
+        if parsed is None:
+            unknown += 1
+            continue
+        state, identity = parsed
+        previous = states.get(identity)
+        if previous is not None:
+            mismatch += previous != state
+            continue
+        states[identity] = state
+    cursor = results[-1]["nextPageCursor"]
+    return SurfaceEvidence(
+        observed_ns, len(states) + unknown, not cursor, bool(cursor), unknown, mismatch,
+        CanonicalSet("bybit.fills.state", 1, frozenset(states.values())),
+        CanonicalSet("bybit.fills.identity", 1, frozenset(states)),
+    )
