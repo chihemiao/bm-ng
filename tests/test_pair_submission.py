@@ -8,16 +8,8 @@ from urllib.request import Request, urlopen
 import pytest
 
 from execution.nonce import NonceAllocator, SignerFence
-from execution.orders import (
-    ReconciliationEvidence,
-    ReplayedDecisionHistory,
-    make_t0a_pair_intents,
-)
-from execution.submission import (
-    PairLegSubmissionInputs,
-    PairSubmissionOutcome,
-    submit_t0a_pair,
-)
+from execution.orders import ReconciliationEvidence, ReplayedDecisionHistory, make_t0a_pair_intents
+from execution.submission import PairLegSubmissionInputs, PairSubmissionOutcome, submit_t0a_pair
 from execution.writer import WriterIdentity, WriterLease
 
 WALLET = "b" * 64
@@ -133,7 +125,8 @@ def test_each_real_transport_failure_is_returned_without_skipping_the_other_leg(
         ("bybit", bybit_path, ("persist", b"bybit")),
     ):
         expected = errors[leg][0] if path == "/drop" else success
-        assert getattr(result, leg) is expected if path == "/drop" else getattr(result, leg) == expected
+        actual = getattr(result, leg)
+        assert actual is expected if path == "/drop" else actual == expected
 
 
 @pytest.mark.parametrize(
@@ -149,10 +142,9 @@ def test_invalid_pair_fails_before_either_leg_is_called(runtime, server, pair):
 
 
 def test_non_transport_decisions_remain_independent_leg_outcomes(runtime):
-    fail = lambda _request: pytest.fail("hold must not transport")
     result = _submit(
-        runtime, _leg(PAIR.hyperliquid, fail, status="open"),
-        _leg(PAIR.bybit, fail, status="partially_filled"), [].append,
+        runtime, _leg(PAIR.hyperliquid, pytest.fail, status="open"),
+        _leg(PAIR.bybit, pytest.fail, status="partially_filled"), [].append,
     )
     assert result == PairSubmissionOutcome(
         hyperliquid=("hold", None), bybit=("hold", None)
