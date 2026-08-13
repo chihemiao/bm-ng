@@ -1,6 +1,10 @@
+import ast
 import hashlib
 import importlib
+import inspect
 import json
+import textwrap
+from decimal import Decimal
 
 import pytest
 
@@ -17,6 +21,18 @@ def _parse_fills(pages, *, observed_ns=100, page_complete=True, truncated=False)
     return module.parse_fills_surface(
         pages, observed_ns=observed_ns, page_complete=page_complete, truncated=truncated
     )
+
+
+def _build_fills(pages, **changes):
+    values = {
+        "coin": "BTC", "intended_side": "buy",
+        "oids": frozenset({FILL["oid"]}), "since_ms": FILL["time"],
+        "skew_allowance_ms": 0, "observed_ns": 100,
+        "page_complete": True, "truncated": False,
+    }
+    values.update(changes)
+    module = importlib.import_module("reconciliation.hl_fills")
+    return module.build_hl_filled_quantity(pages, **values)
 
 
 def _fingerprint(value):
@@ -119,3 +135,124 @@ def test_fill_observation_time_must_be_a_positive_integer(observed_ns):
     error = TypeError if observed_ns is True else ValueError
     with pytest.raises(error, match="observed_ns"):
         _parse_fills([[]], observed_ns=observed_ns)
+
+
+def test_target_order_builds_quantity_and_evidence_from_one_snapshot():
+    module = importlib.import_module("reconciliation.hl_fills")
+    result = _build_fills([[FILL]], observed_ns=321)
+
+    assert isinstance(result, module.HLFilledQuantity)
+    assert result.quantity == Decimal("1")
+    assert result.evidence == module.parse_fills_surface(
+        [[FILL]], observed_ns=321, page_complete=True, truncated=False
+    )
+
+
+def test_coin_and_order_ids_jointly_bound_the_quantity_not_the_evidence():
+    rows = [
+        FILL,
+        {**FILL, "coin": "ETH", "sz": "10", "tid": 2},
+        {**FILL, "oid": 7, "sz": "10", "tid": 3},
+    ]
+    result = _build_fills([rows])
+
+    assert result.quantity == Decimal("1")
+    assert result.evidence.fetched_count == 3
+
+
+def test_duplicate_fill_across_pages_is_not_counted_twice():
+    assert _build_fills([[FILL], [FILL]]).quantity == Decimal("1")
+
+
+def test_exchange_time_window_is_inclusive_with_explicit_skew_allowance():
+    at_boundary = {**FILL, "time": 100, "tid": 1}
+    too_early = {**FILL, "time": 99, "tid": 2}
+    result = _build_fills(
+        [[at_boundary, too_early]], since_ms=105, skew_allowance_ms=5
+    )
+
+    assert result.quantity == Decimal("1")
+    assert result.evidence.fetched_count == 2
+
+
+@pytest.mark.parametrize(
+    "intended_side,first_side,second_side",
+    [("buy", "B", "A"), ("sell", "A", "B")],
+)
+def test_mixed_sides_return_net_quantity_aligned_to_the_intent(
+    intended_side, first_side, second_side
+):
+    rows = [
+        {**FILL, "side": first_side, "sz": "0.6", "tid": 1},
+        {**FILL, "side": second_side, "sz": "0.2", "tid": 2},
+    ]
+    assert _build_fills([[*rows]], intended_side=intended_side).quantity == Decimal("0.4")
+
+
+def test_net_movement_opposite_the_intent_is_unknown_not_zero_or_absolute():
+    rows = [
+        {**FILL, "side": "B", "sz": "0.2", "tid": 1},
+        {**FILL, "side": "A", "sz": "0.6", "tid": 2},
+    ]
+    assert _build_fills([rows]).quantity is None
+
+
+def test_bad_non_target_coin_row_still_makes_whole_evidence_non_authoritative():
+    result = _build_fills([[FILL, {**FILL, "coin": "SOL", "tid": 2}]])
+
+    assert result.quantity == Decimal("1")
+    assert result.evidence.unknown_count == 1
+
+
+def test_empty_order_id_set_is_authoritative_zero_when_surface_is_complete():
+    assert _build_fills([[FILL]], oids=frozenset()).quantity == Decimal(0)
+
+
+def test_decimal_sizes_are_summed_without_binary_float_conversion():
+    rows = [
+        {**FILL, "sz": "0.1", "tid": 1},
+        {**FILL, "sz": "0.2", "tid": 2},
+    ]
+    assert _build_fills([rows]).quantity == Decimal("0.3")
+
+
+@pytest.mark.parametrize("change", [{"side": "buy"}, {"oid": True}, {"oid": -1}])
+def test_fill_direction_and_order_id_must_match_documented_wire_values(change):
+    evidence = _parse_fills([[{**FILL, **change}]])
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize("change", [{"coin": []}, {"side": []}])
+def test_unhashable_fill_wire_values_are_unknown_not_parser_errors(change):
+    assert _parse_fills([[{**FILL, **change}]]).unknown_count == 1
+
+
+@pytest.mark.parametrize(
+    "changes,error,match",
+    [
+        ({"coin": None}, TypeError, "coin"), ({"coin": "SOL"}, ValueError, "coin"),
+        ({"intended_side": "B"}, ValueError, "intended_side"),
+        ({"oids": {1}}, TypeError, "oids"),
+        ({"oids": frozenset({True})}, TypeError, "oids"),
+        ({"since_ms": True}, TypeError, "since_ms"),
+        ({"since_ms": -1}, ValueError, "since_ms"),
+        ({"skew_allowance_ms": True}, TypeError, "skew_allowance_ms"),
+        ({"skew_allowance_ms": -1}, ValueError, "skew_allowance_ms"),
+    ],
+)
+def test_fill_quantity_boundaries_reject_ambiguous_inputs(changes, error, match):
+    with pytest.raises(error, match=match):
+        _build_fills([[FILL]], **changes)
+
+
+def test_fill_quantity_signature_and_shared_parser_boundary_are_pinned():
+    module = importlib.import_module("reconciliation.hl_fills")
+    function = module.build_hl_filled_quantity
+    assert tuple(inspect.signature(function).parameters) == (
+        "pages", "coin", "intended_side", "oids", "since_ms", "skew_allowance_ms",
+        "observed_ns", "page_complete", "truncated",
+    )
+    source = textwrap.dedent(inspect.getsource(function))
+    calls = [node.func.id for node in ast.walk(ast.parse(source))
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
+    assert "parse_fills_surface" in calls
