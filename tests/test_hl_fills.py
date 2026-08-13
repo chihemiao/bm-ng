@@ -8,6 +8,8 @@ from decimal import Decimal
 
 import pytest
 
+from data.replay_order import OrderBinding
+
 FILL = {
     "closedPnl": "0.0", "coin": "BTC", "crossed": False, "dir": "Open Long",
     "hash": "0xabc", "oid": 90542681, "px": "18.435", "side": "B",
@@ -33,6 +35,19 @@ def _build_fills(pages, **changes):
     values.update(changes)
     module = importlib.import_module("reconciliation.hl_fills")
     return module.build_hl_filled_quantity(pages, **values)
+
+
+def _binding(*, venue="hyperliquid", client_order_id="client-1", venue_order_id="7"):
+    return OrderBinding(
+        venue=venue,
+        client_order_id=client_order_id,
+        venue_order_id=venue_order_id,
+    )
+
+
+def _hl_order_ids(bindings, *, client_order_id="client-1"):
+    module = importlib.import_module("reconciliation.hl_fills")
+    return module.hl_order_ids(bindings, client_order_id=client_order_id)
 
 
 def _fingerprint(value):
@@ -256,3 +271,74 @@ def test_fill_quantity_signature_and_shared_parser_boundary_are_pinned():
     calls = [node.func.id for node in ast.walk(ast.parse(source))
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
     assert "parse_fills_surface" in calls
+
+
+@pytest.mark.parametrize(
+    "wire_oid,expected",
+    [("0", 0), ("90542681", 90542681), (str(2**64 - 1), 2**64 - 1)],
+)
+def test_hl_order_ids_accept_canonical_uint64_decimal(wire_oid, expected):
+    assert _hl_order_ids((_binding(venue_order_id=wire_oid),)) == frozenset({expected})
+
+
+def test_hl_order_ids_return_every_distinct_binding_for_the_client():
+    bindings = (
+        _binding(venue_order_id="11"),
+        _binding(venue_order_id="7"),
+        _binding(venue_order_id="11"),
+    )
+    assert _hl_order_ids(bindings) == frozenset({7, 11})
+
+
+@pytest.mark.parametrize(
+    "wire_oid",
+    ["", "00", "+1", "-1", " 1", "1 ", "1.0", "1e3", "١", str(2**64), None],
+)
+def test_hl_order_ids_reject_noncanonical_or_out_of_range_values(wire_oid):
+    with pytest.raises(ValueError, match="venue_order_id"):
+        _hl_order_ids((_binding(venue_order_id=wire_oid),))
+
+
+def test_one_invalid_matching_oid_prevents_a_partial_result():
+    with pytest.raises(ValueError, match="venue_order_id"):
+        _hl_order_ids((_binding(venue_order_id="7"), _binding(venue_order_id="00")))
+
+
+def test_unrelated_invalid_bindings_do_not_poison_the_matching_client():
+    bindings = (
+        _binding(venue="bybit", venue_order_id="bad"),
+        _binding(client_order_id="other", venue_order_id="bad"),
+        _binding(venue_order_id="7"),
+    )
+    assert _hl_order_ids(bindings) == frozenset({7})
+
+
+def test_missing_hl_order_binding_is_unknown_not_a_known_empty_set():
+    assert _hl_order_ids((_binding(venue="bybit"),)) is None
+
+
+@pytest.mark.parametrize(
+    "bindings,client_order_id,error",
+    [
+        ([_binding()], "client-1", TypeError),
+        ((object(),), "client-1", TypeError),
+        ((_binding(),), None, TypeError),
+        ((_binding(),), "", ValueError),
+    ],
+)
+def test_hl_order_id_boundaries_reject_ambiguous_inputs(bindings, client_order_id, error):
+    with pytest.raises(error, match="bindings|client_order_id"):
+        _hl_order_ids(bindings, client_order_id=client_order_id)
+
+
+def test_hl_order_ids_remain_a_source_not_fill_aggregation_assembly():
+    module = importlib.import_module("reconciliation.hl_fills")
+    function = module.hl_order_ids
+    assert tuple(inspect.signature(function).parameters) == ("bindings", "client_order_id")
+    source = textwrap.dedent(inspect.getsource(function))
+    calls = {
+        node.func.id
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "build_hl_filled_quantity" not in calls
