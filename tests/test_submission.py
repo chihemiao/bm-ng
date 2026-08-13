@@ -1,3 +1,5 @@
+import ast
+import inspect
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -5,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from data.schema_nonce import DAY_MS
-from execution import orders
+from execution import orders, submission
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
     OrderContractError,
@@ -90,7 +92,7 @@ def _submit(runtime, intent, **changes):
         "now_ms": 500, "decided_ns": 110,
     }
     values.update(changes)
-    return orders.submit_order(**values)
+    return submission.submit_order(**values)
 
 
 def _request(runtime, intent, **changes):
@@ -107,9 +109,16 @@ def _request(runtime, intent, **changes):
 
 def _count_allocations(runtime) -> CountingNonceAllocator:
     allocator = runtime[1]
-    allocator.__class__ = CountingNonceAllocator
-    allocator.allocate_calls = 0
+    allocator.__class__, allocator.allocate_calls = CountingNonceAllocator, 0
     return allocator
+
+
+def test_submission_module_owns_the_shared_order_orchestration() -> None:
+    tree = ast.parse(inspect.getsource(submission.submit_order))
+    calls = {node.func.id for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)}
+    assert submission._require is orders._require and not hasattr(orders, "submit_order")
+    assert {"decide_submission", "order_request_record"} <= calls
 
 
 def test_hyperliquid_persist_allocates_records_then_transports(submission_runtime) -> None:

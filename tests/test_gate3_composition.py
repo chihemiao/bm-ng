@@ -9,8 +9,8 @@ from execution.orders import (
     ReconciliationEvidence,
     ReplayedDecisionHistory,
     make_order_intent,
-    submit_order,
 )
+from execution.submission import submit_order
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 from reconciliation.admission import decide_continuous_admission
 from reconciliation.clock import StateClock

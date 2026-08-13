@@ -156,10 +156,10 @@ def test_consecutive_allocations_are_strictly_increasing(make_nonce_allocator) -
 def test_nonce_window_rule_has_one_owner_and_shared_boundary(
     make_nonce_allocator,
 ) -> None:
-    from execution import orders
+    from execution import submission
 
     assert nonce.signer_nonce_window_bounds is schema_nonce.signer_nonce_window_bounds
-    assert orders.signer_nonce_window_bounds is schema_nonce.signer_nonce_window_bounds
+    assert submission.signer_nonce_window_bounds is schema_nonce.signer_nonce_window_bounds
     allocator, fence, recorded = make_nonce_allocator(
         replayed_last=NOW_MS + DAY_MS - 2,
     )
