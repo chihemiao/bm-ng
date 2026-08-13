@@ -1,8 +1,7 @@
 import http.client
 import socket
 import threading
-from contextlib import contextmanager
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import fields
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from inspect import Parameter, signature
@@ -15,46 +14,43 @@ from execution import submission
 from execution.orders import make_order_intent, order_request_record
 
 INTENT = make_order_intent(
-    "funding-carry", "git-deadbeef", 100, "hyperliquid",
-    symbol="BTC", side="buy", quantity=Decimal("1"),
-)
+    "funding-carry", "git-deadbeef", 100, "hyperliquid", symbol="BTC", side="buy",
+    quantity=Decimal("1"))
 REQUEST = order_request_record(
     INTENT, 110, account_digest="a" * 64, lease_epoch=1,
-    writer_instance_id="writer-one", wallet_fingerprint="b" * 64, allocated_nonce=7,
-)
+    writer_instance_id="writer-one", wallet_fingerprint="b" * 64, allocated_nonce=7)
 
 
 def _fields():
     return submission.ObservedFields(
-        venue_order_id="7", status="open",
-        observation_source="submission_response", venue_time_ms=None,
-    )
+        venue_order_id="7", status="open", observation_source="submission_response",
+        venue_time_ms=None)
 
 
 def _wrap(transport, mapper, recorder):
     return submission.observe_transport(
         transport, success_mapper=mapper, observation_recorder=recorder,
         observed_ns=120, conn_id="conn-1", boot_id="boot-1", recv_wall_ns=120,
-        recv_mono_ns=90, source="execution", seq_within_boot=3,
-    )
+        recv_mono_ns=90, source="execution", seq_within_boot=3)
 
 
-@contextmanager
-def _server():
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            self.send_response(200)
-            self.send_header("Content-Length", "2")
-            self.end_headers()
-            self.wfile.write(b"ok" if self.path == "/" else b"x")
-            self.wfile.flush()
-            if self.path != "/":
-                self.connection.shutdown(socket.SHUT_RDWR)
+class _Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"ok" if self.path == "/" else b"x")
+        self.wfile.flush()
+        if self.path != "/":
+            self.connection.shutdown(socket.SHUT_RDWR)
 
-        def log_message(self, *_args):
-            pass
+    def log_message(self, *_args):
+        pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+
+@pytest.fixture
+def server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -69,78 +65,62 @@ def _post(url):
         return response.read()
 
 
-def test_observer_surface_is_typed_and_success_is_durable_and_opaque(tmp_path):
+def test_observer_surface_is_typed_and_success_is_durable_and_opaque(tmp_path, server):
     parameters = signature(submission.observe_transport).parameters
     assert tuple(parameters) == (
-        "transport", "success_mapper", "observation_recorder", "observed_ns",
-        "conn_id", "boot_id", "recv_wall_ns", "recv_mono_ns", "source",
-        "seq_within_boot",
+        "transport", "success_mapper", "observation_recorder", "observed_ns", "conn_id",
+        "boot_id", "recv_wall_ns", "recv_mono_ns", "source", "seq_within_boot",
     )
     assert parameters["transport"].kind is Parameter.POSITIONAL_OR_KEYWORD
     assert all(p.kind is Parameter.KEYWORD_ONLY for p in tuple(parameters.values())[1:])
-    assert tuple(field.name for field in fields(submission.ObservedFields)) == (
-        "venue_order_id", "status", "observation_source", "venue_time_ms",
-    )
+    assert tuple(f.name for f in fields(submission.ObservedFields)) == (
+        "venue_order_id", "status", "observation_source", "venue_time_ms")
+    assert submission.ObservedFields.__dataclass_params__.frozen
     with pytest.raises(TypeError):
         submission.ObservedFields("7", "open", "submission_response", None)
-    with pytest.raises(FrozenInstanceError):
-        _fields().status = "filled"
-
     writer = shard.ShardWriter(tmp_path, boot_id="boot-1")
-    with _server() as base_url:
-        result = _wrap(lambda _request: _post(base_url + "/"), lambda *_: _fields(),
-                       writer.append_event)(REQUEST)
+    recorded, raised = [], []
+    transport = _wrap(lambda _request: _post(server + "/"), lambda *_: _fields(),
+                      writer.append_event)
+    result = transport(REQUEST)
+    def transport(_request):
+        try:
+            return _post(server + "/failure")
+        except http.client.IncompleteRead as error:
+            raised.append(error)
+            raise
+    with pytest.raises(http.client.IncompleteRead) as caught:
+        _wrap(transport, lambda *_: _fields(), recorded.append)(REQUEST)
     writer.close()
     event = shard.replay_event_window(tmp_path, 0, 200).events[0]
     assert result == b"ok"
-    assert (event["venue"], event["client_order_id"], event["payload"]["status"]) == (
-        "hyperliquid", REQUEST.client_order_id, "open",
-    )
-
-
-def test_real_transport_failure_records_unknown_and_reraises_same_object():
-    recorded, raised = [], []
-    with _server() as base_url:
-        def transport(_request):
-            try:
-                return _post(base_url + "/failure")
-            except http.client.IncompleteRead as error:
-                raised.append(error)
-                raise
-
-        with pytest.raises(http.client.IncompleteRead) as caught:
-            _wrap(transport, lambda *_: _fields(), recorded.append)(REQUEST)
+    assert event["venue"] == "hyperliquid" and event["payload"]["status"] == "open"
+    assert event["client_order_id"] == REQUEST.client_order_id
     event = recorded[0]
     assert caught.value is raised[0]
-    assert (event["venue"], event["client_order_id"], event["venue_order_id"]) == (
-        "hyperliquid", REQUEST.client_order_id, None,
-    )
-    assert event["payload"] == {
-        "status": "unknown", "source": "no_venue_response",
-        "observed_ns": 120, "venue_time_ms": None,
-    }
+    assert event["venue"] == "hyperliquid" and event["venue_order_id"] is None
+    assert event["client_order_id"] == REQUEST.client_order_id
+    assert event["payload"] == {"status": "unknown", "source": "no_venue_response",
+                                "observed_ns": 120, "venue_time_ms": None}
 
 
 def test_mapper_failure_keeps_result_and_skips_recorder():
-    result, recorded, failure = object(), [], ValueError("unknown response")
-
+    result, recorded, error = object(), [], ValueError("unknown response")
     def mapper(*_args):
-        raise failure
+        raise error
 
     with pytest.raises(submission.ObservationMappingError) as caught:
         _wrap(lambda _request: result, mapper, recorded.append)(REQUEST)
-    assert (caught.value.result, caught.value.__cause__, recorded) == (result, failure, [])
+    assert (caught.value.result, caught.value.__cause__, recorded) == (result, error, [])
 
 
 @pytest.mark.parametrize("transport_fails", [False, True])
 def test_recorder_failure_reports_completed_transport_outcome(transport_fails):
     result, transport_error, recorder_error = object(), OSError("transport"), OSError("record")
-
     def transport(_request):
         if transport_fails:
             raise transport_error
         return result
-
     def recorder(_event):
         raise recorder_error
 
