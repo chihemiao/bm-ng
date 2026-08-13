@@ -121,6 +121,17 @@ def test_target_mark_field_is_required():
 
 
 @pytest.mark.parametrize(
+    "value", ["", "bad", "NaN", "sNaN", "Infinity", "-Infinity", "0", "-1"]
+)
+def test_unusable_mark_values_are_rejected(value):
+    payload = _payload()
+    payload[1][3]["markPx"] = value
+    with pytest.raises(ValueError, match="markPx") as raised:
+        _parse(payload)
+    assert type(raised.value) is ValueError
+
+
+@pytest.mark.parametrize(
     "symbol,error", [(None, TypeError), (1, TypeError), ("", ValueError), ("SOL", ValueError)]
 )
 def test_symbol_is_a_supported_canonical_asset(symbol, error):
