@@ -1,3 +1,5 @@
+import ast
+import inspect
 from decimal import Decimal
 from importlib import import_module
 
@@ -162,6 +164,18 @@ def test_unbound_order_request_remains_legacy() -> None:
         event["payload"].pop(field)
     assert order_request_is_legacy(event)
     assert validate_envelope(event) is event
+
+
+def test_legacy_wrapper_delegates_to_the_schema_event_binding() -> None:
+    contracts = import_module("data.contracts")
+    schema = import_module("data.schema_order_request")
+    assert contracts.schema_order_request is schema
+    tree = ast.parse(inspect.getsource(contracts.order_request_is_legacy))
+    called = {
+        node.func.attr for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert "order_request_event_binding" in called
 
 
 def test_order_request_record_requires_an_allocated_nonce_argument() -> None:
