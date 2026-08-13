@@ -128,7 +128,8 @@ def test_order_quantity_identity_is_decimal_context_independent() -> None:
 
 
 def test_extreme_exponent_identity_is_bounded_and_numeric() -> None:
-    ids = {_intent(quantity=Decimal(value)).client_order_id for value in ("1E999999999", "10E999999998")}
+    values = ("1E999999999", "10E999999998")
+    ids = {_intent(quantity=Decimal(value)).client_order_id for value in values}
     assert len(ids) == 1 and re.fullmatch(r"0x[0-9a-f]{32}", ids.pop())
 
 
