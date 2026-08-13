@@ -6,6 +6,7 @@ from decimal import Decimal
 
 import pytest
 
+from execution.orders import make_order_intent
 from reconciliation.state import canonical_fingerprint, surface_is_authoritative
 
 ROW = {
@@ -246,3 +247,73 @@ def test_aggregator_uses_shared_row_parser_and_has_a_narrow_signature():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert {"parse_bybit_fills_surface", "_execution_row"} <= calls
+
+
+@pytest.mark.parametrize(
+    "symbol,side,wire_symbol,wire_side",
+    [("BTC", "buy", "BTCUSDT", "Buy"), ("ETH", "sell", "ETHUSDT", "Sell")],
+)
+def test_bybit_intent_assembly_passes_one_intent_identity_and_direction(
+    symbol, side, wire_symbol, wire_side
+):
+    module = _module()
+    intent = make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "bybit",
+        symbol=symbol, side=side, quantity=Decimal("0.1"),
+    )
+    row = {
+        **ROW, "symbol": wire_symbol, "side": wire_side,
+        "orderLinkId": intent.client_order_id,
+    }
+    result = module.build_intent_bybit_filled_quantity(
+        (_payload(row),), intent=intent, since_ms=int(ROW["execTime"]),
+        skew_allowance_ms=0, observed_ns=200,
+    )
+    expected = module.build_bybit_filled_quantity(
+        (_payload(row),), order_link_id=intent.client_order_id,
+        symbol=intent.symbol, intended_side=intent.side,
+        since_ms=int(ROW["execTime"]), skew_allowance_ms=0, observed_ns=200,
+    )
+    assert result == expected
+    assert result.quantity == Decimal("0.1")
+
+
+@pytest.mark.parametrize(
+    "intent,error,match",
+    [
+        (object(), TypeError, "intent"),
+        (
+            make_order_intent(
+                "funding-carry", "git-deadbeef", 100, "hyperliquid",
+                symbol="BTC", side="buy", quantity=Decimal("0.1"),
+            ),
+            ValueError,
+            "bybit",
+        ),
+    ],
+)
+def test_bybit_intent_assembly_owns_only_intent_and_leg_boundaries(
+    intent, error, match
+):
+    with pytest.raises(error, match=match):
+        _module().build_intent_bybit_filled_quantity(
+            object(), intent=intent, since_ms=0,
+            skew_allowance_ms=0, observed_ns=200,
+        )
+
+
+def test_bybit_intent_assembly_signature_has_no_replay_gate_and_only_calls_b1():
+    function = _module().build_intent_bybit_filled_quantity
+    assert tuple(inspect.signature(function).parameters) == (
+        "pages", "intent", "since_ms", "skew_allowance_ms", "observed_ns",
+    )
+    source = textwrap.dedent(inspect.getsource(function))
+    calls = {
+        node.func.id for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert calls - {"isinstance", "TypeError", "ValueError"} == {
+        "build_bybit_filled_quantity"
+    }
+    assert "replay" not in inspect.signature(function).parameters
+    assert "no replay binding or freeze gate" in inspect.getdoc(function)

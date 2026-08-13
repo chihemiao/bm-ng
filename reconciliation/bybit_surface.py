@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS, ORDER_SIDES
+from execution.orders import OrderIntent
 from reconciliation.exposure import LegPosition
 from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
 
@@ -276,3 +277,23 @@ def build_bybit_filled_quantity(
             signed += quantity if canonical_side == "buy" else -quantity
     aligned = signed if intended_side == "buy" else -signed
     return BybitFilledQuantity(aligned if aligned >= 0 else None, evidence)
+
+
+def build_intent_bybit_filled_quantity(
+    pages: Sequence[Mapping[str, object]], *, intent: OrderIntent,
+    since_ms: int, skew_allowance_ms: int, observed_ns: int,
+) -> BybitFilledQuantity:
+    """Assemble an intent quantity; exact links need no replay binding or freeze gate."""
+    if not isinstance(intent, OrderIntent):
+        raise TypeError("intent must be an OrderIntent")
+    if intent.leg != "bybit":
+        raise ValueError("intent must be for bybit")
+    return build_bybit_filled_quantity(
+        pages,
+        order_link_id=intent.client_order_id,
+        symbol=intent.symbol,
+        intended_side=intent.side,
+        since_ms=since_ms,
+        skew_allowance_ms=skew_allowance_ms,
+        observed_ns=observed_ns,
+    )
