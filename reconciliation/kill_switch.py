@@ -27,6 +27,61 @@ class KillSwitchDecision:
             raise ValueError("invalid kill switch action")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReconciliationStreak:
+    count: int
+    last_observed_ns: int
+
+    def __post_init__(self) -> None:
+        if type(self.count) is not int:
+            raise TypeError("count must be an integer")
+        if self.count < 0:
+            raise ValueError("count must be non-negative")
+        if type(self.last_observed_ns) is not int:
+            raise TypeError("last_observed_ns must be an integer")
+        if self.last_observed_ns <= 0:
+            raise ValueError("last_observed_ns must be positive")
+
+
+def advance_reconciliation_streak(
+    previous: ReconciliationStreak | None,
+    *,
+    consistent: bool,
+    observed_ns: int,
+) -> ReconciliationStreak:
+    """Count distinct consecutive inconsistent reconciliation observations."""
+    if previous is not None and not isinstance(previous, ReconciliationStreak):
+        raise TypeError("previous must be ReconciliationStreak or None")
+    if type(consistent) is not bool:
+        raise TypeError("consistent must be a boolean")
+    if type(observed_ns) is not int:
+        raise TypeError("observed_ns must be an integer")
+    if observed_ns <= 0:
+        raise ValueError("observed_ns must be positive")
+    if previous is not None:
+        if observed_ns < previous.last_observed_ns:
+            raise ValueError("observed_ns cannot move backward")
+        if observed_ns == previous.last_observed_ns:
+            if consistent != (previous.count == 0):
+                raise ValueError("different consistency at same observed_ns")
+            return previous
+    count = 0 if consistent else (previous.count if previous is not None else 0) + 1
+    return ReconciliationStreak(count=count, last_observed_ns=observed_ns)
+
+
+def reconciliation_streak_triggered(
+    streak: ReconciliationStreak, *, threshold: int,
+) -> bool:
+    """Return whether consecutive inconsistency has reached K observations."""
+    if not isinstance(streak, ReconciliationStreak):
+        raise TypeError("streak must be a ReconciliationStreak")
+    if type(threshold) is not int:
+        raise TypeError("threshold must be an integer")
+    if threshold <= 0:
+        raise ValueError("threshold must be positive")
+    return streak.count >= threshold
+
+
 def decide_kill_switch(
     *, triggered: bool, orders_known: bool, positions_known: bool,
     reconciliation_consistent: bool,
