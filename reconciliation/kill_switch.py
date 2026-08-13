@@ -9,11 +9,39 @@ binding anomalies require a separate Goal decision rather than implicit expansio
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 from execution.nonce import replay_freeze_reason, replay_signer_nonce_conflict
 from execution.wallet import AgentWalletRegistration
 
 KILL_SWITCH_KEY_EXPIRY_LEAD_NS = 7 * 86_400 * 1_000_000_000
+
+
+@dataclass(frozen=True, slots=True)
+class KillSwitchDecision:
+    action: Literal["continue", "flatten_and_stop", "cancel_only_freeze"]
+
+    def __post_init__(self) -> None:
+        if self.action not in {"continue", "flatten_and_stop", "cancel_only_freeze"}:
+            raise ValueError("invalid kill switch action")
+
+
+def decide_kill_switch(
+    *, triggered: bool, orders_known: bool, positions_known: bool,
+) -> KillSwitchDecision:
+    """Choose a stop action without flattening through unknown venue state."""
+    for name, value in (
+        ("triggered", triggered),
+        ("orders_known", orders_known),
+        ("positions_known", positions_known),
+    ):
+        if type(value) is not bool:
+            raise TypeError(f"{name} must be a boolean")
+    if not orders_known or not positions_known:
+        return KillSwitchDecision("cancel_only_freeze")
+    action = "flatten_and_stop" if triggered else "continue"
+    return KillSwitchDecision(action)
 
 
 def key_expiry_triggered(
