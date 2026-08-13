@@ -17,7 +17,7 @@ def _module():
 
 
 def test_venue_parsers_share_the_canonical_fingerprint_definition():
-    hl = importlib.import_module("reconciliation.hl_surface")
+    hl = importlib.import_module("reconciliation.hl_common")
     state = importlib.import_module("reconciliation.state")
     assert hl._fingerprint is state.canonical_fingerprint
     assert _module()._fingerprint is state.canonical_fingerprint

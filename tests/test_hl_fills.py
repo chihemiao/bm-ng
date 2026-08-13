@@ -13,7 +13,7 @@ FILL = {
 
 
 def _parse_fills(pages, *, observed_ns=100, page_complete=True, truncated=False):
-    module = importlib.import_module("reconciliation.hl_surface")
+    module = importlib.import_module("reconciliation.hl_fills")
     return module.parse_fills_surface(
         pages, observed_ns=observed_ns, page_complete=page_complete, truncated=truncated
     )
