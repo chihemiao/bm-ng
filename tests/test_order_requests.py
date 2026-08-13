@@ -260,13 +260,113 @@ def test_order_request_closed_sets_have_one_identity() -> None:
         assert getattr(orders, name) is getattr(dispatch, name)
 
 
-def test_known_gap_quantity_value_is_not_yet_validated() -> None:
-    assert validate_envelope(_bound_event(quantity="abc"))
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("quantity", "abc"), ("signal_ns", -5), ("strategy_id", "")],
+)
+def test_order_request_rejects_the_b1a_known_value_gaps(field, value) -> None:
+    with pytest.raises(ContractError) as error:
+        validate_envelope(_bound_event(**{field: value}))
+    assert str(error.value) == f"order_request:invalid_{field}"
 
 
-def test_known_gap_integer_fields_are_not_yet_validated() -> None:
-    assert validate_envelope(_bound_event(signal_ns=-5))
+@pytest.mark.parametrize("field", ["strategy_id", "strategy_version"])
+@pytest.mark.parametrize("value", ["", 1, None])
+def test_order_request_rejects_invalid_strategy_identifiers(field, value) -> None:
+    with pytest.raises(ContractError) as error:
+        validate_envelope(_bound_event(**{field: value}))
+    assert str(error.value) == f"order_request:invalid_{field}"
 
 
-def test_known_gap_strategy_strings_are_not_yet_validated() -> None:
-    assert validate_envelope(_bound_event(strategy_id=""))
+@pytest.mark.parametrize("field", ["signal_ns", "replacement_ordinal", "recorded_ns"])
+@pytest.mark.parametrize("value", [-1, True, "1", 1.0])
+def test_order_request_rejects_invalid_integer_domains(field, value) -> None:
+    with pytest.raises(ContractError) as error:
+        validate_envelope(_bound_event(**{field: value}))
+    assert str(error.value) == f"order_request:invalid_{field}"
+
+
+@pytest.mark.parametrize(
+    "quantity",
+    [
+        "", " ", "abc", "NaN", "sNaN", "Infinity", "-Infinity", "0", "-1",
+        " 1 ", "1 ", " 1", 1, Decimal("1"),
+    ],
+)
+def test_order_request_rejects_invalid_quantity_strings(quantity) -> None:
+    with pytest.raises(ContractError) as error:
+        validate_envelope(_bound_event(quantity=quantity))
+    assert str(error.value) == "order_request:invalid_quantity"
+
+
+@pytest.mark.parametrize("quantity", ["1", "1.0", "1E+2", "0.0001"])
+def test_order_request_accepts_exact_positive_quantity_strings(quantity) -> None:
+    assert validate_envelope(_bound_event(quantity=quantity))
+
+
+@pytest.mark.parametrize(
+    ("signal_ns", "accepted"), [(-1, False), (True, False), (0, True)]
+)
+def test_signal_time_boundary_stays_aligned_with_execution(signal_ns, accepted) -> None:
+    try:
+        _intent(signal_ns=signal_ns)
+    except OrderContractError:
+        execution_accepted = False
+    else:
+        execution_accepted = True
+    try:
+        validate_envelope(_bound_event(signal_ns=signal_ns))
+    except ContractError:
+        durable_accepted = False
+    else:
+        durable_accepted = True
+    assert execution_accepted is durable_accepted is accepted
+
+
+def test_zero_signal_and_recorded_times_are_valid_together() -> None:
+    assert validate_envelope(_bound_event(signal_ns=0, recorded_ns=0))
+
+
+def test_recorded_time_cannot_precede_signal_time() -> None:
+    with pytest.raises(ContractError) as error:
+        validate_envelope(_bound_event(signal_ns=1, recorded_ns=0))
+    assert str(error.value) == "order_request:invalid_recorded_ns"
+
+
+@pytest.mark.parametrize("field", ["strategy_id", "strategy_version"])
+def test_strategy_whitespace_policy_stays_aligned_with_execution(field) -> None:
+    assert _intent(**{field: " "})
+    assert validate_envelope(_bound_event(**{field: " "}))
+
+
+def test_value_rules_do_not_leak_into_the_execution_lease_primitive() -> None:
+    schema = import_module("data.schema_order_request")
+    event = _bound_event(
+        strategy_id="", signal_ns=True, replacement_ordinal=-1,
+        quantity="abc", recorded_ns="110",
+    )
+    assert schema.order_request_lease_binding_errors(
+        event["payload"], venue=event["venue"], has_sequence=True,
+    ) == ()
+
+
+def test_order_request_value_errors_accumulate_in_field_order() -> None:
+    schema = import_module("data.schema_order_request")
+    event = _bound_event(
+        strategy_id="", strategy_version=1, signal_ns=True,
+        leg="unknown", symbol="SOL", side="long", replacement_ordinal=-1,
+        quantity=" 1 ", recorded_ns="110",
+    )
+    assert schema.order_request_binding_errors(
+        event["payload"], venue=event["venue"], has_sequence=True,
+    ) == (
+        "order_request:invalid_strategy_id",
+        "order_request:invalid_strategy_version",
+        "order_request:invalid_signal_ns",
+        "order_request:invalid_leg",
+        "order_request:invalid_symbol",
+        "order_request:invalid_side",
+        "order_request:invalid_replacement_ordinal",
+        "order_request:invalid_quantity",
+        "order_request:invalid_recorded_ns",
+    )
