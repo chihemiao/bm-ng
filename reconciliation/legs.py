@@ -1,18 +1,22 @@
 """Fail-closed completion states for one execution leg."""
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
 from data.shard import EventReplay
+from execution.order_serde import rehydrate_order_request
 from execution.orders import (
     ReconciliationEvidence,
     T0APairIntents,
     t0a_pair_intents_match,
 )
-from reconciliation.bybit_surface import BybitFilledQuantity
+from reconciliation.bybit_surface import (
+    BybitFilledQuantity,
+    build_intent_bybit_filled_quantity,
+)
 from reconciliation.clock import StateClock, advance_state_clock
-from reconciliation.hl_fills import HLFilledQuantity
+from reconciliation.hl_fills import HLFilledQuantity, build_replayed_hl_filled_quantity
 from reconciliation.state import (
     VENUES,
     SurfaceEvidence,
@@ -169,22 +173,22 @@ def pair_state(legs: Sequence[LegOutcome]) -> PairState:
 
 def build_fill_pair_state(
     pair: T0APairIntents,
-    hl_result: HLFilledQuantity,
+    hl_result: HLFilledQuantity | None,
     bybit_result: BybitFilledQuantity,
     *,
     now_ns: int,
     max_age_ns: int,
 ) -> PairState:
-    """Bind venue fill results to one T0A intent pair and classify both legs."""
+    """Bind fills to one pair; missing HL bindings are unknown, never zero."""
     if not isinstance(pair, T0APairIntents):
         raise TypeError("pair must be T0APairIntents")
-    if not isinstance(hl_result, HLFilledQuantity):
+    if hl_result is not None and not isinstance(hl_result, HLFilledQuantity):
         raise TypeError("hl_result must be HLFilledQuantity")
     if not isinstance(bybit_result, BybitFilledQuantity):
         raise TypeError("bybit_result must be BybitFilledQuantity")
     if not t0a_pair_intents_match(pair):
         raise ValueError("pair intents do not match T0A topology")
-    if hl_result.client_order_id != pair.hyperliquid.client_order_id:
+    if hl_result is not None and hl_result.client_order_id != pair.hyperliquid.client_order_id:
         raise ValueError("hl_result does not match hyperliquid intent")
     if bybit_result.client_order_id != pair.bybit.client_order_id:
         raise ValueError("bybit_result does not match bybit intent")
@@ -194,7 +198,7 @@ def build_fill_pair_state(
         ("hyperliquid", pair.hyperliquid, hl_result),
         ("bybit", pair.bybit, bybit_result),
     ):
-        completion = leg_completion(
+        completion = "unknown" if result is None else leg_completion(
             intended_quantity=intent.quantity,
             filled_quantity=result.quantity,
             evidence=result.evidence,
@@ -203,6 +207,48 @@ def build_fill_pair_state(
         )
         outcomes.append(LegOutcome(venue, completion))
     return pair_state(outcomes)
+
+
+def build_replayed_fill_pair_state(
+    pair: T0APairIntents,
+    *,
+    replay: EventReplay,
+    hyperliquid_pages: Sequence[list[object]],
+    bybit_pages: Sequence[Mapping[str, object]],
+    since_ms: int,
+    skew_allowance_ms: int,
+    observed_ns: int,
+    page_complete: bool,
+    truncated: bool,
+    now_ns: int,
+    max_age_ns: int,
+) -> PairState:
+    """Assemble one submitted pair from durable requests and venue fill surfaces."""
+    if not isinstance(pair, T0APairIntents):
+        raise TypeError("pair must be T0APairIntents")
+    if not t0a_pair_intents_match(pair):
+        raise ValueError("pair intents do not match T0A topology")
+    if type(replay) is not EventReplay:
+        raise TypeError("replay must be an EventReplay")
+    requests = [
+        rehydrate_order_request(event)[0]
+        for event in replay.events
+        if event["payload_schema"] == "order_request"
+    ]
+    if pair.hyperliquid not in requests or pair.bybit not in requests:
+        raise ValueError("pair durable requests are incomplete")
+    hl_result = build_replayed_hl_filled_quantity(
+        replay, hyperliquid_pages, intent=pair.hyperliquid, since_ms=since_ms,
+        skew_allowance_ms=skew_allowance_ms, observed_ns=observed_ns,
+        page_complete=page_complete, truncated=truncated,
+    )
+    bybit_result = build_intent_bybit_filled_quantity(
+        bybit_pages, intent=pair.bybit, since_ms=since_ms,
+        skew_allowance_ms=skew_allowance_ms, observed_ns=observed_ns,
+    )
+    return build_fill_pair_state(
+        pair, hl_result, bybit_result, now_ns=now_ns, max_age_ns=max_age_ns
+    )
 
 
 def obligation_state(pair: PairState) -> str:
