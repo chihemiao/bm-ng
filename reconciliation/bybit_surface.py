@@ -150,7 +150,7 @@ def _execution_row(row: object) -> tuple[str, str] | None:
     valid &= isinstance(side, str) and side in {"Buy", "Sell"}
     valid &= isinstance(exec_id, str) and bool(exec_id)
     canonical_time = isinstance(exec_time, str) and exec_time.isascii() and exec_time.isdecimal()
-    canonical_time &= exec_time == "0" or not exec_time.startswith("0")
+    canonical_time = canonical_time and (exec_time == "0" or not exec_time.startswith("0"))
     if not valid or not canonical_time or not isinstance(quantity, str) or not quantity:
         return None
     try:
