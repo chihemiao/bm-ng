@@ -1,8 +1,11 @@
+import ast
+import inspect
 from dataclasses import FrozenInstanceError
 from importlib import import_module
 
 import pytest
 
+from data import replay_order, schema_order_request
 from tests.test_shard import _ns, _order_request
 
 shard = import_module("data.shard")
@@ -51,6 +54,19 @@ def test_order_binding_is_frozen_keyword_only_evidence():
         shard.OrderBinding("hyperliquid", "0xrequest", "7")
     with pytest.raises(FrozenInstanceError):
         binding.venue_order_id = "8"
+
+
+def test_replay_binding_delegates_to_the_shared_request_classifier():
+    assert (
+        replay_order.order_request_event_binding
+        is schema_order_request.order_request_event_binding
+    )
+    tree = ast.parse(inspect.getsource(replay_order))
+    called = {
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "order_request_event_binding" in called
 
 
 def test_replay_deduplicates_sources_and_exact_observation_retries(tmp_path):
