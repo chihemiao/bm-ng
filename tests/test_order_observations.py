@@ -122,6 +122,9 @@ def test_bound_errors_accumulate_in_fixed_order_and_gate_cross_field_checks():
         "order_observation:unknown_venue:invented", "order_observation:identity_not_known",
         "order_observation:invalid_client_order_id",
     )
+    assert _errors(_payload("invented", "open")) == (
+        "order_observation:invalid_source",
+    )
     assert _errors(_payload(observed_ns=1_001)) == (
         "order_observation:observed_in_future",
     )
