@@ -114,6 +114,18 @@ def test_mapper_failure_keeps_result_and_skips_recorder():
     assert (caught.value.result, caught.value.__cause__, recorded) == (result, error, [])
 
 
+def test_schema_invalid_mapped_fields_are_one_mapping_error():
+    result, recorded = object(), []
+    invalid = submission.ObservedFields(
+        venue_order_id="7", status="unknown",
+        observation_source="no_venue_response", venue_time_ms=None)
+    with pytest.raises(submission.ObservationMappingError) as caught:
+        _wrap(lambda _request: result, lambda *_: invalid, recorded.append)(REQUEST)
+    assert caught.value.result is result
+    assert type(caught.value.__cause__).__name__ == "ContractError"
+    assert recorded == []
+
+
 @pytest.mark.parametrize("transport_fails", [False, True])
 def test_recorder_failure_reports_completed_transport_outcome(transport_fails):
     result, transport_error, recorder_error = object(), OSError("transport"), OSError("record")
