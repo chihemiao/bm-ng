@@ -20,7 +20,6 @@ REQUEST = order_request_record(
     INTENT, 110, account_digest="a" * 64, lease_epoch=1,
     writer_instance_id="writer-one", wallet_fingerprint="b" * 64, allocated_nonce=7)
 
-
 def _fields():
     return submission.ObservedFields(
         venue_order_id="7", status="open", observation_source="submission_response",
