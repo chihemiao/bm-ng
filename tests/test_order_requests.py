@@ -137,6 +137,10 @@ def test_old_five_field_bound_request_is_partial_not_legacy() -> None:
     event = _bound_event()
     for field in NEW_REQUEST_FIELDS:
         event["payload"].pop(field)
+    schema = import_module("data.schema_order_request")
+    assert schema.order_request_lease_binding_errors(
+        event["payload"], venue=event["venue"], has_sequence=True,
+    ) == ()
     expected = f"order_request:partial_binding:{','.join(sorted(NEW_REQUEST_FIELDS))}"
     with pytest.raises(ContractError) as error:
         order_request_is_legacy(event)
@@ -216,7 +220,7 @@ def test_execution_reuses_schema_rule_for_invalid_hyperliquid_nonce(
 ) -> None:
     orders = import_module("execution.orders")
     schema = import_module("data.schema_order_request")
-    assert orders.order_request_binding_errors is schema.order_request_binding_errors
+    assert orders.order_request_lease_binding_errors is schema.order_request_lease_binding_errors
     with pytest.raises(OrderContractError) as error:
         order_request_record(
             _intent(), recorded_ns=110, account_digest="a" * 64,
