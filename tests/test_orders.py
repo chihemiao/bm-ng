@@ -1,7 +1,7 @@
 import re
-from decimal import Decimal
-from inspect import Parameter, signature
+from decimal import Decimal, localcontext
 from importlib import import_module
+from inspect import Parameter, signature
 
 import pytest
 
@@ -119,6 +119,19 @@ def test_order_quantity_identity_is_numeric_not_representational() -> None:
     assert ids == {_intent().client_order_id}
 
 
+def test_order_quantity_identity_is_decimal_context_independent() -> None:
+    quantity = Decimal("123456789.123456789")
+    expected = _intent(quantity=quantity).client_order_id
+    with localcontext() as context:
+        context.prec = 5
+        assert _intent(quantity=quantity).client_order_id == expected
+
+
+def test_extreme_exponent_identity_is_bounded_and_numeric() -> None:
+    ids = {_intent(quantity=Decimal(value)).client_order_id for value in ("1E999999999", "10E999999998")}
+    assert len(ids) == 1 and re.fullmatch(r"0x[0-9a-f]{32}", ids.pop())
+
+
 @pytest.mark.parametrize(
     ("changes", "error"),
     [
@@ -136,7 +149,8 @@ def test_order_intent_rejects_invalid_trade_terms(changes, error) -> None:
 
 def test_new_order_trade_terms_are_required() -> None:
     parameters = signature(make_order_intent).parameters
-    assert all(parameters[name].default is Parameter.empty for name in ("symbol", "side", "quantity"))
+    names = ("symbol", "side", "quantity")
+    assert all(parameters[name].default is Parameter.empty for name in names)
 
 
 def test_request_record_must_exist_and_match_before_submit() -> None:
@@ -362,6 +376,9 @@ def test_replacement_requires_complete_cancelled_or_rejected_evidence() -> None:
     parameters = signature(replacement_intent).parameters
     assert set(parameters) == {"previous", "evidence", "quantity"}
     assert parameters["quantity"].kind is Parameter.KEYWORD_ONLY
+    assert parameters["quantity"].default is Parameter.empty
+    with pytest.raises(TypeError):
+        replacement_intent(intent, _evidence("cancelled"))
 
     for status in ("pending", "unknown", "open", "partially_filled", "filled"):
         with pytest.raises(OrderContractError, match="not replaceable"):
