@@ -12,6 +12,7 @@ from reconciliation.kill_switch import (
     KILL_SWITCH_KEY_EXPIRY_LEAD_NS,
     KillSwitchDecision,
     decide_kill_switch,
+    key_and_nonce_triggered,
     key_expiry_triggered,
     nonce_anomaly_triggered,
 )
@@ -161,6 +162,82 @@ def test_nonce_detector_has_the_frozen_pure_sequence_contract() -> None:
     module_source = inspect.getsource(inspect.getmodule(nonce_anomaly_triggered))
     assert "reconciliation.admission" not in module_source
     assert "reconciliation.state" not in module_source
+
+
+def _registration_for(wallet_fingerprint=WALLET):
+    return AgentWalletRegistration(
+        wallet_fingerprint, ISSUED_NS, ISSUED_NS + VALIDITY_NS,
+    )
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [_freeze()],
+        [_nonce_event(), _nonce_event(allocated=13, previous=12)],
+    ],
+)
+def test_key_and_nonce_trigger_when_only_nonce_is_unsafe(events) -> None:
+    registration = _registration_for()
+    assert key_and_nonce_triggered(
+        registration, events, now_ns=registration.expires_ns - 7 * DAY_NS,
+    ) is True
+
+
+def test_key_and_nonce_trigger_when_only_key_is_unsafe() -> None:
+    registration = _registration_for()
+    assert key_and_nonce_triggered(
+        registration, [], now_ns=registration.expires_ns - 7 * DAY_NS + 1,
+    ) is True
+
+
+@pytest.mark.parametrize("triggered", [False, True])
+def test_key_and_nonce_combines_both_detector_results(triggered) -> None:
+    registration = _registration_for()
+    now_ns = registration.expires_ns - 7 * DAY_NS + int(triggered)
+    events = [_freeze()] if triggered else []
+    assert key_and_nonce_triggered(registration, events, now_ns=now_ns) is triggered
+
+
+def test_triggered_key_does_not_hide_a_malformed_nonce_stream() -> None:
+    registration = _registration_for()
+    malformed = _nonce_event(allocated=True)
+    with pytest.raises(ValueError, match="allocated_nonce"):
+        key_and_nonce_triggered(
+            registration, [malformed], now_ns=registration.expires_ns,
+        )
+
+
+@pytest.mark.parametrize(
+    ("registration", "nonce_events", "now_ns"),
+    [
+        (object(), [], ISSUED_NS),
+        (_registration_for(), None, ISSUED_NS),
+        (_registration_for(), [], True),
+    ],
+)
+def test_key_and_nonce_requires_frozen_input_types(
+    registration, nonce_events, now_ns,
+) -> None:
+    with pytest.raises(TypeError):
+        key_and_nonce_triggered(registration, nonce_events, now_ns=now_ns)
+
+
+def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> None:
+    signature = inspect.signature(key_and_nonce_triggered)
+    assert tuple(signature.parameters) == ("registration", "nonce_events", "now_ns")
+    assert signature.parameters["now_ns"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert get_type_hints(key_and_nonce_triggered) == {
+        "registration": AgentWalletRegistration,
+        "nonce_events": Sequence[Mapping[str, object]],
+        "now_ns": int,
+        "return": bool,
+    }
+    registration = _registration_for(OTHER_WALLET)
+    assert key_and_nonce_triggered(
+        registration, [_freeze(fingerprint=OTHER_WALLET)],
+        now_ns=registration.expires_ns - 7 * DAY_NS,
+    ) is True
 
 
 @pytest.mark.parametrize(
