@@ -6,6 +6,9 @@ BYBIT_WIRE_SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 ORDER_SYMBOLS = frozenset(BYBIT_WIRE_SYMBOLS)
 ORDER_SIDES = frozenset({"buy", "sell"})
 ORDER_LEGS = frozenset({"hyperliquid", "bybit"})
+ORDER_STATUSES = frozenset(
+    {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
+)
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
