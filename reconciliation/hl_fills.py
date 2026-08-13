@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
+from data.replay_order import OrderBinding
 from data.schema_dispatch import ORDER_SIDES
 from reconciliation.hl_common import COINS, _fingerprint, _valid_observed_ns
 from reconciliation.state import CanonicalSet, SurfaceEvidence
@@ -15,6 +16,7 @@ FILL_REQUIRED_FIELDS = frozenset(
     }
 )
 FILL_OPTIONAL_FIELDS = frozenset({"builderFee", "liquidation"})
+HL_UINT64_MAX = 2**64 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +104,39 @@ def _nonnegative_int(value: object, name: str) -> None:
         raise TypeError(f"{name} must be an integer")
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
+
+
+def hl_order_ids(
+    bindings: tuple[OrderBinding, ...], *, client_order_id: str
+) -> frozenset[int] | None:
+    """Convert one client's observed Hyperliquid order ids to uint64 values."""
+    if not isinstance(bindings, tuple) or any(
+        type(binding) is not OrderBinding for binding in bindings
+    ):
+        raise TypeError("bindings must be a tuple of OrderBinding values")
+    if not isinstance(client_order_id, str):
+        raise TypeError("client_order_id must be a string")
+    if not client_order_id:
+        raise ValueError("client_order_id must not be empty")
+    wire_oids = [
+        binding.venue_order_id
+        for binding in bindings
+        if binding.venue == "hyperliquid" and binding.client_order_id == client_order_id
+    ]
+    if not wire_oids:
+        return None
+    order_ids = set()
+    for wire_oid in wire_oids:
+        canonical = (
+            isinstance(wire_oid, str)
+            and wire_oid.isascii()
+            and wire_oid.isdecimal()
+            and (wire_oid == "0" or not wire_oid.startswith("0"))
+        )
+        if not canonical or int(wire_oid) > HL_UINT64_MAX:
+            raise ValueError("venue_order_id must be canonical uint64 decimal")
+        order_ids.add(int(wire_oid))
+    return frozenset(order_ids)
 
 
 def build_hl_filled_quantity(
