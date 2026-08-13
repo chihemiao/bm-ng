@@ -172,7 +172,16 @@ def test_rehydrate_preserves_schema_contract_errors(field, value, message) -> No
 
 @pytest.mark.parametrize(
     "changes",
-    [{"event_kind": "market"}, {"payload_schema": "order_observation"}],
+    [
+        {"event_kind": "market"},
+        {
+            "payload_schema": "order_observation", "venue_order_id": "7",
+            "payload": {
+                "status": "open", "source": "submission_response",
+                "observed_ns": 119, "venue_time_ms": None,
+            },
+        },
+    ],
 )
 def test_rehydrate_rejects_a_valid_event_of_another_kind_or_schema(changes) -> None:
     _, _, event = _serialized()
