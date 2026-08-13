@@ -1,4 +1,5 @@
 import json
+import socket
 import threading
 from contextlib import contextmanager
 from decimal import Decimal
@@ -9,7 +10,11 @@ import pytest
 
 from data import shard
 from execution.nonce import NonceAllocator, SignerFence
-from execution.order_serde import serialize_order_observation, serialize_order_request
+from execution.order_serde import (
+    rehydrate_order_request,
+    serialize_order_observation,
+    serialize_order_request,
+)
 from execution.orders import (
     ReconciliationEvidence,
     ReplayedDecisionHistory,
@@ -45,13 +50,16 @@ BYBIT_OTHER_FILL = {
 
 
 @contextmanager
-def _venue_server(status, venue_order_id, fill_page):
+def _venue_server(status, venue_order_id, fill_page, *, drop_submit=False):
     hits = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             hits.append(("POST", self.path))
             self.rfile.read(int(self.headers["Content-Length"]))
+            if drop_submit:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
             self._send(b"accepted")
 
         def do_GET(self):
@@ -96,16 +104,26 @@ def runtime(tmp_path):
     lease.release()
 
 
-def _leg(intent, url, recorded):
+def _leg(intent, url, recorded, *, request=None, evidence=None):
     def transport(request):
-        assert recorded[-1] is request
+        assert request in recorded
         with urlopen(Request(url + "/submit", data=b"{}"), timeout=1) as response:
             return response.read()
 
     return PairLegSubmissionInputs(
-        evidence=ReconciliationEvidence("absent", 101, 102, 103), request=None,
+        evidence=evidence or ReconciliationEvidence("absent", 101, 102, 103),
+        request=request,
         history=ReplayedDecisionHistory(intent.client_order_id, 0, False),
         transport=transport,
+    )
+
+
+def _submit(runtime, hyperliquid, bybit, recorder):
+    return submit_t0a_pair(
+        pair=PAIR, hyperliquid=hyperliquid, bybit=bybit,
+        lease=runtime[0], allocator=runtime[1], request_recorder=recorder,
+        now_ns=120, max_signal_age_ns=50, max_reconcile_attempts=3,
+        now_ms=500, decided_ns=110,
     )
 
 
@@ -122,7 +140,7 @@ def _recorder(writer, recorded):
     return record
 
 
-def _query_truth(root, venues):
+def _query_truth(root, venues, *, fills=True):
     writer = shard.ShardWriter(root, boot_id="boot-query")
     pages = []
     for sequence, (venue, url, intent) in enumerate(venues, 1):
@@ -135,10 +153,29 @@ def _query_truth(root, venues):
             conn_id="local-http", boot_id="boot-query", recv_wall_ns=120 + sequence,
             recv_mono_ns=120 + sequence, source="order_status", seq_within_boot=sequence,
         ))
-        with urlopen(url + "/fills", timeout=1) as response:
-            pages.append(json.load(response))
+        if fills:
+            with urlopen(url + "/fills", timeout=1) as response:
+                pages.append(json.load(response))
     writer.close()
     return tuple(pages)
+
+
+def _replayed_requests(replay):
+    restored = {
+        intent.leg: (intent, request)
+        for event in replay.events
+        if event["payload_schema"] == "order_request"
+        for intent, request in (rehydrate_order_request(event),)
+    }
+    assert restored["hyperliquid"][0] == PAIR.hyperliquid
+    assert restored["bybit"][0] == PAIR.bybit
+    return {venue: value[1] for venue, value in restored.items()}
+
+
+def _resume_leg(intent, url, recorded, requests, evidence):
+    return _leg(
+        intent, url, recorded, request=requests[intent.leg], evidence=evidence,
+    )
 
 
 def test_successful_pair_with_one_partial_fill_is_imbalanced(runtime, tmp_path):
@@ -154,11 +191,9 @@ def test_successful_pair_with_one_partial_fill_is_imbalanced(runtime, tmp_path):
         root = tmp_path / "pair-events"
         writer = shard.ShardWriter(root, boot_id="boot-submit")
         recorded = []
-        outcome = submit_t0a_pair(
-            pair=PAIR, hyperliquid=_leg(PAIR.hyperliquid, hl_url, recorded),
-            bybit=_leg(PAIR.bybit, by_url, recorded), lease=runtime[0], allocator=runtime[1],
-            request_recorder=_recorder(writer, recorded), now_ns=120,
-            max_signal_age_ns=50, max_reconcile_attempts=3, now_ms=500, decided_ns=110,
+        outcome = _submit(
+            runtime, _leg(PAIR.hyperliquid, hl_url, recorded),
+            _leg(PAIR.bybit, by_url, recorded), _recorder(writer, recorded),
         )
         writer.close()
         assert outcome == PairSubmissionOutcome(
@@ -182,3 +217,59 @@ def test_successful_pair_with_one_partial_fill_is_imbalanced(runtime, tmp_path):
         ) == PairState("imbalanced", (("bybit", "partial"),))
         expected = [("POST", "/submit"), ("GET", "/orderStatus"), ("GET", "/fills")]
         assert hl_url != by_url and hl_hits == expected and by_hits == expected
+
+
+def test_pair_ack_loss_resume_never_retransports(runtime, tmp_path):
+    with _venue_server("filled", "7", []) as (hl_url, hl_hits), _venue_server(
+        "open", "B-7", {}, drop_submit=True,
+    ) as (by_url, by_hits):
+        root = tmp_path / "pair-events"
+        writer = shard.ShardWriter(root, boot_id="boot-submit")
+        recorded = []
+        first = _submit(
+            runtime, _leg(PAIR.hyperliquid, hl_url, recorded),
+            _leg(PAIR.bybit, by_url, recorded), _recorder(writer, recorded),
+        )
+        writer.close()
+        assert first.hyperliquid == ("persist", b"accepted")
+        assert isinstance(first.bybit, OSError)
+        replay = shard.replay_event_window(root, 0, 200)
+        requests = _replayed_requests(replay)
+
+        old = ReconciliationEvidence("absent", 101, 102, 103)
+        pending = _submit(
+            runtime, _resume_leg(PAIR.hyperliquid, hl_url, recorded, requests, old),
+            _resume_leg(PAIR.bybit, by_url, recorded, requests, old),
+            recorded.append,
+        )
+        assert pending == PairSubmissionOutcome(
+            hyperliquid=("reconcile", None), bybit=("reconcile", None)
+        )
+        assert hl_hits == by_hits == [("POST", "/submit")]
+
+        venues = (("hyperliquid", hl_url, PAIR.hyperliquid), ("bybit", by_url, PAIR.bybit))
+        assert _query_truth(root, venues, fills=False) == ()
+        replay = shard.replay_event_window(root, 0, 200)
+        evidence = {
+            venue: build_order_reconciliation_evidence(
+                replay, client_order_id=intent.client_order_id, venue=venue,
+            )
+            for venue, _, intent in venues
+        }
+        assert evidence == {
+            "hyperliquid": ReconciliationEvidence("filled", 120, None, None),
+            "bybit": ReconciliationEvidence("open", 120, None, None),
+        }
+        held = _submit(
+            runtime, _resume_leg(
+                PAIR.hyperliquid, hl_url, recorded, requests, evidence["hyperliquid"],
+            ),
+            _resume_leg(PAIR.bybit, by_url, recorded, requests, evidence["bybit"]),
+            recorded.append,
+        )
+        assert held == PairSubmissionOutcome(
+            hyperliquid=("hold", None), bybit=("hold", None)
+        )
+        expected = [("POST", "/submit"), ("GET", "/orderStatus")]
+        assert len(recorded) == 2 and hl_url != by_url
+        assert hl_hits == expected and by_hits == expected
