@@ -22,7 +22,7 @@ def _payload(source="submission_response", status="open", observed_ns=999, venue
 def _errors(payload=None, **changes):
     arguments = {
         "venue": "hyperliquid", "has_sequence": True, "identity_status": "known",
-        "client_order_id": "0xclient", "recv_wall_ns": 1_000}
+        "client_order_id": "0xclient", "venue_order_id": "7", "recv_wall_ns": 1_000}
     arguments.update(changes)
     return schema.order_observation_binding_errors(payload or _payload(), **arguments)
 
@@ -66,10 +66,48 @@ def test_legacy_and_partial_classification_are_distinct():
     )
 
 
-@pytest.mark.parametrize("source", SOURCES)
-def test_known_gap_source_status_matrix_is_not_yet_applied(source):
-    assert _errors(_payload(source, "pending")) == ()
-    assert _errors(_payload(source, "open", observed_ns=0, venue_time_ms=0)) == ()
+@pytest.mark.parametrize(
+    ("source", "status", "oid", "venue_time_ms"),
+    [
+        ("no_venue_response", "unknown", None, None),
+        ("submission_response", "open", "1", None),
+        ("submission_response", "partially_filled", "1", 7),
+        ("submission_response", "filled", "1", None),
+        ("submission_response", "rejected", None, None),
+        ("submission_response", "rejected", "1", 7),
+        ("order_status", "absent", None, None),
+        *(("order_status", status, "1", 7) for status in
+          ("open", "partially_filled", "filled", "cancelled", "rejected")),
+        *(("execution_history", status, "1", 7) for status in
+          ("partially_filled", "filled")),
+    ],
+)
+def test_bound_observation_source_status_matrix(source, status, oid, venue_time_ms):
+    assert _errors(_payload(source, status, venue_time_ms=venue_time_ms),
+                   venue_order_id=oid) == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "status", "oid", "venue_time_ms"),
+    [
+        ("no_venue_response", "open", None, None),
+        ("no_venue_response", "unknown", None, 1),
+        *(("no_venue_response", "unknown", oid, None) for oid in ("1", "", 0, True)),
+        ("order_status", "absent", "1", None),
+        ("order_status", "absent", None, 1),
+        ("execution_history", "absent", "1", 1),
+        *(("submission_response", "open", oid, None) for oid in (None, "", 0, True)),
+        *(("submission_response", "rejected", oid, None) for oid in ("", 0, True)),
+        ("order_status", "open", "1", None),
+        ("execution_history", "filled", "1", None),
+        *((source, "pending", "1", 7) for source in SOURCES),
+    ],
+)
+def test_impossible_source_status_and_presence_combinations_fail_closed(
+    source, status, oid, venue_time_ms,
+):
+    assert _errors(_payload(source, status, venue_time_ms=venue_time_ms),
+                   venue_order_id=oid) == ("order_observation:invalid_combination",)
 
 
 def test_bound_errors_accumulate_in_fixed_order_and_gate_cross_field_checks():
