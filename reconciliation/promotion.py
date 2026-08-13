@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from execution.writer import WriterAuthority, WriterLease, WriterLeaseError
 from reconciliation.admission import (
     CONTINUOUS_ADMISSION_REASON_KEYS,
+    AdmissionSnapshotInputs,
+    build_continuous_admission_inputs,
     decide_continuous_admission,
 )
 from reconciliation.clock import StateClock
@@ -139,6 +141,24 @@ def apply_continuous_admission(
     if admission.action != "ready":
         demote_writer(lease, admission, now_ns=now_ns)
     return admission
+
+
+def run_admission_cycle(
+    inputs: AdmissionSnapshotInputs, lease: WriterLease
+) -> AdmissionDecision:
+    """Derive and enforce one already-observed continuous admission cycle."""
+    derived = build_continuous_admission_inputs(inputs)
+    return apply_continuous_admission(
+        lease,
+        exposure=derived.exposure,
+        obligation=derived.obligation,
+        pair=inputs.pair,
+        agent_wallet_status=derived.agent_wallet_status,
+        nonce_freeze_reason=derived.nonce_freeze_reason,
+        naked_notional=inputs.naked_notional,
+        max_naked_notional=inputs.max_naked_notional,
+        now_ns=inputs.now_ns,
+    )
 
 
 def _decision(

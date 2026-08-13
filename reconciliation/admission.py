@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from execution.nonce import replay_freeze_reason
-from execution.wallet import AgentWalletRegistration, assess
+from execution.wallet import AgentWalletRegistration, WalletAssessment, assess
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock, advance_exposure_clock, delta_state
 from reconciliation.fx import Notional
@@ -50,6 +50,14 @@ class AdmissionSnapshotInputs:
     max_naked_notional: Notional
     observed_ns: int
     now_ns: int
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DerivedAdmissionState:
+    exposure: ExposureClock
+    obligation: StateClock
+    agent_wallet_status: WalletAssessment
+    nonce_freeze_reason: str | None
 
 
 def _validate_clock(value: object, expected: type, states: frozenset[str], name: str) -> None:
@@ -164,8 +172,10 @@ def decide_continuous_admission(
     return AdmissionDecision(action, ordered)
 
 
-def build_admission_snapshot(inputs: AdmissionSnapshotInputs) -> AdmissionDecision:
-    """Advance this observation's clocks and derive one continuous decision."""
+def build_continuous_admission_inputs(
+    inputs: AdmissionSnapshotInputs,
+) -> DerivedAdmissionState:
+    """Derive the four observation-dependent admission values once."""
     if not isinstance(inputs, AdmissionSnapshotInputs):
         raise TypeError("inputs must be AdmissionSnapshotInputs")
     state = delta_state(inputs.delta, tolerance=inputs.delta_tolerance)
@@ -185,12 +195,23 @@ def build_admission_snapshot(inputs: AdmissionSnapshotInputs) -> AdmissionDecisi
     nonce_reason = replay_freeze_reason(
         inputs.nonce_events, inputs.registration.wallet_fingerprint
     )
-    return decide_continuous_admission(
+    return DerivedAdmissionState(
         exposure=exposure,
         obligation=obligation,
-        pair=inputs.pair,
         agent_wallet_status=wallet_status,
         nonce_freeze_reason=nonce_reason,
+    )
+
+
+def build_admission_snapshot(inputs: AdmissionSnapshotInputs) -> AdmissionDecision:
+    """Advance this observation's clocks and derive one continuous decision."""
+    derived = build_continuous_admission_inputs(inputs)
+    return decide_continuous_admission(
+        exposure=derived.exposure,
+        obligation=derived.obligation,
+        pair=inputs.pair,
+        agent_wallet_status=derived.agent_wallet_status,
+        nonce_freeze_reason=derived.nonce_freeze_reason,
         naked_notional=inputs.naked_notional,
         max_naked_notional=inputs.max_naked_notional,
     )
