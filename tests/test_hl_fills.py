@@ -222,6 +222,11 @@ def test_fill_direction_and_order_id_must_match_documented_wire_values(change):
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
 
 
+@pytest.mark.parametrize("change", [{"coin": []}, {"side": []}])
+def test_unhashable_fill_wire_values_are_unknown_not_parser_errors(change):
+    assert _parse_fills([[{**FILL, **change}]]).unknown_count == 1
+
+
 @pytest.mark.parametrize(
     "changes,error,match",
     [
