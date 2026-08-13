@@ -4,7 +4,12 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
-from execution.orders import T0APairIntents, t0a_pair_intents_match
+from data.shard import EventReplay
+from execution.orders import (
+    ReconciliationEvidence,
+    T0APairIntents,
+    t0a_pair_intents_match,
+)
 from reconciliation.bybit_surface import BybitFilledQuantity
 from reconciliation.clock import StateClock, advance_state_clock
 from reconciliation.hl_fills import HLFilledQuantity
@@ -28,6 +33,46 @@ class LegOutcome:
 class PairState:
     state: str
     unresolved: tuple[tuple[str, str], ...]
+
+
+def build_order_reconciliation_evidence(
+    replay: EventReplay, *, client_order_id: str, venue: str,
+) -> ReconciliationEvidence:
+    """Select one unambiguous latest order observation from durable replay."""
+    if type(replay) is not EventReplay:
+        raise TypeError("replay must be an EventReplay")
+    if not isinstance(client_order_id, str):
+        raise TypeError("client_order_id must be a string")
+    if not client_order_id:
+        raise ValueError("client_order_id must not be empty")
+    if not isinstance(venue, str):
+        raise TypeError("venue must be a string")
+    if venue not in VENUES:
+        raise ValueError("venue is invalid")
+    unknown = ReconciliationEvidence("unknown", None, None, None)
+    if replay.freeze_reasons:
+        return unknown
+    matches = [
+        event
+        for event in replay.events
+        if event["payload_schema"] == "order_observation"
+        and event["venue"] == venue
+        and event["client_order_id"] == client_order_id
+    ]
+    if not matches:
+        return unknown
+    latest_ns = max(event["payload"]["observed_ns"] for event in matches)
+    statuses = {
+        event["payload"]["status"]
+        for event in matches
+        if event["payload"]["observed_ns"] == latest_ns
+    }
+    if len(statuses) != 1:
+        return unknown
+    status = statuses.pop()
+    if status == "unknown":
+        return unknown
+    return ReconciliationEvidence(status, latest_ns, None, None)
 
 
 def _positive_int(value: object, name: str) -> int:
