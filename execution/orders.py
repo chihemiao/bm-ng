@@ -6,15 +6,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from data.schema_dispatch import ORDER_LEGS, ORDER_SIDES, ORDER_SYMBOLS
+from data.schema_dispatch import ORDER_LEGS, ORDER_SIDES, ORDER_STATUSES, ORDER_SYMBOLS
 from data.schema_nonce import signer_nonce_window_bounds
 from data.schema_order_request import order_request_lease_binding_errors
 from execution.nonce import NonceAllocator
 from execution.writer import WriterLease
 
-ORDER_STATUSES = frozenset(
-    {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
-)
 REPLACEABLE_STATUSES = frozenset({"cancelled", "rejected"})
 HOLD_STATUSES = frozenset({"open", "partially_filled", "filled", "cancelled", "rejected"})
 INTENT_FIELDS = ("strategy_id", "strategy_version", "signal_ns", "leg", "replacement_ordinal")
