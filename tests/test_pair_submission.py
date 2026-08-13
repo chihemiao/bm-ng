@@ -1,3 +1,4 @@
+import json
 import socket
 import threading
 from collections.abc import Callable
@@ -10,7 +11,9 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+from data import shard
 from execution.nonce import NonceAllocator, SignerFence
+from execution.order_serde import serialize_order_observation, serialize_order_request
 from execution.orders import (
     OrderRequestRecord,
     ReconciliationEvidence,
@@ -19,6 +22,11 @@ from execution.orders import (
 )
 from execution.submission import PairLegSubmissionInputs, PairSubmissionOutcome, submit_t0a_pair
 from execution.writer import WriterIdentity, WriterLease
+from reconciliation.legs import (
+    PairState,
+    build_order_reconciliation_evidence,
+    build_replayed_fill_pair_state,
+)
 
 WALLET = "b" * 64
 PAIR = make_t0a_pair_intents(
@@ -80,10 +88,33 @@ def server():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             hits.append(self.path)
-            if self.path == "/drop":
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if self.path in {"/drop", "/bybit-submit"}:
                 self.connection.shutdown(socket.SHUT_RDWR)
                 return
             body = self.path.removeprefix("/").encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            hits.append(self.path)
+            payloads = {
+                "/hl/orderStatus": {"status": "filled", "venue_order_id": "7"},
+                "/bybit/orderStatus": {"status": "open", "venue_order_id": "B-7"},
+                "/hl/fills": [[{
+                    "closedPnl": "0", "coin": "BTC", "crossed": False,
+                    "dir": "Open Short", "fee": "0", "feeToken": "USDC",
+                    "hash": "0xabc", "oid": 7, "px": "1", "side": "A",
+                    "startPosition": "0", "sz": "1", "tid": 8, "time": 1000,
+                }]],
+                "/bybit/fills": [{
+                    "retCode": 0, "retMsg": "OK", "retExtInfo": {}, "time": 1000,
+                    "result": {"category": "linear", "nextPageCursor": "", "list": []},
+                }],
+            }
+            body = json.dumps(payloads[self.path]).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
@@ -207,3 +238,80 @@ def test_non_transport_decisions_remain_independent_leg_outcomes(runtime):
     assert result == PairSubmissionOutcome(
         hyperliquid=("hold", None), bybit=("hold", None)
     )
+
+
+def _query_pair_truth(base_url, root):
+    observations = shard.ShardWriter(root, boot_id="boot-query")
+    statuses = {}
+    for sequence, (venue, route, intent) in enumerate(
+        (("hyperliquid", "hl", PAIR.hyperliquid), ("bybit", "bybit", PAIR.bybit)), 1
+    ):
+        with urlopen(f"{base_url}/{route}/orderStatus", timeout=1) as response:
+            statuses[venue] = json.load(response)
+        observations.append_event(serialize_order_observation(
+            venue=venue, client_order_id=intent.client_order_id,
+            venue_order_id=statuses[venue]["venue_order_id"],
+            status=statuses[venue]["status"], observation_source="order_status",
+            observed_ns=120, venue_time_ms=1, conn_id="local-http",
+            boot_id="boot-query", recv_wall_ns=120 + sequence,
+            recv_mono_ns=120 + sequence, source="order_status",
+            seq_within_boot=sequence,
+        ))
+    observations.close()
+    pages = []
+    for route in ("hl", "bybit"):
+        with urlopen(f"{base_url}/{route}/fills", timeout=1) as response:
+            pages.append(json.load(response))
+    return tuple(pages)
+
+
+def test_bybit_disconnect_is_reconciled_as_accepted_unfilled(
+    runtime, server, tmp_path,
+):
+    base_url, hits = server
+    root = tmp_path / "pair-events"
+    writer = shard.ShardWriter(root, boot_id="boot-submit")
+    recorded, errors = [], []
+
+    def record(request):
+        intent = PAIR.hyperliquid if request.leg == "hyperliquid" else PAIR.bybit
+        sequence = len(recorded) + 1
+        writer.append_event(serialize_order_request(
+            intent, request, conn_id="local-http", boot_id="boot-submit",
+            recv_wall_ns=110 + sequence, recv_mono_ns=110 + sequence,
+            source="execution", seq_within_boot=sequence,
+        ))
+        recorded.append(request)
+
+    def transport(path):
+        def call(request):
+            assert recorded[-1] is request
+            return _transport(base_url, path, errors)(request)
+        return call
+
+    outcome = _submit(
+        runtime, _leg(PAIR.hyperliquid, transport("/hl-submit")),
+        _leg(PAIR.bybit, transport("/bybit-submit")), record,
+    )
+    writer.close()
+    assert outcome.hyperliquid == ("persist", b"hl-submit")
+    assert len(errors) == 1 and outcome.bybit is errors[0]
+    assert [row.leg for row in recorded] == ["hyperliquid", "bybit"]
+
+    hl_pages, bybit_pages = _query_pair_truth(base_url, root)
+    replay = shard.replay_event_window(root, 0, 200)
+    assert build_order_reconciliation_evidence(
+        replay, client_order_id=PAIR.hyperliquid.client_order_id, venue="hyperliquid",
+    ) == ReconciliationEvidence("filled", 120, None, None)
+    assert build_order_reconciliation_evidence(
+        replay, client_order_id=PAIR.bybit.client_order_id, venue="bybit",
+    ) == ReconciliationEvidence("open", 120, None, None)
+    assert build_replayed_fill_pair_state(
+        PAIR, replay=replay, hyperliquid_pages=hl_pages, bybit_pages=bybit_pages,
+        since_ms=1000, skew_allowance_ms=0, observed_ns=130,
+        page_complete=True, truncated=False, now_ns=140, max_age_ns=10,
+    ) == PairState("imbalanced", (("bybit", "none"),))
+    assert hits == [
+        "/hl-submit", "/bybit-submit", "/hl/orderStatus", "/bybit/orderStatus",
+        "/hl/fills", "/bybit/fills",
+    ]
