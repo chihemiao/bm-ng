@@ -181,6 +181,19 @@ def make_t0a_pair_intents(
     return T0APairIntents(hyperliquid=hyperliquid, bybit=bybit)
 
 
+def t0a_pair_intents_match(pair: T0APairIntents) -> bool:
+    if not isinstance(pair, T0APairIntents):
+        raise TypeError("pair must be T0APairIntents")
+    hyperliquid, bybit = pair.hyperliquid, pair.bybit
+    topology = (
+        hyperliquid.leg, hyperliquid.side, bybit.leg, bybit.side,
+    ) == ("hyperliquid", "sell", "bybit", "buy")
+    shared = ("strategy_id", "strategy_version", "signal_ns", "symbol", "quantity")
+    return topology and all(
+        getattr(hyperliquid, field) == getattr(bybit, field) for field in shared
+    )
+
+
 def _validate_intent(intent: OrderIntent) -> None:
     _require(isinstance(intent, OrderIntent), "invalid intent")
     expected = rehydrate_order_intent(

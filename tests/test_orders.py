@@ -1,6 +1,7 @@
 import ast
 import re
 import textwrap
+from dataclasses import replace
 from decimal import Decimal, localcontext
 from inspect import Parameter, getsource, signature
 
@@ -17,6 +18,7 @@ from execution.orders import (
     make_t0a_pair_intents,
     order_request_record,
     replacement_intent,
+    t0a_pair_intents_match,
 )
 
 
@@ -211,6 +213,51 @@ def test_t0a_pair_creator_exposes_only_the_frozen_topology_inputs() -> None:
 def test_t0a_pair_creator_delegates_invalid_inputs(changes, error) -> None:
     with pytest.raises(error):
         _t0a(**changes)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"strategy_id": "other"}, {"strategy_version": "git-other"},
+        {"signal_ns": 101}, {"symbol": "ETH"}, {"quantity": Decimal("2")},
+    ],
+)
+def test_t0a_pair_match_rejects_different_pairing_fields(changes) -> None:
+    base, other = _t0a(), _t0a(**changes)
+    assert not t0a_pair_intents_match(replace(base, bybit=other.bybit))
+
+
+def test_t0a_pair_match_freezes_topology_but_not_independent_replacement() -> None:
+    pair = _t0a()
+    assert t0a_pair_intents_match(pair)
+    swapped = replace(
+        pair,
+        hyperliquid=make_order_intent(
+            "funding-carry", "git-deadbeef", 100, "hyperliquid",
+            symbol="BTC", side="buy", quantity=Decimal("1"),
+        ),
+        bybit=make_order_intent(
+            "funding-carry", "git-deadbeef", 100, "bybit",
+            symbol="BTC", side="sell", quantity=Decimal("1"),
+        ),
+    )
+    assert not t0a_pair_intents_match(swapped)
+    wrong_legs = T0APairIntents(
+        hyperliquid=replace(pair.hyperliquid, leg="bybit"),
+        bybit=replace(pair.bybit, leg="hyperliquid"),
+    )
+    assert not t0a_pair_intents_match(wrong_legs)
+    replaced = replacement_intent(
+        pair.bybit, _evidence("cancelled"), quantity=pair.bybit.quantity,
+    )
+    assert replaced.replacement_ordinal == 1
+    assert t0a_pair_intents_match(replace(pair, bybit=replaced))
+
+
+@pytest.mark.parametrize("value", [None, (), object()])
+def test_t0a_pair_match_rejects_non_pair_types(value) -> None:
+    with pytest.raises(TypeError, match="pair must be T0APairIntents"):
+        t0a_pair_intents_match(value)
 
 
 def test_request_record_must_exist_and_match_before_submit() -> None:
