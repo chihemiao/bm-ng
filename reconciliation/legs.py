@@ -4,7 +4,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from execution.orders import T0APairIntents, t0a_pair_intents_match
+from reconciliation.bybit_surface import BybitFilledQuantity
 from reconciliation.clock import StateClock, advance_state_clock
+from reconciliation.hl_fills import HLFilledQuantity
 from reconciliation.state import (
     VENUES,
     SurfaceEvidence,
@@ -117,6 +120,44 @@ def pair_state(legs: Sequence[LegOutcome]) -> PairState:
     else:
         state = "balanced"
     return PairState(state, unresolved)
+
+
+def build_fill_pair_state(
+    pair: T0APairIntents,
+    hl_result: HLFilledQuantity,
+    bybit_result: BybitFilledQuantity,
+    *,
+    now_ns: int,
+    max_age_ns: int,
+) -> PairState:
+    """Bind venue fill results to one T0A intent pair and classify both legs."""
+    if not isinstance(pair, T0APairIntents):
+        raise TypeError("pair must be T0APairIntents")
+    if not isinstance(hl_result, HLFilledQuantity):
+        raise TypeError("hl_result must be HLFilledQuantity")
+    if not isinstance(bybit_result, BybitFilledQuantity):
+        raise TypeError("bybit_result must be BybitFilledQuantity")
+    if not t0a_pair_intents_match(pair):
+        raise ValueError("pair intents do not match T0A topology")
+    if hl_result.client_order_id != pair.hyperliquid.client_order_id:
+        raise ValueError("hl_result does not match hyperliquid intent")
+    if bybit_result.client_order_id != pair.bybit.client_order_id:
+        raise ValueError("bybit_result does not match bybit intent")
+
+    outcomes = []
+    for venue, intent, result in (
+        ("hyperliquid", pair.hyperliquid, hl_result),
+        ("bybit", pair.bybit, bybit_result),
+    ):
+        completion = leg_completion(
+            intended_quantity=intent.quantity,
+            filled_quantity=result.quantity,
+            evidence=result.evidence,
+            now_ns=now_ns,
+            max_age_ns=max_age_ns,
+        )
+        outcomes.append(LegOutcome(venue, completion))
+    return pair_state(outcomes)
 
 
 def obligation_state(pair: PairState) -> str:
