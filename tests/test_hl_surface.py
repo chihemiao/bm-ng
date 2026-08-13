@@ -20,7 +20,7 @@ POSITION = {
 
 
 def _parse(payload, observed_ns=100):
-    module = importlib.import_module("reconciliation.hl_surface")
+    module = importlib.import_module("reconciliation.hl_positions")
     return module.parse_positions_surface(payload, observed_ns=observed_ns)
 
 
@@ -153,7 +153,7 @@ ORDER = {
 
 
 def _parse_orders(payload, observed_ns=100):
-    module = importlib.import_module("reconciliation.hl_surface")
+    module = importlib.import_module("reconciliation.hl_orders")
     return module.parse_orders_surface(payload, observed_ns=observed_ns)
 
 
@@ -226,7 +226,7 @@ def _spot_payload(*balances):
 
 
 def _parse_balances(payload, *, mode="unifiedAccount", observed_ns=100):
-    module = importlib.import_module("reconciliation.hl_surface")
+    module = importlib.import_module("reconciliation.hl_balances")
     return module.parse_balances_surface(payload, mode=mode, observed_ns=observed_ns)
 
 
