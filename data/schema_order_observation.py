@@ -42,9 +42,14 @@ def _matches(value: object, present: bool, rule: int) -> bool:
 
 
 def _combination(source: object, status: object, oid: object, venue_time: object) -> bool:
-    requirements = _RULES.get(source, {}).get(status)
-    return requirements is not None and _matches(oid, _text(oid), requirements[0]) and (
-        _matches(venue_time, venue_time is not None, requirements[1]))
+    source_rules = _RULES.get(source)
+    if source_rules is None:
+        return True
+    requirements = source_rules.get(status)
+    if requirements is None:
+        return False
+    return _matches(oid, _text(oid), requirements[0]) and _matches(
+        venue_time, venue_time is not None, requirements[1])
 
 
 def order_observation_binding_is_legacy(
@@ -65,21 +70,22 @@ def order_observation_binding_errors(
     status, source = payload["status"], payload["source"]
     observed, venue_time = payload["observed_ns"], payload["venue_time_ms"]
     observed_valid, time_valid = _ns(observed), venue_time is None or _ns(venue_time)
+    status_valid = isinstance(status, str) and status in ORDER_STATUSES
+    source_valid = isinstance(source, str) and source in SOURCES
+    matrix_valid = not status_valid or _combination(
+        source, status, venue_order_id, venue_time)
     checks = (
         ("invalid_fields", set(payload) == set(FIELDS)),
-        ("invalid_status", isinstance(status, str) and status in ORDER_STATUSES),
-        ("invalid_source", isinstance(source, str) and source in SOURCES),
+        ("invalid_status", status_valid),
+        ("invalid_source", source_valid),
         ("invalid_observed_ns", observed_valid),
         ("invalid_venue_time_ms", time_valid),
         (f"unknown_venue:{venue}", venue in ORDER_LEGS),
         ("identity_not_known", identity_status == "known"),
         ("invalid_client_order_id", _text(client_order_id)),
+        ("invalid_combination", matrix_valid),
     )
     errors = [f"order_observation:{name}" for name, valid in checks if not valid]
-    if checks[1][1] and checks[2][1] and not _combination(
-        source, status, venue_order_id, venue_time
-    ):
-        errors.append("order_observation:invalid_combination")
     if observed_valid and observed > recv_wall_ns:
         errors.append("order_observation:observed_in_future")
     return tuple(errors)
