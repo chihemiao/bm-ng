@@ -85,7 +85,8 @@ def _submit(runtime, intent, **changes):
         return "accepted"
 
     values = {
-        "intent": intent, "evidence": _evidence(), "request": None,
+        "intent": intent, "evidence": ReconciliationEvidence("absent", 111, 112, 113),
+        "request": None,
         "history": _history(intent), "lease": lease, "allocator": allocator,
         "transport": transport, "request_recorder": record_request,
         "now_ns": 120, "max_signal_age_ns": 50, "max_reconcile_attempts": 3,
