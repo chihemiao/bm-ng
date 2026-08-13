@@ -52,6 +52,30 @@ def test_documented_optional_fill_fields_remain_known(optional):
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
 
 
+@pytest.mark.parametrize("size", ["0", "-0", "1E+2"])
+def test_zero_signed_zero_and_scientific_fill_sizes_remain_known(size):
+    row = {**FILL, "sz": size}
+    evidence = _parse_fills([[row]])
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+    assert evidence.entities.fingerprints == frozenset({_fingerprint(row)})
+
+
+@pytest.mark.parametrize(
+    "size",
+    ["", "abc", "NaN", "sNaN", "Infinity", "-Infinity", "-0.01", 1, 1.0, None],
+)
+def test_unusable_fill_size_is_unknown_without_changing_fetched_count(size):
+    evidence = _parse_fills([[{**FILL, "sz": size}]])
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+    assert not evidence.entities.fingerprints and not evidence.identities.fingerprints
+    assert evidence.fetched_count == len(evidence.identities.fingerprints) + evidence.unknown_count
+
+
+def test_bad_coin_and_bad_size_are_one_unknown_row_not_two():
+    evidence = _parse_fills([[{**FILL, "coin": "SOL", "sz": "bad"}]])
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
 @pytest.mark.parametrize(
     "row",
     [{**FILL, "new": 1}, {key: value for key, value in FILL.items() if key != "fee"},
