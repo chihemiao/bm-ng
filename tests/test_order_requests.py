@@ -258,6 +258,7 @@ def test_order_request_closed_sets_have_one_identity() -> None:
     for name in ("ORDER_SYMBOLS", "ORDER_SIDES", "ORDER_LEGS"):
         assert getattr(schema, name) is getattr(dispatch, name)
         assert getattr(orders, name) is getattr(dispatch, name)
+    assert orders.ORDER_STATUSES is dispatch.ORDER_STATUSES
 
 
 @pytest.mark.parametrize(
