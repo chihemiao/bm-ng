@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -5,11 +6,15 @@ import pytest
 import reconciliation.clock as clock_module
 import reconciliation.exposure as exposure_module
 import reconciliation.legs as legs_module
+from execution.orders import make_t0a_pair_intents
+from reconciliation.bybit_surface import BybitFilledQuantity
 from reconciliation.clock import StateClock
+from reconciliation.hl_fills import HLFilledQuantity
 from reconciliation.legs import (
     LegOutcome,
     PairState,
     advance_obligation_clock,
+    build_fill_pair_state,
     leg_completion,
     obligation_state,
     pair_state,
@@ -297,3 +302,94 @@ def test_obligation_clock_rejects_untyped_pair_input():
 
 def test_obligation_wrapper_uses_the_shared_state_clock_function():
     assert legs_module.advance_state_clock is clock_module.advance_state_clock
+
+
+INTENT_PAIR = make_t0a_pair_intents(
+    "funding-carry", "git-deadbeef", 100, symbol="BTC", quantity=Decimal("1")
+)
+HL_RESULT = HLFilledQuantity(client_order_id=INTENT_PAIR.hyperliquid.client_order_id,
+                             quantity=Decimal("1"), evidence=_evidence())
+BYBIT_RESULT = BybitFilledQuantity(client_order_id=INTENT_PAIR.bybit.client_order_id,
+                                   quantity=Decimal("1"), evidence=_evidence())
+
+
+def _build_pair(**changes) -> PairState:
+    values = {"pair": INTENT_PAIR, "hl_result": HL_RESULT, "bybit_result": BYBIT_RESULT,
+              "now_ns": 110, "max_age_ns": 10}
+    values.update(changes)
+    return build_fill_pair_state(**values)
+
+
+def test_real_t0a_intents_and_fill_results_compose_to_balanced():
+    assert _build_pair() == PairState("balanced", ())
+
+
+@pytest.mark.parametrize(
+    ("quantity_field", "venue"),
+    [("hl_quantity", "hyperliquid"), ("bybit_quantity", "bybit")],
+)
+def test_each_venue_unknown_quantity_symmetrically_dominates_pair(quantity_field, venue):
+    result_field = quantity_field.removesuffix("_quantity") + "_result"
+    result = replace(
+        {"hl_result": HL_RESULT, "bybit_result": BYBIT_RESULT}[result_field], quantity=None
+    )
+    assert _build_pair(**{result_field: result}) == PairState("unknown", ((venue, "unknown"),))
+
+
+def test_two_unknown_quantities_remain_visible_in_pair_state():
+    unresolved = (("bybit", "unknown"), ("hyperliquid", "unknown"))
+    assert _build_pair(
+        hl_result=replace(HL_RESULT, quantity=None),
+        bybit_result=replace(BYBIT_RESULT, quantity=None),
+    ) == PairState("unknown", unresolved)
+
+
+@pytest.mark.parametrize(
+    ("evidence_field", "venue"),
+    [("hl_evidence", "hyperliquid"), ("bybit_evidence", "bybit")],
+)
+def test_each_fill_result_keeps_its_own_authoritativeness(evidence_field, venue):
+    result_field = evidence_field.removesuffix("_evidence") + "_result"
+    result = replace(
+        {"hl_result": HL_RESULT, "bybit_result": BYBIT_RESULT}[result_field],
+        evidence=_evidence(truncated=True),
+    )
+    assert _build_pair(**{result_field: result}) == PairState("unknown", ((venue, "unknown"),))
+
+
+def test_pair_type_is_checked_before_result_types():
+    with pytest.raises(TypeError, match="T0APairIntents"):
+        _build_pair(pair=None, hl_result=None, bybit_result=None)
+
+
+@pytest.mark.parametrize("field", ["hl_result", "bybit_result"])
+def test_fill_result_types_are_exactly_venue_bound(field):
+    with pytest.raises(TypeError, match=field):
+        _build_pair(**{field: object()})
+
+
+def test_mismatched_t0a_pair_is_rejected_before_composition():
+    invalid = replace(INTENT_PAIR, hyperliquid=replace(INTENT_PAIR.hyperliquid, side="buy"))
+    with pytest.raises(ValueError, match="pair intents"):
+        _build_pair(pair=invalid)
+
+
+@pytest.mark.parametrize(
+    ("field", "client_order_id"), [("hl_result", "wrong-hl"), ("bybit_result", "wrong-bybit")]
+)
+def test_each_fill_result_must_match_its_venue_intent(field, client_order_id):
+    result = replace(
+        {"hl_result": HL_RESULT, "bybit_result": BYBIT_RESULT}[field],
+        client_order_id=client_order_id,
+    )
+    with pytest.raises(ValueError, match=field):
+        _build_pair(**{field: result})
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [({"now_ns": True}, TypeError), ({"max_age_ns": 0}, ValueError)],
+)
+def test_pair_composer_forwards_strict_clock_contract(changes, error):
+    with pytest.raises(error):
+        _build_pair(**changes)
