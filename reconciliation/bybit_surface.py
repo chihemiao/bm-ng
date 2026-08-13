@@ -1,9 +1,10 @@
 """Normalize documented Bybit REST responses into reconciliation evidence."""
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
+from data.schema_dispatch import BYBIT_WIRE_SYMBOLS, ORDER_SIDES
 from reconciliation.exposure import LegPosition
 from reconciliation.state import CanonicalSet, SurfaceEvidence, canonical_fingerprint
 
@@ -22,6 +23,12 @@ BYBIT_EXECUTION_TYPES = frozenset(
         "BlockTrade", "MovePosition", "FutureSpread", "CorporateAction", "UNKNOWN",
     }
 )
+
+
+@dataclass(frozen=True, slots=True)
+class BybitFilledQuantity:
+    quantity: Decimal | None
+    evidence: SurfaceEvidence
 
 
 def _validate_inputs(payload: object, symbol: object, observed_ns: object) -> Mapping:
@@ -147,7 +154,7 @@ def build_bybit_leg_position(
     return LegPosition("bybit", symbol, quantity, evidence)
 
 
-def _execution_row(row: object) -> tuple[str, str] | None:
+def _execution_row(row: object) -> tuple[str, str, Decimal, int] | None:
     if not isinstance(row, Mapping) or not FILL_FIELDS <= set(row):
         return None
     symbol, link, side = row["symbol"], row["orderLinkId"], row["side"]
@@ -167,7 +174,9 @@ def _execution_row(row: object) -> tuple[str, str] | None:
     if not parsed_quantity.is_finite() or parsed_quantity < 0:
         return None
     try:
-        return _fingerprint(row), _fingerprint({"symbol": symbol, "execId": exec_id})
+        state = _fingerprint(row)
+        identity = _fingerprint({"symbol": symbol, "execId": exec_id})
+        return state, identity, parsed_quantity, int(exec_time)
     except (TypeError, ValueError):
         return None
 
@@ -208,7 +217,7 @@ def parse_bybit_fills_surface(
         if parsed is None:
             unknown += 1
             continue
-        state, identity = parsed
+        state, identity, _, _ = parsed
         previous = states.get(identity)
         if previous is not None:
             mismatch += previous != state
@@ -220,3 +229,50 @@ def parse_bybit_fills_surface(
         CanonicalSet("bybit.fills.state", 1, frozenset(states.values())),
         CanonicalSet("bybit.fills.identity", 1, frozenset(states)),
     )
+
+
+def _fill_target(
+    order_link_id: object, symbol: object, intended_side: object,
+    since_ms: object, skew_allowance_ms: object,
+) -> None:
+    for name, value in (("order_link_id", order_link_id), ("symbol", symbol),
+                        ("intended_side", intended_side)):
+        if not isinstance(value, str):
+            raise TypeError(f"{name} must be a string")
+    if not order_link_id:
+        raise ValueError("order_link_id must not be empty")
+    if symbol not in BYBIT_WIRE_SYMBOLS:
+        raise ValueError("symbol must be BTC or ETH")
+    if intended_side not in ORDER_SIDES:
+        raise ValueError("intended_side must be buy or sell")
+    for name, value in (("since_ms", since_ms), ("skew_allowance_ms", skew_allowance_ms)):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative")
+
+
+def build_bybit_filled_quantity(
+    pages: Sequence[Mapping[str, object]], *, order_link_id: str, symbol: str,
+    intended_side: str, since_ms: int, skew_allowance_ms: int, observed_ns: int,
+) -> BybitFilledQuantity:
+    """Build an exact-link, canonical-symbol quantity from one REST response chain."""
+    _fill_target(order_link_id, symbol, intended_side, since_ms, skew_allowance_ms)
+    evidence = parse_bybit_fills_surface(pages, observed_ns=observed_ns)
+    seen = set()
+    signed = Decimal(0)
+    earliest_ms = max(0, since_ms - skew_allowance_ms)
+    for row in (row for page in pages for row in page["result"]["list"]):
+        parsed = _execution_row(row)
+        if parsed is None or parsed[1] in seen:
+            continue
+        _, identity, quantity, execution_ms = parsed
+        seen.add(identity)
+        matches = row["symbol"] == BYBIT_WIRE_SYMBOLS[symbol]
+        matches = matches and row["orderLinkId"] == order_link_id
+        matches = matches and execution_ms >= earliest_ms
+        if matches:
+            canonical_side = row["side"].lower()
+            signed += quantity if canonical_side == "buy" else -quantity
+    aligned = signed if intended_side == "buy" else -signed
+    return BybitFilledQuantity(aligned if aligned >= 0 else None, evidence)

@@ -1,5 +1,8 @@
+import ast
 import importlib
 import inspect
+import textwrap
+from decimal import Decimal
 
 import pytest
 
@@ -26,6 +29,16 @@ def _payload(*rows, cursor=""):
 def _parse(*pages, observed_ns=100):
     values = pages or (_payload(ROW),)
     return _module().parse_bybit_fills_surface(values, observed_ns=observed_ns)
+
+
+def _build(*pages, **changes):
+    values = {
+        "order_link_id": "client-1", "symbol": "BTC", "intended_side": "buy",
+        "since_ms": int(ROW["execTime"]), "skew_allowance_ms": 0, "observed_ns": 100,
+    }
+    values.update(changes)
+    payloads = pages or (_payload(ROW),)
+    return _module().build_bybit_filled_quantity(payloads, **values)
 
 
 def test_documented_trade_execution_has_full_state_and_stable_execution_identity():
@@ -133,3 +146,103 @@ def test_parser_reuses_the_exact_bybit_envelope_and_has_a_narrow_signature():
     assert tuple(inspect.signature(_module().parse_bybit_fills_surface).parameters) == (
         "pages", "observed_ns",
     )
+
+
+def test_target_execution_builds_quantity_and_evidence_from_one_response_chain():
+    module = _module()
+    result = _build(_payload(ROW), observed_ns=321)
+    assert isinstance(result, module.BybitFilledQuantity)
+    assert result.quantity == Decimal("0.1")
+    assert result.evidence == module.parse_bybit_fills_surface(
+        (_payload(ROW),), observed_ns=321
+    )
+
+
+def test_canonical_symbol_exact_link_and_time_jointly_bind_quantity_not_evidence():
+    rows = [
+        ROW,
+        {**ROW, "orderLinkId": "CLIENT-1", "execQty": "10", "execId": "wrong-link"},
+        {**ROW, "symbol": "ETHUSDT", "execQty": "10", "execId": "wrong-symbol"},
+        {**ROW, "execTime": str(int(ROW["execTime"]) - 1), "execQty": "10", "execId": "old"},
+    ]
+    result = _build(_payload(*rows))
+    assert result.quantity == Decimal("0.1")
+    assert result.evidence.fetched_count == 4
+
+
+def test_duplicate_execution_across_pages_is_not_counted_twice():
+    result = _build(_payload(ROW, cursor="next"), _payload(ROW))
+    assert result.quantity == Decimal("0.1")
+
+
+def test_exchange_time_window_is_inclusive_with_explicit_skew_allowance():
+    at_boundary = {**ROW, "execTime": "100", "execId": "boundary"}
+    too_early = {**ROW, "execTime": "99", "execId": "early"}
+    result = _build(
+        _payload(at_boundary, too_early), since_ms=105, skew_allowance_ms=5
+    )
+    assert result.quantity == Decimal("0.1")
+
+
+@pytest.mark.parametrize(
+    "intended_side,first_side,second_side",
+    [("buy", "Buy", "Sell"), ("sell", "Sell", "Buy")],
+)
+def test_mixed_wire_sides_are_mapped_then_aligned_to_canonical_intent(
+    intended_side, first_side, second_side
+):
+    rows = [
+        {**ROW, "side": first_side, "execQty": "0.6", "execId": "first"},
+        {**ROW, "side": second_side, "execQty": "0.2", "execId": "second"},
+    ]
+    assert _build(_payload(*rows), intended_side=intended_side).quantity == Decimal("0.4")
+
+
+def test_net_movement_opposite_the_intent_is_unknown_not_absolute_or_zero():
+    rows = [
+        {**ROW, "side": "Buy", "execQty": "0.2", "execId": "first"},
+        {**ROW, "side": "Sell", "execQty": "0.6", "execId": "second"},
+    ]
+    assert _build(_payload(*rows)).quantity is None
+
+
+def test_decimal_quantities_sum_without_binary_float_and_empty_chain_is_zero():
+    rows = [ROW, {**ROW, "execQty": "0.2", "execId": "second"}]
+    assert _build(_payload(*rows)).quantity == Decimal("0.3")
+    assert _build(_payload()).quantity == Decimal(0)
+
+
+@pytest.mark.parametrize(
+    "changes,error,match",
+    [
+        ({"order_link_id": None}, TypeError, "order_link_id"),
+        ({"order_link_id": ""}, ValueError, "order_link_id"),
+        ({"symbol": None}, TypeError, "symbol"), ({"symbol": "SOL"}, ValueError, "symbol"),
+        ({"intended_side": "Buy"}, ValueError, "intended_side"),
+        ({"since_ms": True}, TypeError, "since_ms"), ({"since_ms": -1}, ValueError, "since_ms"),
+        ({"skew_allowance_ms": True}, TypeError, "skew_allowance_ms"),
+        ({"skew_allowance_ms": -1}, ValueError, "skew_allowance_ms"),
+    ],
+)
+def test_fill_quantity_boundaries_reject_ambiguous_inputs(changes, error, match):
+    with pytest.raises(error, match=match):
+        _build(_payload(ROW), **changes)
+
+
+def test_aggregator_uses_shared_row_parser_and_has_a_narrow_signature():
+    module = _module()
+    dispatch = importlib.import_module("data.schema_dispatch")
+    assert module.BYBIT_WIRE_SYMBOLS is dispatch.BYBIT_WIRE_SYMBOLS
+    parsed = module._execution_row(ROW)
+    assert parsed[2:] == (Decimal("0.1"), int(ROW["execTime"]))
+    function = module.build_bybit_filled_quantity
+    assert tuple(inspect.signature(function).parameters) == (
+        "pages", "order_link_id", "symbol", "intended_side", "since_ms",
+        "skew_allowance_ms", "observed_ns",
+    )
+    source = textwrap.dedent(inspect.getsource(function))
+    calls = {
+        node.func.id for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert {"parse_bybit_fills_surface", "_execution_row"} <= calls
