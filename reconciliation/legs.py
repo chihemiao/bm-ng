@@ -169,22 +169,22 @@ def pair_state(legs: Sequence[LegOutcome]) -> PairState:
 
 def build_fill_pair_state(
     pair: T0APairIntents,
-    hl_result: HLFilledQuantity,
+    hl_result: HLFilledQuantity | None,
     bybit_result: BybitFilledQuantity,
     *,
     now_ns: int,
     max_age_ns: int,
 ) -> PairState:
-    """Bind venue fill results to one T0A intent pair and classify both legs."""
+    """Bind fills to one pair; missing HL bindings are unknown, never zero."""
     if not isinstance(pair, T0APairIntents):
         raise TypeError("pair must be T0APairIntents")
-    if not isinstance(hl_result, HLFilledQuantity):
+    if hl_result is not None and not isinstance(hl_result, HLFilledQuantity):
         raise TypeError("hl_result must be HLFilledQuantity")
     if not isinstance(bybit_result, BybitFilledQuantity):
         raise TypeError("bybit_result must be BybitFilledQuantity")
     if not t0a_pair_intents_match(pair):
         raise ValueError("pair intents do not match T0A topology")
-    if hl_result.client_order_id != pair.hyperliquid.client_order_id:
+    if hl_result is not None and hl_result.client_order_id != pair.hyperliquid.client_order_id:
         raise ValueError("hl_result does not match hyperliquid intent")
     if bybit_result.client_order_id != pair.bybit.client_order_id:
         raise ValueError("bybit_result does not match bybit intent")
@@ -194,7 +194,7 @@ def build_fill_pair_state(
         ("hyperliquid", pair.hyperliquid, hl_result),
         ("bybit", pair.bybit, bybit_result),
     ):
-        completion = leg_completion(
+        completion = "unknown" if result is None else leg_completion(
             intended_quantity=intent.quantity,
             filled_quantity=result.quantity,
             evidence=result.evidence,
