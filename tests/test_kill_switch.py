@@ -1,7 +1,8 @@
 import ast
 import inspect
 from collections.abc import Mapping, Sequence
-from typing import get_type_hints
+from dataclasses import FrozenInstanceError, fields
+from typing import get_args, get_type_hints
 
 import pytest
 
@@ -9,6 +10,8 @@ from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
 from execution.wallet import AgentWalletRegistration
 from reconciliation.kill_switch import (
     KILL_SWITCH_KEY_EXPIRY_LEAD_NS,
+    KillSwitchDecision,
+    decide_kill_switch,
     key_expiry_triggered,
     nonce_anomaly_triggered,
 )
@@ -158,3 +161,62 @@ def test_nonce_detector_has_the_frozen_pure_sequence_contract() -> None:
     module_source = inspect.getsource(inspect.getmodule(nonce_anomaly_triggered))
     assert "reconciliation.admission" not in module_source
     assert "reconciliation.state" not in module_source
+
+
+@pytest.mark.parametrize(
+    ("triggered", "orders_known", "positions_known", "action"),
+    [
+        (False, True, True, "continue"),
+        (True, True, True, "flatten_and_stop"),
+        (False, False, True, "cancel_only_freeze"),
+        (True, False, True, "cancel_only_freeze"),
+        (False, True, False, "cancel_only_freeze"),
+        (True, True, False, "cancel_only_freeze"),
+        (False, False, False, "cancel_only_freeze"),
+        (True, False, False, "cancel_only_freeze"),
+    ],
+)
+def test_kill_switch_decision_table(
+    triggered: bool, orders_known: bool, positions_known: bool, action: str,
+) -> None:
+    assert decide_kill_switch(
+        triggered=triggered,
+        orders_known=orders_known,
+        positions_known=positions_known,
+    ) == KillSwitchDecision(action)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("triggered", 1), ("triggered", None),
+        ("orders_known", 1), ("orders_known", None),
+        ("positions_known", 1), ("positions_known", None),
+    ],
+)
+def test_kill_switch_decision_requires_exact_booleans(field, value) -> None:
+    values = {"triggered": False, "orders_known": True, "positions_known": True}
+    values[field] = value
+    with pytest.raises(TypeError, match=field):
+        decide_kill_switch(**values)
+
+
+def test_kill_switch_decision_has_one_frozen_closed_action() -> None:
+    assert [field.name for field in fields(KillSwitchDecision)] == ["action"]
+    hints = get_type_hints(KillSwitchDecision)
+    assert set(get_args(hints["action"])) == {
+        "continue", "flatten_and_stop", "cancel_only_freeze",
+    }
+    decision = KillSwitchDecision("continue")
+    with pytest.raises(FrozenInstanceError):
+        decision.action = "flatten_and_stop"
+    with pytest.raises(ValueError, match="action"):
+        KillSwitchDecision("partial_flatten")
+
+    signature = inspect.signature(decide_kill_switch)
+    assert tuple(signature.parameters) == ("triggered", "orders_known", "positions_known")
+    assert all(
+        parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        for parameter in signature.parameters.values()
+    )
+    assert get_type_hints(decide_kill_switch)["return"] is KillSwitchDecision
