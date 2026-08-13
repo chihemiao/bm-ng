@@ -159,6 +159,11 @@ def test_target_execution_builds_quantity_and_evidence_from_one_response_chain()
     )
 
 
+def test_bybit_filled_quantity_preserves_exact_client_identity():
+    row = {**ROW, "orderLinkId": "Client-1"}
+    assert _build(_payload(row), order_link_id="Client-1").client_order_id == "Client-1"
+
+
 def test_canonical_symbol_exact_link_and_time_jointly_bind_quantity_not_evidence():
     rows = [
         ROW,
@@ -247,6 +252,18 @@ def test_aggregator_uses_shared_row_parser_and_has_a_narrow_signature():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert {"parse_bybit_fills_surface", "_execution_row"} <= calls
+
+
+def test_bybit_filled_quantity_requires_keyword_only_identity_value_and_evidence():
+    module = _module()
+    assert tuple(module.BybitFilledQuantity.__dataclass_fields__) == (
+        "client_order_id", "quantity", "evidence",
+    )
+    evidence = _parse()
+    with pytest.raises(TypeError):
+        module.BybitFilledQuantity(quantity=Decimal("0.1"), evidence=evidence)
+    with pytest.raises(TypeError):
+        module.BybitFilledQuantity("client-1", Decimal("0.1"), evidence)
 
 
 @pytest.mark.parametrize(
