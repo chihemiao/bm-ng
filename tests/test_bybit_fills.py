@@ -1,6 +1,5 @@
 import importlib
 import inspect
-from decimal import Decimal
 
 import pytest
 
@@ -8,8 +7,7 @@ from reconciliation.state import canonical_fingerprint, surface_is_authoritative
 
 ROW = {
     "symbol": "BTCUSDT", "orderLinkId": "client-1", "side": "Buy",
-    "execId": "execution-1", "execQty": "0.1", "execType": "Trade",
-    "execTime": "1672282722429",
+    "execId": "execution-1", "execQty": "0.1", "execType": "Trade", "execTime": "1672282722429",
 }
 
 
@@ -19,11 +17,9 @@ def _module():
 
 def _payload(*rows, cursor=""):
     return {
-        "retCode": 0,
-        "retMsg": "OK",
+        "retCode": 0, "retMsg": "OK",
         "result": {"category": "linear", "nextPageCursor": cursor, "list": list(rows)},
-        "retExtInfo": {},
-        "time": 1672283754510,
+        "retExtInfo": {}, "time": 1672283754510,
     }
 
 
@@ -47,13 +43,11 @@ def test_documented_trade_execution_has_full_state_and_stable_execution_identity
 
 
 @pytest.mark.parametrize(
-    "change",
-    [
+    "change", [
         {"symbol": "SOLUSDT"}, {"orderLinkId": 1}, {"side": "buy"},
         {"execId": ""}, {"execQty": ""}, {"execQty": "NaN"},
-        {"execQty": "-0.1"}, {"execTime": "00"}, {"execTime": "١"},
-    ],
-)
+        {"execQty": "-0.1"}, {"execTime": "00"}, {"execTime": "١"}, {"execTime": 1},
+    ])
 def test_unusable_consumed_value_is_one_unknown_trade_row(change):
     evidence = _parse(_payload({**ROW, **change}))
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
