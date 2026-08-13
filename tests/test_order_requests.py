@@ -6,6 +6,13 @@ import pytest
 from data.contracts import ContractError, order_request_is_legacy, validate_envelope
 from execution.orders import OrderContractError, make_order_intent, order_request_record
 
+REQUEST_FIELDS = (
+    "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
+    "allocated_nonce", "strategy_id", "strategy_version", "signal_ns", "leg",
+    "replacement_ordinal", "symbol", "side", "quantity", "recorded_ns",
+)
+NEW_REQUEST_FIELDS = REQUEST_FIELDS[5:]
+
 
 def _intent(**changes):
     values = {
@@ -28,6 +35,15 @@ def _bound_event(venue="hyperliquid", *, allocated_nonce=7, sequence=True, **cha
         "writer_instance_id": "writer-one",
         "wallet_fingerprint": "b" * 64,
         "allocated_nonce": allocated_nonce,
+        "strategy_id": "funding-carry",
+        "strategy_version": "git-deadbeef",
+        "signal_ns": 100,
+        "leg": venue,
+        "replacement_ordinal": 0,
+        "symbol": "BTC",
+        "side": "buy",
+        "quantity": "1",
+        "recorded_ns": 110,
     }
     payload.update(changes)
     event = {
@@ -108,13 +124,32 @@ def test_order_request_rejects_wrong_venue_nonce_semantics(
     assert str(contract_error.value) == error
 
 
-def test_four_field_order_request_is_partial_not_legacy() -> None:
+def test_partial_order_request_names_missing_allocated_nonce() -> None:
     event = _bound_event()
     event["payload"].pop("allocated_nonce")
     expected = "order_request:partial_binding:allocated_nonce"
     with pytest.raises(ContractError) as error:
         order_request_is_legacy(event)
     assert str(error.value) == expected
+
+
+def test_old_five_field_bound_request_is_partial_not_legacy() -> None:
+    event = _bound_event()
+    for field in NEW_REQUEST_FIELDS:
+        event["payload"].pop(field)
+    expected = f"order_request:partial_binding:{','.join(sorted(NEW_REQUEST_FIELDS))}"
+    with pytest.raises(ContractError) as error:
+        order_request_is_legacy(event)
+    assert str(error.value) == expected
+
+
+@pytest.mark.parametrize("missing", REQUEST_FIELDS)
+def test_bound_request_fields_are_one_atomic_presence_group(missing) -> None:
+    event = _bound_event()
+    event["payload"].pop(missing)
+    with pytest.raises(ContractError) as error:
+        validate_envelope(event)
+    assert str(error.value) == f"order_request:partial_binding:{missing}"
 
 
 def test_unbound_order_request_remains_legacy() -> None:
@@ -195,3 +230,39 @@ def test_bound_order_request_requires_a_durable_sequence() -> None:
     with pytest.raises(ContractError) as error:
         validate_envelope(_bound_event(sequence=False))
     assert str(error.value) == "order_request:partial_binding:sequence"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("symbol", "SOL"), ("symbol", 1),
+        ("side", "long"), ("side", 1),
+        ("leg", "unknown"), ("leg", 1),
+    ],
+)
+def test_order_request_rejects_invalid_closed_trade_terms(field, value) -> None:
+    event = _bound_event(**{field: value})
+    with pytest.raises(ContractError) as error:
+        validate_envelope(event)
+    assert str(error.value) == f"order_request:invalid_{field}"
+
+
+def test_order_request_closed_sets_have_one_identity() -> None:
+    dispatch = import_module("data.schema_dispatch")
+    schema = import_module("data.schema_order_request")
+    orders = import_module("execution.orders")
+    for name in ("ORDER_SYMBOLS", "ORDER_SIDES", "ORDER_LEGS"):
+        assert getattr(schema, name) is getattr(dispatch, name)
+        assert getattr(orders, name) is getattr(dispatch, name)
+
+
+def test_known_gap_quantity_value_is_not_yet_validated() -> None:
+    assert validate_envelope(_bound_event(quantity="abc"))
+
+
+def test_known_gap_integer_fields_are_not_yet_validated() -> None:
+    assert validate_envelope(_bound_event(signal_ns=-5))
+
+
+def test_known_gap_strategy_strings_are_not_yet_validated() -> None:
+    assert validate_envelope(_bound_event(strategy_id=""))
