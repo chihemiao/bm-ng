@@ -281,8 +281,11 @@ def test_order_request_rejects_invalid_strategy_identifiers(field, value) -> Non
 @pytest.mark.parametrize("field", ["signal_ns", "replacement_ordinal", "recorded_ns"])
 @pytest.mark.parametrize("value", [-1, True, "1", 1.0])
 def test_order_request_rejects_invalid_integer_domains(field, value) -> None:
+    changes = {field: value}
+    if field == "recorded_ns":
+        changes["signal_ns"] = 0
     with pytest.raises(ContractError) as error:
-        validate_envelope(_bound_event(**{field: value}))
+        validate_envelope(_bound_event(**changes))
     assert str(error.value) == f"order_request:invalid_{field}"
 
 
