@@ -264,7 +264,7 @@ def test_order_request_closed_sets_have_one_identity() -> None:
     ("field", "value"),
     [("quantity", "abc"), ("signal_ns", -5), ("strategy_id", "")],
 )
-def test_order_request_rejects_the_b1a_known_value_gaps(field, value) -> None:
+def test_order_request_rejects_b1a_value_domain_violations(field, value) -> None:
     with pytest.raises(ContractError) as error:
         validate_envelope(_bound_event(**{field: value}))
     assert str(error.value) == f"order_request:invalid_{field}"
