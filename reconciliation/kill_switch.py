@@ -65,3 +65,19 @@ def nonce_anomaly_triggered(
     freeze = replay_freeze_reason(rows, wallet_fingerprint)
     conflict = replay_signer_nonce_conflict(rows, wallet_fingerprint)
     return freeze is not None or conflict is not None
+
+
+def key_and_nonce_triggered(
+    registration: AgentWalletRegistration,
+    nonce_events: Sequence[Mapping[str, object]],
+    *,
+    now_ns: int,
+) -> bool:
+    """Combine current key lifetime and the matching durable nonce stream."""
+    if not isinstance(nonce_events, Sequence) or isinstance(nonce_events, (str, bytes)):
+        raise TypeError("nonce_events must be a sequence")
+    key = key_expiry_triggered(registration, now_ns=now_ns)
+    nonce = nonce_anomaly_triggered(
+        nonce_events, wallet_fingerprint=registration.wallet_fingerprint,
+    )
+    return key or nonce
