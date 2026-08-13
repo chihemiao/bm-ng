@@ -12,9 +12,11 @@ from execution.orders import (
     OrderRequestRecord,
     ReconciliationEvidence,
     ReplayedDecisionHistory,
+    T0APairIntents,
     _require,
     decide_submission,
     order_request_record,
+    t0a_pair_intents_match,
 )
 from execution.writer import WriterLease
 
@@ -25,6 +27,20 @@ class ObservedFields:
     status: str
     observation_source: str
     venue_time_ms: int | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PairLegSubmissionInputs:
+    evidence: ReconciliationEvidence
+    request: OrderRequestRecord | None
+    history: ReplayedDecisionHistory
+    transport: Callable[[OrderRequestRecord], object]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PairSubmissionOutcome:
+    hyperliquid: object | BaseException
+    bybit: object | BaseException
 
 
 class ObservationMappingError(RuntimeError):
@@ -178,3 +194,33 @@ def submit_order(
     )
     request_recorder(built)
     return decision, transport(built)
+
+
+def submit_t0a_pair(
+    *, pair: T0APairIntents, hyperliquid: PairLegSubmissionInputs,
+    bybit: PairLegSubmissionInputs, lease: WriterLease, allocator: NonceAllocator,
+    request_recorder: Callable[[OrderRequestRecord], None], now_ns: int,
+    max_signal_age_ns: int, max_reconcile_attempts: int, now_ms: int, decided_ns: int,
+) -> PairSubmissionOutcome:
+    """Submit each T0A leg once in deterministic order and preserve both outcomes."""
+    if not isinstance(pair, T0APairIntents):
+        raise TypeError("pair must be T0APairIntents")
+    if not t0a_pair_intents_match(pair):
+        raise ValueError("pair intents do not match T0A topology")
+
+    def run(intent: OrderIntent, values: PairLegSubmissionInputs) -> object | BaseException:
+        try:
+            return submit_order(
+                intent, values.evidence, values.request, values.history, lease, allocator,
+                values.transport, request_recorder, now_ns=now_ns,
+                max_signal_age_ns=max_signal_age_ns,
+                max_reconcile_attempts=max_reconcile_attempts, now_ms=now_ms,
+                decided_ns=decided_ns,
+            )
+        except BaseException as error:
+            return error
+
+    return PairSubmissionOutcome(
+        hyperliquid=run(pair.hyperliquid, hyperliquid),
+        bybit=run(pair.bybit, bybit),
+    )
