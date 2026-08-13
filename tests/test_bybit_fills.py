@@ -231,6 +231,8 @@ def test_fill_quantity_boundaries_reject_ambiguous_inputs(changes, error, match)
 
 def test_aggregator_uses_shared_row_parser_and_has_a_narrow_signature():
     module = _module()
+    dispatch = importlib.import_module("data.schema_dispatch")
+    assert module.BYBIT_WIRE_SYMBOLS is dispatch.BYBIT_WIRE_SYMBOLS
     parsed = module._execution_row(ROW)
     assert parsed[2:] == (Decimal("0.1"), int(ROW["execTime"]))
     function = module.build_bybit_filled_quantity
