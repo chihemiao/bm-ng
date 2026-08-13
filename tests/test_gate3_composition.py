@@ -1,14 +1,22 @@
 import ast
 import inspect
+import json
+import socket
+import threading
+from contextlib import contextmanager
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import Request, urlopen
 
 import pytest
 
 import reconciliation.admission as admission
 import reconciliation.promotion as promotion
+from data import shard
 from data.contracts import VALIDITY_NS
 from execution.nonce import NonceAllocator, SignerFence
+from execution.order_serde import rehydrate_order_request, serialize_order_request
 from execution.orders import (
     ReconciliationEvidence,
     ReplayedDecisionHistory,
@@ -33,6 +41,40 @@ from reconciliation.state import AdmissionDecision
 ACCOUNT_DIGEST = "a" * 64
 WALLET = "b" * 64
 INSTANCE = "writer-one"
+
+
+@contextmanager
+def _ack_loss_server():
+    truth = {"client_order_id": None, "submission_hits": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            truth["client_order_id"] = json.loads(body)["client_order_id"]
+            truth["submission_hits"] += 1
+            self.connection.shutdown(socket.SHUT_RDWR)
+
+        def do_GET(self):
+            body = json.dumps(
+                {"client_order_id": truth["client_order_id"],
+                 "status": "filled", "observed_ns": 111}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", truth
+    finally:
+        server.shutdown()
+        thread.join()
 
 
 def _continuous_inputs(**changes: object) -> dict[str, object]:
@@ -177,6 +219,58 @@ def test_ready_authority_records_nonce_request_then_transports_once(
     assert _submit(authorized_runtime) == ("persist", "accepted")
     assert [kind for kind, _ in effects] == ["nonce", "request", "transport"]
     assert allocator.last_nonce == 501
+
+
+def test_real_ack_loss_never_retransports_before_venue_truth_catches_up(
+    authorized_runtime, tmp_path: Path,
+) -> None:
+    lease, allocator, _, _ = authorized_runtime
+    intent = make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "hyperliquid",
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+    )
+    event_root = tmp_path / "ack-loss-events"
+    event_writer = shard.ShardWriter(event_root, boot_id="boot-orders")
+
+    def record_request(record):
+        event = serialize_order_request(
+            intent, record, conn_id="local-http", boot_id="boot-orders",
+            recv_wall_ns=110, recv_mono_ns=110, source="execution",
+            seq_within_boot=1,
+        )
+        event_writer.append_event(event)
+        event_writer.close()
+
+    def call(evidence, request, transport):
+        return submit_order(
+            intent, evidence, request,
+            ReplayedDecisionHistory(intent.client_order_id, 0, False),
+            lease, allocator, transport, record_request,
+            now_ns=120, max_signal_age_ns=50, max_reconcile_attempts=3,
+            now_ms=500, decided_ns=110,
+        )
+
+    with _ack_loss_server() as (base_url, truth):
+        def transport(record):
+            body = json.dumps({"client_order_id": record.client_order_id}).encode()
+            with urlopen(Request(base_url, data=body, method="POST"), timeout=1) as response:
+                return response.read()
+
+        old_absence = ReconciliationEvidence("absent", 101, 102, 103)
+        with pytest.raises(OSError):
+            call(old_absence, None, transport)
+        replay = shard.replay_event_window(event_root, 0, 200)
+        _, durable_request = rehydrate_order_request(replay.events[0])
+        assert truth == {"client_order_id": intent.client_order_id, "submission_hits": 1}
+
+        assert call(old_absence, durable_request, transport) == ("reconcile", None)
+        assert truth["submission_hits"] == 1
+
+        with urlopen(f"{base_url}/orderStatus", timeout=1) as response:
+            observed = json.load(response)
+        filled = ReconciliationEvidence(observed["status"], *(observed["observed_ns"],) * 3)
+        assert call(filled, durable_request, transport) == ("hold", None)
+        assert truth["submission_hits"] == 1
 
 
 def test_applied_continuous_freeze_prevents_transport(

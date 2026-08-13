@@ -232,9 +232,14 @@ def _validate_evidence(evidence: ReconciliationEvidence) -> None:
         _require(value is None or _valid_ns(value), "invalid evidence timestamp")
 
 
-def _authoritative_after(intent: OrderIntent, evidence: ReconciliationEvidence) -> bool:
+def _authoritative_after(
+    intent: OrderIntent,
+    evidence: ReconciliationEvidence,
+    request: OrderRequestRecord | None = None,
+) -> bool:
+    watermark_ns = intent.signal_ns if request is None else request.recorded_ns
     times = (evidence.orders_ns, evidence.fills_ns, evidence.positions_ns)
-    return all(value is not None and value > intent.signal_ns for value in times)
+    return all(value is not None and value > watermark_ns for value in times)
 
 
 def _validate_history(intent: OrderIntent, history: ReplayedDecisionHistory) -> None:
@@ -287,7 +292,9 @@ def decide_submission(
     if history.frozen:
         return "freeze"
     ambiguous = evidence.status in {"pending", "unknown"}
-    ambiguous |= evidence.status == "absent" and not _authoritative_after(intent, evidence)
+    ambiguous |= evidence.status == "absent" and not _authoritative_after(
+        intent, evidence, request,
+    )
     if ambiguous:
         return "freeze" if history.reconcile_attempts >= max_reconcile_attempts else "reconcile"
     if evidence.status in HOLD_STATUSES:

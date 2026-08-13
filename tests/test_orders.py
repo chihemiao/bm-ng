@@ -260,7 +260,7 @@ def test_t0a_pair_match_rejects_non_pair_types(value) -> None:
         t0a_pair_intents_match(value)
 
 
-def test_request_record_must_exist_and_match_before_submit() -> None:
+def test_request_needs_post_record_absence_and_must_match_before_submit() -> None:
     intent = _intent()
     evidence = _evidence()
     assert _decide(intent, evidence) == "persist"
@@ -274,7 +274,12 @@ def test_request_record_must_exist_and_match_before_submit() -> None:
         "leg": "hyperliquid",
         "replacement_ordinal": 0,
     }
-    assert _decide(intent, evidence, request=request) == "submit"
+    assert _decide(intent, evidence, request=request) == "reconcile"
+    post_request = _evidence(orders_ns=111, fills_ns=112, positions_ns=113)
+    assert _decide(intent, post_request, request=request) == "submit"
+    equal_request = _request(intent, recorded_ns=111)
+    equal_time = _evidence(orders_ns=111, fills_ns=111, positions_ns=111)
+    assert _decide(intent, equal_time, request=equal_request) == "reconcile"
 
     wrong_request = _request(_intent(leg="bybit"))
     with pytest.raises(OrderContractError, match="request does not match intent"):
@@ -319,11 +324,12 @@ def test_any_known_order_state_holds_the_same_intent(status) -> None:
     assert _decide(intent, _evidence(status), now_ns=1_000) == "hold"
 
 
-def test_only_authoritative_absence_can_reject_or_submit_a_stale_signal() -> None:
+def test_only_post_request_absence_can_submit_or_reject_a_stale_signal() -> None:
     intent = _intent()
     request = _request(intent)
-    assert _decide(intent, _evidence(), request=request, now_ns=150) == "submit"
-    assert _decide(intent, _evidence(), request=request, now_ns=151) == "reject_stale"
+    evidence = _evidence(orders_ns=111, fills_ns=112, positions_ns=113)
+    assert _decide(intent, evidence, request=request, now_ns=150) == "submit"
+    assert _decide(intent, evidence, request=request, now_ns=151) == "reject_stale"
 
 
 def test_replacement_requires_complete_cancelled_or_rejected_evidence() -> None:
