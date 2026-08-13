@@ -70,10 +70,21 @@ def test_zero_signed_zero_and_scientific_execution_quantities_are_known(quantity
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
 
 
-def test_non_trade_executions_are_out_of_scope_before_validation_and_counting():
-    evidence = _parse(_payload({"execType": "Funding"}, {**ROW, "execType": "AdlTrade"}))
+def test_documented_non_trade_executions_are_out_of_scope_before_counting():
+    module = _module()
+    assert module.BYBIT_EXECUTION_TYPES == {
+        "Trade", "AdlTrade", "Funding", "BustTrade", "Delivery", "Settle",
+        "BlockTrade", "MovePosition", "FutureSpread", "CorporateAction", "UNKNOWN",
+    }
+    non_trades = module.BYBIT_EXECUTION_TYPES - {"Trade"}
+    evidence = _parse(_payload(*({"execType": value} for value in non_trades)))
     assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (0, 0, 0)
     assert surface_is_authoritative(evidence, now_ns=100, max_age_ns=1)
+
+
+def test_undocumented_execution_type_is_unknown_not_silently_out_of_scope():
+    evidence = _parse(_payload({**ROW, "execType": "NewVenueType"}))
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
 
 
 def test_identical_execution_on_two_pages_is_deduplicated():

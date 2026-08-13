@@ -16,6 +16,12 @@ IDENTITY_SCHEME = "bybit.positions.identity"
 STATE_SCHEME = "bybit.positions.state"
 FILL_FIELDS = frozenset(
     {"symbol", "orderLinkId", "side", "execId", "execQty", "execType", "execTime"})
+BYBIT_EXECUTION_TYPES = frozenset(
+    {
+        "Trade", "AdlTrade", "Funding", "BustTrade", "Delivery", "Settle",
+        "BlockTrade", "MovePosition", "FutureSpread", "CorporateAction", "UNKNOWN",
+    }
+)
 
 
 def _validate_inputs(payload: object, symbol: object, observed_ns: object) -> Mapping:
@@ -146,7 +152,8 @@ def _execution_row(row: object) -> tuple[str, str] | None:
         return None
     symbol, link, side = row["symbol"], row["orderLinkId"], row["side"]
     exec_id, quantity, exec_time = row["execId"], row["execQty"], row["execTime"]
-    valid = symbol in BYBIT_WIRE_SYMBOLS.values() and isinstance(link, str)
+    valid = row["execType"] == "Trade"
+    valid &= symbol in BYBIT_WIRE_SYMBOLS.values() and isinstance(link, str)
     valid &= isinstance(side, str) and side in {"Buy", "Sell"}
     valid &= isinstance(exec_id, str) and bool(exec_id)
     canonical_time = isinstance(exec_time, str) and exec_time.isascii() and exec_time.isdecimal()
@@ -195,8 +202,7 @@ def parse_bybit_fills_surface(
     states: dict[str, str] = {}
     unknown = mismatch = 0
     for row in (row for result in results for row in result["list"]):
-        if isinstance(row, Mapping) and isinstance(row.get("execType"), str) \
-                and row["execType"] != "Trade":
+        if isinstance(row, Mapping) and row.get("execType") in BYBIT_EXECUTION_TYPES - {"Trade"}:
             continue
         parsed = _execution_row(row)
         if parsed is None:
