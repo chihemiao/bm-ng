@@ -1,14 +1,22 @@
 import socket
 import threading
-from dataclasses import replace
+from collections.abc import Callable
+from dataclasses import FrozenInstanceError, fields, replace
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from inspect import Parameter, signature
+from typing import get_type_hints
 from urllib.request import Request, urlopen
 
 import pytest
 
 from execution.nonce import NonceAllocator, SignerFence
-from execution.orders import ReconciliationEvidence, ReplayedDecisionHistory, make_t0a_pair_intents
+from execution.orders import (
+    OrderRequestRecord,
+    ReconciliationEvidence,
+    ReplayedDecisionHistory,
+    make_t0a_pair_intents,
+)
 from execution.submission import PairLegSubmissionInputs, PairSubmissionOutcome, submit_t0a_pair
 from execution.writer import WriterIdentity, WriterLease
 
@@ -16,6 +24,53 @@ WALLET = "b" * 64
 PAIR = make_t0a_pair_intents(
     "funding-carry", "git-deadbeef", 100, symbol="BTC", quantity=Decimal("1")
 )
+PAIR_DATACLASS_CASES = [
+    (
+        PairLegSubmissionInputs,
+        {
+            "evidence": ReconciliationEvidence("absent", 101, 102, 103),
+            "request": None,
+            "history": ReplayedDecisionHistory(PAIR.hyperliquid.client_order_id, 0, False),
+            "transport": pytest.fail,
+        },
+        [
+            ("evidence", ReconciliationEvidence),
+            ("request", OrderRequestRecord | None),
+            ("history", ReplayedDecisionHistory),
+            ("transport", Callable[[OrderRequestRecord], object]),
+        ],
+    ),
+    (
+        PairSubmissionOutcome,
+        {"hyperliquid": None, "bybit": None},
+        [("hyperliquid", object | BaseException), ("bybit", object | BaseException)],
+    ),
+]
+
+
+def test_pair_submission_signature_is_pinned():
+    contract = signature(submit_t0a_pair)
+    names = [
+        "pair", "hyperliquid", "bybit", "lease", "allocator", "request_recorder",
+        "now_ns", "max_signal_age_ns", "max_reconcile_attempts", "now_ms", "decided_ns",
+    ]
+    assert [(item.name, item.kind) for item in contract.parameters.values()] == [
+        (name, Parameter.KEYWORD_ONLY) for name in names
+    ]
+    assert contract.return_annotation is PairSubmissionOutcome
+
+
+@pytest.mark.parametrize(("contract", "kwargs", "expected_fields"), PAIR_DATACLASS_CASES)
+def test_pair_submission_dataclass_contract_is_pinned(contract, kwargs, expected_fields):
+    hints = get_type_hints(contract)
+    assert [(item.name, hints[item.name]) for item in fields(contract)] == expected_fields
+    with pytest.raises(TypeError):
+        contract(*kwargs.values())
+    value = contract(**kwargs)
+    with pytest.raises(FrozenInstanceError):
+        setattr(value, next(iter(kwargs)), None)
+    with pytest.raises(AttributeError):
+        object.__setattr__(value, "not_a_field", None)
 
 
 @pytest.fixture
