@@ -1,15 +1,22 @@
+import inspect
+from dataclasses import FrozenInstanceError
 from decimal import Decimal
 
 import pytest
 
+from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
+from execution.nonce import replay_freeze_reason
+from execution.wallet import AgentWalletRegistration, assess
 from reconciliation.admission import (
     CONTINUOUS_ADMISSION_REASON_KEYS,
+    AdmissionSnapshotInputs,
+    build_admission_snapshot,
     decide_continuous_admission,
 )
 from reconciliation.clock import StateClock
-from reconciliation.exposure import ExposureClock
+from reconciliation.exposure import ExposureClock, advance_exposure_clock, delta_state
 from reconciliation.fx import Notional
-from reconciliation.legs import PairState
+from reconciliation.legs import PairState, advance_obligation_clock
 from reconciliation.promotion import demotion_reason
 from reconciliation.state import AdmissionDecision, StartupContractError
 
@@ -204,3 +211,125 @@ def test_notional_reason_keys_are_valid_demotion_evidence(reason: str) -> None:
     assert reason in CONTINUOUS_ADMISSION_REASON_KEYS
     admission = AdmissionDecision("cancel_only_freeze", (reason,))
     assert demotion_reason(admission) == f"writer_demoted:{reason}"
+
+
+WALLET = AgentWalletRegistration("a" * 64, 1, 1 + VALIDITY_NS)
+
+
+def _snapshot(**changes) -> AdmissionSnapshotInputs:
+    values = {
+        "delta": Decimal(0),
+        "previous_exposure": ExposureClock("flat", 100, None, False),
+        "delta_tolerance": Decimal("0.001"),
+        "max_naked_ns": 10,
+        "pair": PairState("balanced", ()),
+        "previous_obligation": StateClock("inactive", 100, None, False),
+        "max_outstanding_ns": 10,
+        "registration": WALLET,
+        "nonce_events": (),
+        "naked_notional": Notional(Decimal(0), "USDC"),
+        "max_naked_notional": Notional(Decimal("1000"), "USDC"),
+        "observed_ns": 110,
+        "now_ns": 110,
+    }
+    values.update(changes)
+    return AdmissionSnapshotInputs(**values)
+
+
+def test_admission_snapshot_matches_the_existing_manual_decision_chain():
+    inputs = _snapshot()
+    state = delta_state(inputs.delta, tolerance=inputs.delta_tolerance)
+    exposure = advance_exposure_clock(
+        inputs.previous_exposure, state=state, observed_ns=inputs.observed_ns,
+        max_naked_ns=inputs.max_naked_ns,
+    )
+    obligation = advance_obligation_clock(
+        inputs.previous_obligation, pair=inputs.pair, observed_ns=inputs.observed_ns,
+        max_outstanding_ns=inputs.max_outstanding_ns,
+    )
+    expected = decide_continuous_admission(
+        exposure=exposure, obligation=obligation, pair=inputs.pair,
+        agent_wallet_status=assess(inputs.registration, inputs.now_ns),
+        nonce_freeze_reason=replay_freeze_reason(
+            inputs.nonce_events, inputs.registration.wallet_fingerprint
+        ),
+        naked_notional=inputs.naked_notional,
+        max_naked_notional=inputs.max_naked_notional,
+    )
+    assert build_admission_snapshot(inputs) == expected
+
+
+def test_first_snapshot_advances_both_unobserved_clocks():
+    assert build_admission_snapshot(
+        _snapshot(previous_exposure=None, previous_obligation=None)
+    ) == AdmissionDecision("ready", ())
+
+
+def test_unknown_delta_reaches_the_existing_exposure_freeze_reason():
+    decision = build_admission_snapshot(_snapshot(delta=None))
+    assert "continuous_admission:exposure_unknown" in decision.reasons
+
+
+def test_replayed_nonce_freeze_reaches_the_existing_decision_reason():
+    event = {
+        "payload_schema": "signer_nonce_allocation",
+        "payload": {
+            "wallet_fingerprint": WALLET.wallet_fingerprint,
+            "outcome": "frozen",
+            "reason": "clock_backward",
+        },
+    }
+    decision = build_admission_snapshot(_snapshot(nonce_events=(event,)))
+    assert "continuous_admission:nonce_frozen:clock_backward" in decision.reasons
+
+
+@pytest.mark.parametrize(
+    ("now_ns", "reason"),
+    [
+        (WALLET.expires_ns - ROTATION_LEAD_NS, None),
+        (WALLET.expires_ns, "continuous_admission:agent_wallet_expired"),
+    ],
+)
+def test_wallet_assessment_is_derived_at_decision_time(now_ns, reason):
+    decision = build_admission_snapshot(_snapshot(now_ns=now_ns))
+    assert (reason in decision.reasons) if reason else decision.action == "ready"
+
+
+def test_evidence_and_decision_times_have_distinct_responsibilities():
+    now_ns = 1 + VALIDITY_NS
+    observed_ns = now_ns - 1
+    active_since_ns = observed_ns - 10
+    inputs = _snapshot(
+        delta=Decimal("1"),
+        previous_exposure=ExposureClock(
+            "naked", active_since_ns, active_since_ns, False
+        ),
+        pair=PairState("imbalanced", (("bybit", "partial"),)),
+        previous_obligation=StateClock(
+            "active", active_since_ns, active_since_ns, False
+        ),
+        registration=AgentWalletRegistration("b" * 64, 1, now_ns),
+        observed_ns=observed_ns,
+        now_ns=now_ns,
+    )
+    assert build_admission_snapshot(inputs).reasons == (
+        "continuous_admission:agent_wallet_expired",
+    )
+
+
+def test_snapshot_input_and_function_shapes_exclude_dead_parameters():
+    assert tuple(AdmissionSnapshotInputs.__dataclass_fields__) == (
+        "delta", "previous_exposure", "delta_tolerance", "max_naked_ns", "pair",
+        "previous_obligation", "max_outstanding_ns", "registration", "nonce_events",
+        "naked_notional", "max_naked_notional", "observed_ns", "now_ns",
+    )
+    assert tuple(inspect.signature(build_admission_snapshot).parameters) == ("inputs",)
+    with pytest.raises(TypeError):
+        AdmissionSnapshotInputs(Decimal(0))
+    with pytest.raises(FrozenInstanceError):
+        _snapshot().now_ns = 1
+
+
+def test_snapshot_rejects_an_untyped_container_before_reading_fields():
+    with pytest.raises(TypeError, match="AdmissionSnapshotInputs"):
+        build_admission_snapshot(object())
