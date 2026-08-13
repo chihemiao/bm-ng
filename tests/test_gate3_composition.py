@@ -1,9 +1,13 @@
+import ast
+import inspect
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import reconciliation.admission as admission
 import reconciliation.promotion as promotion
+from data.contracts import VALIDITY_NS
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
     ReconciliationEvidence,
@@ -11,13 +15,19 @@ from execution.orders import (
     make_order_intent,
 )
 from execution.submission import submit_order
+from execution.wallet import AgentWalletRegistration
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
-from reconciliation.admission import decide_continuous_admission
+from reconciliation.admission import (
+    AdmissionSnapshotInputs,
+    DerivedAdmissionState,
+    build_continuous_admission_inputs,
+    decide_continuous_admission,
+)
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock
 from reconciliation.fx import Notional
 from reconciliation.legs import PairState
-from reconciliation.promotion import demote_writer, promote_writer
+from reconciliation.promotion import demote_writer, promote_writer, run_admission_cycle
 from reconciliation.state import AdmissionDecision
 
 ACCOUNT_DIGEST = "a" * 64
@@ -41,6 +51,26 @@ def _continuous_inputs(**changes: object) -> dict[str, object]:
 
 def _continuous(**changes: object) -> AdmissionDecision:
     return decide_continuous_admission(**_continuous_inputs(**changes))  # type: ignore[arg-type]
+
+
+def _snapshot(**changes: object) -> AdmissionSnapshotInputs:
+    values = {
+        "delta": Decimal(0),
+        "previous_exposure": ExposureClock("flat", 100, None, False),
+        "delta_tolerance": Decimal("0.001"),
+        "max_naked_ns": 10,
+        "pair": PairState("balanced", ()),
+        "previous_obligation": StateClock("inactive", 100, None, False),
+        "max_outstanding_ns": 10,
+        "registration": AgentWalletRegistration(WALLET, 1, 1 + VALIDITY_NS),
+        "nonce_events": (),
+        "naked_notional": Notional(Decimal(0), "USDC"),
+        "max_naked_notional": Notional(Decimal("1000"), "USDC"),
+        "observed_ns": 105,
+        "now_ns": 105,
+    }
+    values.update(changes)
+    return AdmissionSnapshotInputs(**values)
 
 
 @pytest.fixture
@@ -164,7 +194,53 @@ def test_applied_continuous_freeze_prevents_transport(
     assert effects == [] and allocator.last_nonce == 0
 
 
-def test_continuous_admission_has_no_periodic_runtime_caller_yet() -> None:
+def test_derived_admission_state_is_the_named_enforcement_boundary() -> None:
+    assert tuple(DerivedAdmissionState.__dataclass_fields__) == (
+        "exposure", "obligation", "agent_wallet_status", "nonce_freeze_reason"
+    )
+    derived = build_continuous_admission_inputs(_snapshot())
+    assert admission.build_admission_snapshot(_snapshot()) == decide_continuous_admission(
+        exposure=derived.exposure,
+        obligation=derived.obligation,
+        pair=_snapshot().pair,
+        agent_wallet_status=derived.agent_wallet_status,
+        nonce_freeze_reason=derived.nonce_freeze_reason,
+        naked_notional=_snapshot().naked_notional,
+        max_naked_notional=_snapshot().max_naked_notional,
+    )
+
+
+def test_snapshot_and_cycle_share_one_derivation_path() -> None:
+    snapshot_calls = {
+        node.func.id for node in ast.walk(ast.parse(inspect.getsource(
+            admission.build_admission_snapshot)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    cycle_calls = {
+        node.func.id for node in ast.walk(ast.parse(inspect.getsource(
+            promotion.run_admission_cycle)))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "build_continuous_admission_inputs" in snapshot_calls & cycle_calls
+    assert "apply_continuous_admission" in cycle_calls
+
+
+def test_runtime_cycle_freeze_demotes_a_real_writer_lease(authorized_runtime) -> None:
+    lease, _, writer_events, _ = authorized_runtime
+    decision = run_admission_cycle(_snapshot(delta=None), lease)
+    assert decision.action == "cancel_only_freeze"
+    assert lease.authority.mode == "cancel_only"
+    assert [event.action for event in writer_events] == ["demote"]
+
+
+def test_runtime_cycle_ready_keeps_authority_and_has_no_effects(authorized_runtime) -> None:
+    lease, _, writer_events, effects = authorized_runtime
+    assert run_admission_cycle(_snapshot(), lease) == AdmissionDecision("ready", ())
+    assert lease.authority.mode == "risk_increasing"
+    assert writer_events == effects == []
+
+
+def test_continuous_admission_has_a_runtime_cycle_caller() -> None:
     runtime_roots = ("data", "execution", "reconciliation")
     calls = {
         str(path): path.read_text().count("apply_continuous_admission(")
@@ -172,4 +248,4 @@ def test_continuous_admission_has_no_periodic_runtime_caller_yet() -> None:
         for path in Path(root).glob("*.py")
         if "apply_continuous_admission(" in path.read_text()
     }
-    assert calls == {"reconciliation/promotion.py": 1}
+    assert calls == {"reconciliation/promotion.py": 2}
