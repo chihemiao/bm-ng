@@ -140,9 +140,8 @@ def test_rehydrate_order_intent_exposes_the_durable_ordinal_boundary() -> None:
         "strategy_id", "strategy_version", "signal_ns", "leg",
         "symbol", "side", "quantity", "replacement_ordinal",
     )
-    assert all(
-        parameter.kind is Parameter.KEYWORD_ONLY for parameter in parameters.values()
-    )
+    kinds = tuple(parameter.kind for parameter in parameters.values())
+    assert kinds == (Parameter.POSITIONAL_OR_KEYWORD,) * 4 + (Parameter.KEYWORD_ONLY,) * 4
     restored = orders.rehydrate_order_intent(
         strategy_id="funding-carry", strategy_version="git-deadbeef",
         signal_ns=100, leg="hyperliquid", symbol="BTC", side="buy",
