@@ -128,9 +128,9 @@ def _client_order_id(
     return f"0x{digest}"
 
 
-def _make_intent(
+def rehydrate_order_intent(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
-    symbol: str, side: str, quantity: Decimal, ordinal: int,
+    *, symbol: str, side: str, quantity: Decimal, replacement_ordinal: int,
 ) -> OrderIntent:
     _require(isinstance(strategy_id, str) and bool(strategy_id), "invalid strategy_id")
     valid_version = isinstance(strategy_version, str) and bool(strategy_version)
@@ -146,13 +146,14 @@ def _make_intent(
     if not isinstance(quantity, Decimal):
         raise TypeError("quantity must be Decimal")
     _require(quantity.is_finite() and quantity > 0, "invalid quantity")
-    _require(_valid_ns(ordinal), "invalid replacement_ordinal")
+    _require(_valid_ns(replacement_ordinal), "invalid replacement_ordinal")
     client_order_id = _client_order_id(
-        strategy_id, strategy_version, signal_ns, leg, symbol, side, quantity, ordinal,
+        strategy_id, strategy_version, signal_ns, leg,
+        symbol, side, quantity, replacement_ordinal,
     )
     return OrderIntent(
         strategy_id, strategy_version, signal_ns, leg,
-        symbol, side, quantity, ordinal, client_order_id,
+        symbol, side, quantity, replacement_ordinal, client_order_id,
     )
 
 
@@ -160,17 +161,19 @@ def make_order_intent(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
     *, symbol: str, side: str, quantity: Decimal,
 ) -> OrderIntent:
-    return _make_intent(
-        strategy_id, strategy_version, signal_ns, leg, symbol, side, quantity, 0,
+    return rehydrate_order_intent(
+        strategy_id, strategy_version, signal_ns, leg,
+        symbol=symbol, side=side, quantity=quantity, replacement_ordinal=0,
     )
 
 
 def _validate_intent(intent: OrderIntent) -> None:
     _require(isinstance(intent, OrderIntent), "invalid intent")
-    expected = _make_intent(*(
-        intent.strategy_id, intent.strategy_version, intent.signal_ns,
-        intent.leg, intent.symbol, intent.side, intent.quantity, intent.replacement_ordinal,
-    ))
+    expected = rehydrate_order_intent(
+        intent.strategy_id, intent.strategy_version, intent.signal_ns, intent.leg,
+        symbol=intent.symbol, side=intent.side, quantity=intent.quantity,
+        replacement_ordinal=intent.replacement_ordinal,
+    )
     _require(intent.client_order_id == expected.client_order_id, "invalid client_order_id")
 
 
@@ -378,7 +381,8 @@ def replacement_intent(
         _authoritative_after(previous, evidence),
         "authoritative terminal evidence required",
     )
-    return _make_intent(
+    return rehydrate_order_intent(
         previous.strategy_id, previous.strategy_version, previous.signal_ns, previous.leg,
-        previous.symbol, previous.side, quantity, previous.replacement_ordinal + 1,
+        symbol=previous.symbol, side=previous.side, quantity=quantity,
+        replacement_ordinal=previous.replacement_ordinal + 1,
     )

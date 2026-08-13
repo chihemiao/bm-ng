@@ -1,9 +1,12 @@
+import ast
 import re
+import textwrap
 from decimal import Decimal, localcontext
-from inspect import Parameter, signature
+from inspect import Parameter, getsource, signature
 
 import pytest
 
+from execution import orders
 from execution.orders import (
     OrderContractError,
     ReconciliationEvidence,
@@ -64,6 +67,14 @@ def _decide(intent, evidence, *, request=None, history=None, now_ns=120):
     )
 
 
+def _direct_calls(function) -> set[str]:
+    source = textwrap.dedent(getsource(function))
+    return {
+        node.func.id for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+
+
 def test_client_order_id_is_cross_venue_and_binds_the_intent() -> None:
     intent = _intent()
     assert re.fullmatch(r"0x[0-9a-f]{32}", intent.client_order_id)
@@ -121,6 +132,29 @@ def test_new_order_trade_terms_are_required() -> None:
     parameters = signature(make_order_intent).parameters
     names = ("symbol", "side", "quantity")
     assert all(parameters[name].default is Parameter.empty for name in names)
+
+
+def test_rehydrate_order_intent_exposes_the_durable_ordinal_boundary() -> None:
+    parameters = signature(orders.rehydrate_order_intent).parameters
+    assert tuple(parameters) == (
+        "strategy_id", "strategy_version", "signal_ns", "leg",
+        "symbol", "side", "quantity", "replacement_ordinal",
+    )
+    kinds = tuple(parameter.kind for parameter in parameters.values())
+    assert kinds == (Parameter.POSITIONAL_OR_KEYWORD,) * 4 + (Parameter.KEYWORD_ONLY,) * 4
+    restored = orders.rehydrate_order_intent(
+        strategy_id="funding-carry", strategy_version="git-deadbeef",
+        signal_ns=100, leg="hyperliquid", symbol="BTC", side="buy",
+        quantity=Decimal("1E+2"), replacement_ordinal=2,
+    )
+    initial = _intent(quantity=Decimal("1E+2"))
+    assert restored.replacement_ordinal == 2
+    assert restored.client_order_id != initial.client_order_id
+
+
+def test_order_creation_paths_delegate_to_the_rehydrate_constructor() -> None:
+    assert "rehydrate_order_intent" in _direct_calls(make_order_intent)
+    assert "rehydrate_order_intent" in _direct_calls(replacement_intent)
 
 
 def test_request_record_must_exist_and_match_before_submit() -> None:
