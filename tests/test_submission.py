@@ -1,4 +1,5 @@
 from dataclasses import replace
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,10 @@ class CountingNonceAllocator(NonceAllocator):
 
 
 def _intent(leg: str = "hyperliquid"):
-    return make_order_intent("funding-carry", "git-deadbeef", 100, leg)
+    return make_order_intent(
+        "funding-carry", "git-deadbeef", 100, leg,
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+    )
 
 
 def _evidence(status: str = "absent") -> ReconciliationEvidence:

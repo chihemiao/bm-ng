@@ -71,7 +71,10 @@ def authorized_runtime(tmp_path: Path):
 
 def _submit(runtime):
     lease, allocator, _, effects = runtime
-    intent = make_order_intent("funding-carry", "git-deadbeef", 100, "hyperliquid")
+    intent = make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "hyperliquid",
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+    )
 
     def transport(request):
         effects.append(("transport", request))
