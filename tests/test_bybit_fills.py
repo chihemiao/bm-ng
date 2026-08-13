@@ -72,6 +72,10 @@ def test_zero_signed_zero_and_scientific_execution_quantities_are_known(quantity
 
 def test_documented_non_trade_executions_are_out_of_scope_before_counting():
     module = _module()
+    assert module.BYBIT_EXECUTION_TYPES == {
+        "Trade", "AdlTrade", "Funding", "BustTrade", "Delivery", "Settle",
+        "BlockTrade", "MovePosition", "FutureSpread", "CorporateAction", "UNKNOWN",
+    }
     non_trades = module.BYBIT_EXECUTION_TYPES - {"Trade"}
     evidence = _parse(_payload(*({"execType": value} for value in non_trades)))
     assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (0, 0, 0)
