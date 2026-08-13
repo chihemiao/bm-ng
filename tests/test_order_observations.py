@@ -1,7 +1,10 @@
+import ast
+import inspect
 from importlib import import_module
 
 import pytest
 
+from data import schema_order_request
 from data.contracts import validate_envelope
 from data.schema_dispatch import ORDER_STATUSES
 from tests.test_contracts import market_event
@@ -31,6 +34,16 @@ def test_schema_reuses_status_registry_and_keeps_ids_only_in_envelope():
     assert not {"client_order_id", "venue_order_id"} & payload.keys()
     payload["client_order_id"] = "duplicate"
     assert _errors(payload) == ("order_observation:invalid_fields",)
+
+
+def test_schema_calls_the_shared_public_presence_classifier():
+    assert schema.binding_presence is schema_order_request.binding_presence
+    tree = ast.parse(inspect.getsource(schema))
+    called = {
+        node.func.id for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "binding_presence" in called
 
 
 @pytest.mark.parametrize("missing", (*FIELDS, "sequence"))
