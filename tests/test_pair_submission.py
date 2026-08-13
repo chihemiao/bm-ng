@@ -102,7 +102,10 @@ def test_successes_are_hl_first_and_share_one_durable_recorder(runtime, server):
         hyperliquid=("persist", b"hl"), bybit=("persist", b"bybit")
     )
     assert hits == ["/hl", "/bybit"] and errors == []
-    assert [row.leg for row in recorded] == ["hyperliquid", "bybit"]
+    assert [(row.leg, row.client_order_id) for row in recorded] == [
+        ("hyperliquid", PAIR.hyperliquid.client_order_id),
+        ("bybit", PAIR.bybit.client_order_id),
+    ]
     assert [row.recorded_ns for row in recorded] == [110, 110]
 
 
