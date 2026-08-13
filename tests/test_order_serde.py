@@ -107,7 +107,10 @@ def test_order_serde_delegates_to_contract_and_execution_constructors() -> None:
         node.func.id for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert {"validate_envelope", "rehydrate_order_intent", "order_request_record"} <= calls
+    assert {
+        "validate_envelope", "order_request_binding_is_legacy",
+        "rehydrate_order_intent", "order_request_record",
+    } <= calls
     assert {"OrderIntent", "OrderRequestRecord"}.isdisjoint(calls)
     assert "hashlib" not in source and "client_order_id" not in module.__dict__
 

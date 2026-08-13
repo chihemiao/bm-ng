@@ -1,14 +1,17 @@
 """Durable order-request event serialization."""
 
 from dataclasses import fields
+from decimal import Decimal
 
 from data.contracts import validate_envelope
+from data.schema_order_request import order_request_binding_is_legacy
 from execution.orders import (
     INTENT_FIELDS,
     OrderContractError,
     OrderIntent,
     OrderRequestRecord,
     order_request_record,
+    rehydrate_order_intent,
 )
 
 
@@ -64,3 +67,35 @@ def serialize_order_request(
             "payload": payload,
         }
     )
+
+
+def rehydrate_order_request(
+    event: dict[str, object],
+) -> tuple[OrderIntent, OrderRequestRecord]:
+    """Rebuild validated execution objects from one durable request event."""
+    validated = validate_envelope(event)
+    if validated["event_kind"] != "order" or validated["payload_schema"] != "order_request":
+        raise OrderContractError("not an order request")
+    payload = validated["payload"]
+    if order_request_binding_is_legacy(
+        payload, has_sequence="seq_within_boot" in validated,
+    ):
+        raise OrderContractError("legacy order request cannot be rehydrated")
+    intent = rehydrate_order_intent(
+        payload["strategy_id"], payload["strategy_version"],
+        payload["signal_ns"], payload["leg"],
+        symbol=payload["symbol"], side=payload["side"],
+        quantity=Decimal(payload["quantity"]),
+        replacement_ordinal=payload["replacement_ordinal"],
+    )
+    if intent.client_order_id != validated["client_order_id"]:
+        raise OrderContractError("client_order_id mismatch")
+    record = order_request_record(
+        intent, payload["recorded_ns"],
+        account_digest=payload["account_digest"],
+        lease_epoch=payload["lease_epoch"],
+        writer_instance_id=payload["writer_instance_id"],
+        wallet_fingerprint=payload["wallet_fingerprint"],
+        allocated_nonce=payload["allocated_nonce"],
+    )
+    return intent, record
