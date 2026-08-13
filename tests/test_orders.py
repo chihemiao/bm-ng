@@ -11,8 +11,10 @@ from execution.orders import (
     OrderContractError,
     ReconciliationEvidence,
     ReplayedDecisionHistory,
+    T0APairIntents,
     decide_submission,
     make_order_intent,
+    make_t0a_pair_intents,
     order_request_record,
     replacement_intent,
 )
@@ -30,6 +32,18 @@ def _intent(**changes):
     }
     values.update(changes)
     return make_order_intent(**values)
+
+
+def _t0a(**changes):
+    values = {
+        "strategy_id": "funding-carry",
+        "strategy_version": "git-deadbeef",
+        "signal_ns": 100,
+        "symbol": "BTC",
+        "quantity": Decimal("1"),
+    }
+    values.update(changes)
+    return make_t0a_pair_intents(**values)
 
 
 def _evidence(status="absent", **changes):
@@ -155,6 +169,48 @@ def test_rehydrate_order_intent_exposes_the_durable_ordinal_boundary() -> None:
 def test_order_creation_paths_delegate_to_the_rehydrate_constructor() -> None:
     assert "rehydrate_order_intent" in _direct_calls(make_order_intent)
     assert "rehydrate_order_intent" in _direct_calls(replacement_intent)
+
+
+def test_t0a_pair_intents_freeze_the_two_named_equal_quantity_legs() -> None:
+    pair = _t0a()
+    assert isinstance(pair, T0APairIntents) and not hasattr(pair, "__dict__")
+    assert pair.hyperliquid == make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "hyperliquid",
+        symbol="BTC", side="sell", quantity=Decimal("1"),
+    )
+    assert pair.bybit == make_order_intent(
+        "funding-carry", "git-deadbeef", 100, "bybit",
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+    )
+    assert pair.hyperliquid.client_order_id != pair.bybit.client_order_id
+    with pytest.raises(AttributeError):
+        pair.bybit = pair.hyperliquid
+
+
+def test_t0a_pair_creator_exposes_only_the_frozen_topology_inputs() -> None:
+    parameters = signature(make_t0a_pair_intents).parameters
+    assert tuple(parameters) == (
+        "strategy_id", "strategy_version", "signal_ns", "symbol", "quantity",
+    )
+    kinds = tuple(parameter.kind for parameter in parameters.values())
+    assert kinds == (Parameter.POSITIONAL_OR_KEYWORD,) * 3 + (Parameter.KEYWORD_ONLY,) * 2
+    assert all(parameter.default is Parameter.empty for parameter in parameters.values())
+    assert all(parameter.kind is Parameter.KEYWORD_ONLY
+               for parameter in signature(T0APairIntents).parameters.values())
+    assert "make_order_intent" in _direct_calls(make_t0a_pair_intents)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"strategy_id": ""}, ValueError), ({"signal_ns": True}, ValueError),
+        ({"symbol": "SOL"}, ValueError), ({"symbol": 1}, TypeError),
+        ({"quantity": Decimal("0")}, ValueError), ({"quantity": 1}, TypeError),
+    ],
+)
+def test_t0a_pair_creator_delegates_invalid_inputs(changes, error) -> None:
+    with pytest.raises(error):
+        _t0a(**changes)
 
 
 def test_request_record_must_exist_and_match_before_submit() -> None:

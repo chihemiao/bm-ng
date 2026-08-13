@@ -30,6 +30,12 @@ class OrderIntent:
     client_order_id: str
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class T0APairIntents:
+    hyperliquid: OrderIntent
+    bybit: OrderIntent
+
+
 @dataclass(frozen=True, slots=True)
 class OrderRequestRecord:
     strategy_id: str
@@ -158,6 +164,21 @@ def make_order_intent(
         strategy_id, strategy_version, signal_ns, leg,
         symbol=symbol, side=side, quantity=quantity, replacement_ordinal=0,
     )
+
+
+def make_t0a_pair_intents(
+    strategy_id: str, strategy_version: str, signal_ns: int,
+    *, symbol: str, quantity: Decimal,
+) -> T0APairIntents:
+    hyperliquid = make_order_intent(
+        strategy_id, strategy_version, signal_ns, "hyperliquid",
+        symbol=symbol, side="sell", quantity=quantity,
+    )
+    bybit = make_order_intent(
+        strategy_id, strategy_version, signal_ns, "bybit",
+        symbol=symbol, side="buy", quantity=quantity,
+    )
+    return T0APairIntents(hyperliquid=hyperliquid, bybit=bybit)
 
 
 def _validate_intent(intent: OrderIntent) -> None:
