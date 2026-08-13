@@ -12,7 +12,7 @@ from data.schema_dispatch import (
 )
 
 
-def _presence(
+def binding_presence(
     payload: Mapping[str, object], has_sequence: object, fields: tuple[str, ...],
 ) -> tuple[bool, tuple[str, ...]]:
     if type(has_sequence) is not bool:
@@ -83,7 +83,7 @@ def _order_value_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
 def order_request_binding_is_legacy(
     payload: Mapping[str, object], *, has_sequence: object
 ) -> bool:
-    legacy, _ = _presence(payload, has_sequence, ORDER_BOUND_FIELDS)
+    legacy, _ = binding_presence(payload, has_sequence, ORDER_BOUND_FIELDS)
     return legacy
 
 
@@ -91,7 +91,7 @@ def order_request_lease_binding_errors(
     payload: Mapping[str, object], *, venue: object, has_sequence: object
 ) -> tuple[str, ...]:
     fields = ORDER_LEASE_FIELDS + ("allocated_nonce",)
-    legacy, missing = _presence(payload, has_sequence, fields)
+    legacy, missing = binding_presence(payload, has_sequence, fields)
     if legacy:
         return ()
     if missing:
@@ -113,7 +113,7 @@ def order_request_lease_binding_errors(
 def order_request_binding_errors(
     payload: Mapping[str, object], *, venue: object, has_sequence: object
 ) -> tuple[str, ...]:
-    legacy, missing = _presence(payload, has_sequence, ORDER_BOUND_FIELDS)
+    legacy, missing = binding_presence(payload, has_sequence, ORDER_BOUND_FIELDS)
     if legacy:
         return ()
     if missing:

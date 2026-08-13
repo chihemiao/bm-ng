@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 
 from data.schema_dispatch import ORDER_LEGS, ORDER_STATUSES
-from data.schema_order_request import _presence
+from data.schema_order_request import binding_presence
 
 FIELDS = ("status", "source", "observed_ns", "venue_time_ms")
 # Venue stays in the envelope: unlike a request leg, it is not identity/preimage data.
@@ -22,14 +22,14 @@ def _ns(value: object) -> bool:
 
 def order_observation_binding_is_legacy(
     payload: Mapping[str, object], *, has_sequence: object) -> bool:
-    return _presence(payload, has_sequence, FIELDS)[0]
+    return binding_presence(payload, has_sequence, FIELDS)[0]
 
 
 def order_observation_binding_errors(
     payload: Mapping[str, object], *, venue: object, has_sequence: object,
     identity_status: object, client_order_id: object, recv_wall_ns: object,
 ) -> tuple[str, ...]:
-    legacy, missing = _presence(payload, has_sequence, FIELDS)
+    legacy, missing = binding_presence(payload, has_sequence, FIELDS)
     if legacy:
         return ()
     if missing:
