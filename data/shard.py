@@ -17,6 +17,7 @@ from data.contracts import (
     validate_envelope,
     validate_manifest,
 )
+from data.replay_order import OrderBinding, observation_binding_evidence
 from data.schema_order_observation import order_observation_binding_is_legacy
 
 MANIFEST_NAME = "manifest.jsonl"
@@ -28,6 +29,7 @@ LENGTH_BYTES = 8
 class EventReplay:
     events: tuple[dict[str, Any], ...]
     duplicate_digests: tuple[str, ...]
+    order_bindings: tuple[OrderBinding, ...]
     freeze_reasons: tuple[str, ...]
     input_digest: str
 
@@ -353,14 +355,15 @@ def replay_event_window(root: Path, start_ns: int, end_ns: int) -> EventReplay:
             freeze_reasons.add(reason)
         events.append(event)
     freeze_reasons.update(_order_binding_conflicts(events))
+    order_bindings, binding_reasons = observation_binding_evidence(events)
+    freeze_reasons.update(binding_reasons)
     input_hash = hashlib.sha256()
     for event in events:
         encoded = encode_event(event)
         input_hash.update(len(encoded).to_bytes(LENGTH_BYTES, "big"))
         input_hash.update(encoded)
     return EventReplay(
-        tuple(events),
-        tuple(duplicate_digests),
+        tuple(events), tuple(duplicate_digests), order_bindings,
         tuple(sorted(freeze_reasons)),
         input_hash.hexdigest(),
     )
