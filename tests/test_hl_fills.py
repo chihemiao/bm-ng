@@ -274,7 +274,7 @@ def test_fill_quantity_signature_and_shared_parser_boundary_are_pinned():
     source = textwrap.dedent(inspect.getsource(function))
     calls = [node.func.id for node in ast.walk(ast.parse(source))
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)]
-    assert "parse_fills_surface" in calls
+    assert {"parse_fills_surface", "_require_client_order_id"} <= set(calls)
 
 
 def test_hl_filled_quantity_requires_keyword_only_client_identity_value_and_evidence():
@@ -357,4 +357,5 @@ def test_hl_order_ids_remain_a_source_not_fill_aggregation_assembly():
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
+    assert "_require_client_order_id" in calls
     assert "build_hl_filled_quantity" not in calls
