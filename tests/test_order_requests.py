@@ -336,6 +336,14 @@ def test_recorded_time_cannot_precede_signal_time() -> None:
     assert str(error.value) == "order_request:invalid_recorded_ns"
 
 
+def test_time_relation_needs_two_individually_valid_operands() -> None:
+    schema = import_module("data.schema_order_request")
+    event = _bound_event(signal_ns="1", recorded_ns=0)
+    assert schema.order_request_binding_errors(
+        event["payload"], venue=event["venue"], has_sequence=True,
+    ) == ("order_request:invalid_signal_ns",)
+
+
 @pytest.mark.parametrize("field", ["strategy_id", "strategy_version"])
 def test_strategy_whitespace_policy_stays_aligned_with_execution(field) -> None:
     assert _intent(**{field: " "})
