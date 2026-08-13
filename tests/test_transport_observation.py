@@ -1,5 +1,4 @@
 import http.client
-import json
 import socket
 import threading
 from contextlib import contextmanager
@@ -44,11 +43,10 @@ def _wrap(transport, mapper, recorder):
 def _server():
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            body = json.dumps({"accepted": True}).encode()
             self.send_response(200)
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", "2")
             self.end_headers()
-            self.wfile.write(body if self.path == "/" else body[:2])
+            self.wfile.write(b"ok" if self.path == "/" else b"x")
             self.wfile.flush()
             if self.path != "/":
                 self.connection.shutdown(socket.SHUT_RDWR)
@@ -68,7 +66,7 @@ def _server():
 
 def _post(url):
     with urlopen(Request(url, data=b"{}", method="POST"), timeout=1) as response:
-        return json.load(response) if url.endswith("/") else response.read()
+        return response.read()
 
 
 def test_observer_surface_is_typed_and_success_is_durable_and_opaque(tmp_path):
@@ -94,7 +92,7 @@ def test_observer_surface_is_typed_and_success_is_durable_and_opaque(tmp_path):
                        writer.append_event)(REQUEST)
     writer.close()
     event = shard.replay_event_window(tmp_path, 0, 200).events[0]
-    assert result == {"accepted": True}
+    assert result == b"ok"
     assert (event["venue"], event["client_order_id"], event["payload"]["status"]) == (
         "hyperliquid", REQUEST.client_order_id, "open",
     )
