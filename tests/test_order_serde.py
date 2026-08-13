@@ -1,11 +1,12 @@
 import ast
+from copy import deepcopy
 from decimal import Decimal
 from importlib import import_module
 from inspect import Parameter, getsource, signature
 
 import pytest
 
-from data.contracts import validate_envelope
+from data.contracts import ContractError, validate_envelope
 from execution import orders
 from execution.orders import OrderContractError, order_request_record
 
@@ -106,5 +107,82 @@ def test_order_serde_delegates_to_contract_and_execution_constructors() -> None:
         node.func.id for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert {"validate_envelope", "order_request_record"} <= calls
+    assert {"validate_envelope", "rehydrate_order_intent", "order_request_record"} <= calls
+    assert {"OrderIntent", "OrderRequestRecord"}.isdisjoint(calls)
     assert "hashlib" not in source and "client_order_id" not in module.__dict__
+
+
+def test_order_request_rehydrator_has_one_event_parameter() -> None:
+    parameters = signature(_serde().rehydrate_order_request).parameters
+    assert tuple(parameters) == ("event",)
+    assert parameters["event"].kind is Parameter.POSITIONAL_OR_KEYWORD
+
+
+@pytest.mark.parametrize(("leg", "quantity"), [("hyperliquid", "1E+2"), ("bybit", "1.0")])
+def test_order_request_event_round_trips_without_rewriting_quantity(leg, quantity) -> None:
+    intent, request, event = _serialized(leg, quantity)
+    before = deepcopy(event)
+    restored_intent, restored_request = _serde().rehydrate_order_request(event)
+    assert restored_intent == intent and restored_request == request
+    assert restored_intent.quantity.as_tuple() == intent.quantity.as_tuple()
+    assert event == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("strategy_id", "other"), ("strategy_version", "git-other"),
+        ("signal_ns", 99), ("leg", "bybit"), ("symbol", "ETH"),
+        ("side", "sell"), ("quantity", "2"), ("replacement_ordinal", 3),
+    ],
+)
+def test_rehydrate_recomputes_cloid_for_each_bound_payload_field(field, value) -> None:
+    _, _, event = _serialized()
+    event["payload"][field] = value
+    if field == "leg":
+        event["venue"], event["payload"]["allocated_nonce"] = value, None
+    with pytest.raises(OrderContractError, match="client_order_id mismatch"):
+        _serde().rehydrate_order_request(event)
+
+
+def test_rehydrate_rejects_a_tampered_envelope_cloid() -> None:
+    _, _, event = _serialized()
+    event["client_order_id"] = "0x" + "0" * 32
+    with pytest.raises(OrderContractError, match="client_order_id mismatch"):
+        _serde().rehydrate_order_request(event)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("account_digest", "bad", "lease binding"),
+        ("allocated_nonce", None, "nonce_null"),
+        ("recorded_ns", -1, "invalid_recorded_ns"),
+    ],
+)
+def test_rehydrate_preserves_schema_contract_errors(field, value, message) -> None:
+    _, _, event = _serialized()
+    event["payload"][field] = value
+    with pytest.raises(ContractError, match=message):
+        _serde().rehydrate_order_request(event)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"event_kind": "market"}, {"payload_schema": "order_observation"}],
+)
+def test_rehydrate_rejects_a_valid_event_of_another_kind_or_schema(changes) -> None:
+    _, _, event = _serialized()
+    event.update(changes)
+    assert validate_envelope(event) is event
+    with pytest.raises(OrderContractError, match="not an order request"):
+        _serde().rehydrate_order_request(event)
+
+
+def test_rehydrate_rejects_legacy_request_without_leaking_key_error() -> None:
+    _, _, event = _serialized()
+    event["payload"] = {"raw": "legacy"}
+    del event["seq_within_boot"]
+    assert validate_envelope(event) is event
+    with pytest.raises(OrderContractError, match="legacy order request"):
+        _serde().rehydrate_order_request(event)
