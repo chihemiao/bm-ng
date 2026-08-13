@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from data.schema_nonce import DAY_MS
-from execution import orders
+from execution import submission
 from execution.nonce import NonceAllocator, SignerFence
 from execution.orders import (
     OrderContractError,
@@ -90,7 +90,7 @@ def _submit(runtime, intent, **changes):
         "now_ms": 500, "decided_ns": 110,
     }
     values.update(changes)
-    return orders.submit_order(**values)
+    return submission.submit_order(**values)
 
 
 def _request(runtime, intent, **changes):
