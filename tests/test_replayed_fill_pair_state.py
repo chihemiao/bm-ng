@@ -115,6 +115,14 @@ def test_each_missing_durable_pair_request_fails_before_fill_builders(intents):
         )
 
 
+def test_request_gate_requires_exact_pair_intents_not_only_two_requests():
+    other = make_t0a_pair_intents(
+        "other", "git-deadbeef", 100, symbol="BTC", quantity=Decimal("1")
+    )
+    with pytest.raises(ValueError, match="durable requests"):
+        _assemble(_replay(PAIR.hyperliquid, other.bybit))
+
+
 @pytest.mark.parametrize(
     ("pair", "replay", "error", "match"),
     [
