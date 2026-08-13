@@ -1,6 +1,7 @@
 """Pure structural and venue semantics for durable order requests."""
 
 from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
 
 from data.schema_dispatch import (
     ORDER_BOUND_FIELDS,
@@ -36,6 +37,47 @@ def _valid_lease(payload: Mapping[str, object]) -> bool:
     account, epoch, instance, wallet = (payload[field] for field in ORDER_LEASE_FIELDS)
     valid = _valid_digest(account) and type(epoch) is int and epoch > 0
     return valid and isinstance(instance, str) and bool(instance) and _valid_digest(wallet)
+
+
+def _valid_ns(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _valid_quantity(value: object) -> bool:
+    if not isinstance(value, str) or not value or value.strip() != value:
+        return False
+    try:
+        quantity = Decimal(value)
+    except InvalidOperation:
+        return False
+    return quantity.is_finite() and quantity > 0
+
+
+def _order_value_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
+    signal_valid = _valid_ns(payload["signal_ns"])
+    recorded_valid = _valid_ns(payload["recorded_ns"])
+    checks = (
+        (
+            "strategy_id",
+            isinstance(payload["strategy_id"], str) and bool(payload["strategy_id"]),
+        ),
+        (
+            "strategy_version",
+            isinstance(payload["strategy_version"], str)
+            and bool(payload["strategy_version"]),
+        ),
+        ("signal_ns", signal_valid),
+        ("leg", isinstance(payload["leg"], str) and payload["leg"] in ORDER_LEGS),
+        ("symbol", isinstance(payload["symbol"], str) and payload["symbol"] in ORDER_SYMBOLS),
+        ("side", isinstance(payload["side"], str) and payload["side"] in ORDER_SIDES),
+        ("replacement_ordinal", _valid_ns(payload["replacement_ordinal"])),
+        ("quantity", _valid_quantity(payload["quantity"])),
+        ("recorded_ns", recorded_valid),
+    )
+    errors = [f"order_request:invalid_{field}" for field, valid in checks if not valid]
+    if signal_valid and recorded_valid and payload["recorded_ns"] < payload["signal_ns"]:
+        errors.append("order_request:invalid_recorded_ns")
+    return tuple(errors)
 
 
 def order_request_binding_is_legacy(
@@ -81,13 +123,8 @@ def order_request_binding_errors(
     )
     if errors:
         return errors
-    for field, allowed in (
-        ("symbol", ORDER_SYMBOLS), ("side", ORDER_SIDES), ("leg", ORDER_LEGS),
-    ):
-        value = payload[field]
-        if not isinstance(value, str) or value not in allowed:
-            return (f"order_request:invalid_{field}",)
+    errors = list(_order_value_errors(payload))
     leg = payload["leg"]
-    if leg != venue:
-        return (f"order_request:leg_venue_mismatch:{leg}:{venue}",)
-    return ()
+    if leg in ORDER_LEGS and leg != venue:
+        errors.append(f"order_request:leg_venue_mismatch:{leg}:{venue}")
+    return tuple(errors)
