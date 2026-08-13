@@ -312,6 +312,8 @@ def test_bybit_intent_assembly_signature_has_no_replay_gate_and_only_calls_b1():
         node.func.id for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert calls - {"isinstance"} == {"build_bybit_filled_quantity"}
+    assert calls - {"isinstance", "TypeError", "ValueError"} == {
+        "build_bybit_filled_quantity"
+    }
     assert "replay" not in inspect.signature(function).parameters
     assert "no replay binding or freeze gate" in inspect.getdoc(function)
