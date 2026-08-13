@@ -1,9 +1,15 @@
 """Continuous fail-closed admission from observed runtime risk state."""
 
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from decimal import Decimal
+
+from execution.nonce import replay_freeze_reason
+from execution.wallet import AgentWalletRegistration, assess
 from reconciliation.clock import StateClock
-from reconciliation.exposure import ExposureClock
+from reconciliation.exposure import ExposureClock, advance_exposure_clock, delta_state
 from reconciliation.fx import Notional
-from reconciliation.legs import PairState
+from reconciliation.legs import PairState, advance_obligation_clock
 from reconciliation.state import AdmissionDecision
 
 EXPOSURE_STATES = frozenset({"flat", "naked", "unknown"})
@@ -27,6 +33,23 @@ CONTINUOUS_ADMISSION_REASONS = {
     )
 }
 CONTINUOUS_ADMISSION_REASON_KEYS = frozenset(CONTINUOUS_ADMISSION_REASONS.values())
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AdmissionSnapshotInputs:
+    delta: Decimal | None
+    previous_exposure: ExposureClock | None
+    delta_tolerance: Decimal
+    max_naked_ns: int
+    pair: PairState
+    previous_obligation: StateClock | None
+    max_outstanding_ns: int
+    registration: AgentWalletRegistration
+    nonce_events: Sequence[Mapping[str, object]]
+    naked_notional: Notional | None
+    max_naked_notional: Notional
+    observed_ns: int
+    now_ns: int
 
 
 def _validate_clock(value: object, expected: type, states: frozenset[str], name: str) -> None:
@@ -139,3 +162,35 @@ def decide_continuous_admission(
     ordered = tuple(sorted(set(reasons)))
     action = "cancel_only_freeze" if ordered else "ready"
     return AdmissionDecision(action, ordered)
+
+
+def build_admission_snapshot(inputs: AdmissionSnapshotInputs) -> AdmissionDecision:
+    """Advance this observation's clocks and derive one continuous decision."""
+    if not isinstance(inputs, AdmissionSnapshotInputs):
+        raise TypeError("inputs must be AdmissionSnapshotInputs")
+    state = delta_state(inputs.delta, tolerance=inputs.delta_tolerance)
+    exposure = advance_exposure_clock(
+        inputs.previous_exposure,
+        state=state,
+        observed_ns=inputs.observed_ns,
+        max_naked_ns=inputs.max_naked_ns,
+    )
+    obligation = advance_obligation_clock(
+        inputs.previous_obligation,
+        pair=inputs.pair,
+        observed_ns=inputs.observed_ns,
+        max_outstanding_ns=inputs.max_outstanding_ns,
+    )
+    wallet_status = assess(inputs.registration, inputs.now_ns)
+    nonce_reason = replay_freeze_reason(
+        inputs.nonce_events, inputs.registration.wallet_fingerprint
+    )
+    return decide_continuous_admission(
+        exposure=exposure,
+        obligation=obligation,
+        pair=inputs.pair,
+        agent_wallet_status=wallet_status,
+        nonce_freeze_reason=nonce_reason,
+        naked_notional=inputs.naked_notional,
+        max_naked_notional=inputs.max_naked_notional,
+    )
