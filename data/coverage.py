@@ -1,7 +1,11 @@
-"""Pure Gate 1 window arithmetic over already-classified coverage evidence."""
+"""Pure Gate 1 evidence judgments and window arithmetic."""
 
+import json
 from collections.abc import Sequence
 from typing import Literal, NamedTuple
+
+from data.contracts import ContractError, bybit_update_gap
+from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
 
 MAX_EXPLAINED_GAP_NS = 4 * 3_600 * 1_000_000_000
 MAX_EXPLAINED_GAP_PERCENT = 2
@@ -17,6 +21,8 @@ EXPLAINED_FAILURE_REASONS = frozenset({
 })
 _COVERAGE_VENUES = frozenset({"hyperliquid", "bybit"})
 _COVERAGE_POINT_KINDS = frozenset("hard_verified explained_failure unexplained_failure".split())
+_BYBIT_BOOK_TOPICS = frozenset(
+    f"orderbook.50.{symbol}" for symbol in BYBIT_WIRE_SYMBOLS.values())
 
 
 class CoveragePoint(NamedTuple):
@@ -33,6 +39,44 @@ class CoveragePoint(NamedTuple):
 class PairingResult(NamedTuple):
     explained_intervals: tuple[tuple[int, int], ...]
     unexplained_gap_present: bool
+
+
+class BybitBarrier:
+    """Single source for live and replayed Bybit sequence readiness."""
+
+    def __init__(self) -> None:
+        self.conn_id: str | None = None
+        self.previous_u: dict[str, int] = {}
+        self.topics: set[str] = set()
+        self.gap = False
+
+    def start(self, conn_id: str) -> None:
+        if conn_id != self.conn_id:
+            self.conn_id = conn_id
+            self.previous_u.clear()
+            self.topics.clear()
+            self.gap = False
+
+    @property
+    def ready(self) -> bool:
+        return not self.gap and _BYBIT_BOOK_TOPICS <= self.topics
+
+    def observe(self, raw: bytes) -> bool:
+        try:
+            value = json.loads(raw)
+            topic = value.get("topic", "")
+            if topic not in _BYBIT_BOOK_TOPICS:
+                return False
+            current, kind = value["data"]["u"], value["type"]
+            previous = self.previous_u.get(topic)
+            missing = kind == "delta" and topic not in self.topics
+            self.gap |= missing or bybit_update_gap(previous, current, kind)
+            if kind == "snapshot" and not self.gap:
+                self.topics.add(topic)
+            self.previous_u[topic] = current
+            return self.gap
+        except (KeyError, TypeError, UnicodeError, ValueError) as error:
+            raise ContractError("invalid Bybit sequence frame") from error
 
 
 def _require(condition: bool, message: str) -> None:

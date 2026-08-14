@@ -7,7 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from data.contracts import ContractError, bybit_update_gap, validate_envelope
+from data.contracts import ContractError, validate_envelope
+from data.coverage import BybitBarrier
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
 from data.session import (
     BybitLivenessEvidence,
@@ -21,9 +22,6 @@ from data.shard import ShardWriter, replay_records
 
 HL_URI = "wss://api.hyperliquid.xyz/ws"
 BYBIT_URI = "wss://stream.bybit.com/v5/public/linear"
-_BYBIT_BOOK_TOPICS = frozenset(
-    f"orderbook.50.{symbol}" for symbol in BYBIT_WIRE_SYMBOLS.values()
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,10 +102,7 @@ class _Sink:
         self.boot_id = boot_id
         self.stop = stop
         self.record_mode = record_mode
-        self.previous_u: dict[str, int] = {}
-        self.sequence_conn_id: str | None = None
-        self.sequence_topics: set[str] = set()
-        self.sequence_gap = False
+        self.bybit_barrier = BybitBarrier()
         self.sequence_ok = False
         self.ready_seen = {"hyperliquid": False, "bybit": False}
         self.application_pong_seen = {"hyperliquid": False, "bybit": False}
@@ -116,11 +111,8 @@ class _Sink:
 
     def record(self, venue: str, record: SessionRecord) -> None:
         self._append(venue, record)
-        if venue == "bybit" and record.conn_id != self.sequence_conn_id:
-            self.sequence_conn_id = record.conn_id
-            self.previous_u.clear()
-            self.sequence_topics.clear()
-            self.sequence_gap = False
+        if venue == "bybit" and record.conn_id != self.bybit_barrier.conn_id:
+            self.bybit_barrier.start(record.conn_id)
             self.sequence_ok = False
         if record.payload_schema == "liveness_failure" and record.reason:
             self.failures[venue].add(record.reason)
@@ -136,10 +128,7 @@ class _Sink:
         if venue == "bybit":
             if record.payload_schema in {"pre_ack_frame", "raw_frame"}:
                 self._sequence(record)
-            self.sequence_ok = (
-                not self.sequence_gap and self.ready_seen[venue]
-                and _BYBIT_BOOK_TOPICS <= self.sequence_topics
-            )
+            self.sequence_ok = self.ready_seen[venue] and self.bybit_barrier.ready
 
     def mark_down(self, venue: str) -> None:
         self.down[venue] += 1
@@ -158,22 +147,10 @@ class _Sink:
         self._ops("collector", "collector_config", extra | {"active": active})
 
     def _sequence(self, record: SessionRecord) -> None:
-        value = json.loads(record.raw)
-        topic = value.get("topic", "")
-        if topic not in _BYBIT_BOOK_TOPICS:
-            return
-        current, kind = value["data"]["u"], value["type"]
-        previous = self.previous_u.get(topic)
-        missing_snapshot = kind == "delta" and topic not in self.sequence_topics
-        if missing_snapshot or bybit_update_gap(previous, current, kind):
-            self.sequence_gap = True
+        if self.bybit_barrier.observe(record.raw):
             self.sequence_ok = False
             self._append("bybit", record, schema="bybit_sequence_gap", kind="ops")
             self.stop.set()
-            return
-        if kind == "snapshot":
-            self.sequence_topics.add(topic)
-        self.previous_u[topic] = current
 
     def _ops(self, venue: str, schema: str, extra: dict) -> None:
         wall = time.time_ns()
