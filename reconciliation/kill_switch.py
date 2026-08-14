@@ -84,18 +84,24 @@ def reconciliation_streak_triggered(
 
 def decide_kill_switch(
     *, triggered: bool, orders_known: bool, positions_known: bool,
-    reconciliation_consistent: bool,
+    reconciliation_consistency: bool | None,
+    reconciliation_streak_triggered: bool,
 ) -> KillSwitchDecision:
     """Choose a stop action without flattening through unknown venue state."""
     for name, value in (
         ("triggered", triggered),
         ("orders_known", orders_known),
         ("positions_known", positions_known),
-        ("reconciliation_consistent", reconciliation_consistent),
+        ("reconciliation_streak_triggered", reconciliation_streak_triggered),
     ):
         if type(value) is not bool:
             raise TypeError(f"{name} must be a boolean")
-    if not orders_known or not positions_known or not reconciliation_consistent:
+    if reconciliation_consistency is not None and type(reconciliation_consistency) is not bool:
+        raise TypeError("reconciliation_consistency must be a boolean or None")
+    unknown = not orders_known or not positions_known or reconciliation_consistency is None
+    if unknown or reconciliation_streak_triggered:
+        return KillSwitchDecision("cancel_only_freeze")
+    if triggered and not reconciliation_consistency:
         return KillSwitchDecision("cancel_only_freeze")
     action = "flatten_and_stop" if triggered else "continue"
     return KillSwitchDecision(action)
