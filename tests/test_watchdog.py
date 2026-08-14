@@ -1,5 +1,9 @@
 import asyncio
+import hashlib
 import importlib
+import select
+import subprocess
+import sys
 from inspect import getdoc, getsource
 
 import pytest
@@ -7,6 +11,18 @@ import pytest
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 
 NOW_MS = 1_000_000
+ACCOUNT_ID = "test-account"
+HEARTBEAT_OWNER = """
+import sys
+from pathlib import Path
+from execution.writer import WriterIdentity, WriterLease, publish_heartbeat
+lease = WriterLease.acquire(
+    Path(sys.argv[1]), WriterIdentity(sys.argv[2], "primary", "a" * 64, "boot-primary"),
+    [].append, acquired_ns=90,
+)
+publish_heartbeat(lease, observed_mono_ns=100)
+print("ready", flush=True); sys.stdin.readline(); lease.release()
+"""
 
 
 def _module():
@@ -61,6 +77,16 @@ def _loop_case(root, times=(NOW_MS, NOW_MS + 100)):
 
 def _run_loop(values):
     return asyncio.run(_module().run_hl_dead_man_loop(**values))
+
+
+def _heartbeat_owner(root):
+    process = subprocess.Popen(
+        [sys.executable, "-B", "-u", "-c", HEARTBEAT_OWNER, str(root), ACCOUNT_ID],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    ready, _, _ = select.select([process.stdout], [], [], 5)
+    assert ready and process.stdout.readline().strip() == "ready", process.stderr.read()
+    return process
 
 
 @pytest.mark.parametrize("deadline_ms", [None, NOW_MS + 5_000])
@@ -274,3 +300,96 @@ def test_loop_delegates_each_round_and_registers_its_omissions():
     assert source.count("renew_hl_dead_man(") == 1
     assert "bind_hl_schedule_cancel" not in source
     assert "deadline_ms=None" not in source
+
+
+def test_real_process_heartbeat_is_read_without_acquiring_and_rejects_observer(tmp_path):
+    writer, process = importlib.import_module("execution.writer"), _heartbeat_owner(tmp_path)
+    try:
+        expected = writer.read_current_epoch(tmp_path, ACCOUNT_ID)
+        heartbeat = _module().read_heartbeat(tmp_path, ACCOUNT_ID)
+        digest = hashlib.sha256(ACCOUNT_ID.encode()).hexdigest()
+        assert expected == (digest, 1)
+        assert heartbeat == (digest, 1, 100)
+        assert not _module().bybit_writer_timeout(
+            expected, heartbeat, now_mono_ns=200, max_gap_ns=100,
+        )
+        path = WriterLease.path_for(tmp_path, ACCOUNT_ID).with_suffix(".heartbeat")
+        assert path.stat().st_mode & 0o777 == 0o600
+        assert "os.replace" in getsource(writer.publish_heartbeat)
+
+        observer = WriterLease.acquire(
+            tmp_path, WriterIdentity(ACCOUNT_ID, "observer", "b" * 64, "boot-observer"),
+            [].append, acquired_ns=100,
+        )
+        assert observer.authority.mode == "cancel_only"
+        with pytest.raises(WriterLeaseError, match="primary"):
+            writer.publish_heartbeat(observer, observed_mono_ns=200)
+        observer.release()
+    finally:
+        process.communicate("\n", timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("lock_identity", "heartbeat", "now_ns", "expected"),
+    [
+        (None, ("a" * 64, 1, 100), 200, True),
+        (("a" * 64, 1), None, 200, True),
+        (("a" * 64, 1), ("b" * 64, 1, 100), 200, True),
+        (("a" * 64, 1), ("a" * 64, 2, 100), 200, True),
+        (("a" * 64, 1), ("a" * 64, 1, 201), 200, True),
+        (("a" * 64, 1), ("a" * 64, 1, 99), 200, True),
+        (("a" * 64, 1), ("a" * 64, 1, 100), 200, False),
+    ],
+)
+def test_writer_timeout_is_fail_closed(lock_identity, heartbeat, now_ns, expected):
+    assert _module().bybit_writer_timeout(
+        lock_identity, heartbeat, now_mono_ns=now_ns, max_gap_ns=100,
+    ) is expected
+
+
+@pytest.mark.parametrize(("field", "bad", "error"), [
+    ("now_mono_ns", True, TypeError), ("now_mono_ns", 0, ValueError),
+    ("max_gap_ns", True, TypeError), ("max_gap_ns", 0, ValueError),
+])
+def test_writer_timeout_rejects_invalid_policy_inputs(field, bad, error):
+    values = {"now_mono_ns": 200, "max_gap_ns": 100}
+    values[field] = bad
+    with pytest.raises(error):
+        _module().bybit_writer_timeout(("a" * 64, 1), ("a" * 64, 1, 100), **values)
+
+
+def test_lock_and_heartbeat_readers_treat_external_file_failures_as_unknown(tmp_path):
+    writer, path = importlib.import_module("execution.writer"), WriterLease.path_for(
+        tmp_path, ACCOUNT_ID,
+    )
+    heartbeat_path = path.with_suffix(".heartbeat")
+    assert writer.read_current_epoch(tmp_path, ACCOUNT_ID) is None
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
+
+    target = tmp_path / "target"
+    target.write_text("{}")
+    path.symlink_to(target)
+    heartbeat_path.symlink_to(target)
+    assert writer.read_current_epoch(tmp_path, ACCOUNT_ID) is None
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
+    path.unlink()
+    heartbeat_path.unlink()
+
+    path.write_text("{")
+    heartbeat_path.write_text("{")
+    path.chmod(0o600)
+    heartbeat_path.chmod(0o600)
+    assert writer.read_current_epoch(tmp_path, ACCOUNT_ID) is None
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
+    heartbeat_path.write_text('{"account_digest":1,"lease_epoch":1,"observed_mono_ns":100}')
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
+
+    path.write_text('{"account_id":"test-account","lease_epoch":1}')
+    digest = hashlib.sha256(ACCOUNT_ID.encode()).hexdigest()
+    heartbeat_path.write_text(
+        f'{{"account_digest":"{digest}","lease_epoch":1,"observed_mono_ns":100}}'
+    )
+    path.chmod(0o644)
+    heartbeat_path.chmod(0o644)
+    assert writer.read_current_epoch(tmp_path, ACCOUNT_ID) is None
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None

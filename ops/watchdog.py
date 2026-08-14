@@ -4,6 +4,24 @@ from collections.abc import Awaitable, Callable
 
 from execution.cancel import HL_SCHEDULE_MIN_LEAD_MS, bind_hl_schedule_cancel
 from execution.writer import WriterLease
+from execution.writer import read_heartbeat as read_heartbeat
+
+
+def bybit_writer_timeout(
+    lock_identity: tuple[str, int] | None, heartbeat: tuple[str, int, int] | None,
+    *, now_mono_ns: int, max_gap_ns: int,
+) -> bool:
+    for name, value in (("now_mono_ns", now_mono_ns), ("max_gap_ns", max_gap_ns)):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if lock_identity is None or heartbeat is None:
+        return True
+    digest, epoch = lock_identity
+    observed_digest, observed_epoch, observed_ns = heartbeat
+    changed = (digest, epoch) != (observed_digest, observed_epoch)
+    return changed or observed_ns > now_mono_ns or now_mono_ns - observed_ns > max_gap_ns
 
 
 def renew_hl_dead_man(
