@@ -188,17 +188,12 @@ def _validate_expectation(expectation: VenueExpectation) -> None:
             raise StartupContractError("invalid balance ledger") from error
 
 
-def validate_startup_structure(
-    *,
-    startup_started_ns: int,
+def _validate_venue_maps(
     now_ns: int,
     venues: Mapping[str, VenueEvidence],
     expectations: Mapping[str, VenueExpectation],
-) -> ValidatedStartup:
-    """Validate two-venue startup structure without deciding admission."""
-    valid_clock = _valid_nonnegative_int(startup_started_ns)
-    valid_clock &= _valid_nonnegative_int(now_ns) and now_ns >= startup_started_ns
-    _require(valid_clock, "startup clock invalid")
+) -> None:
+    _require(_valid_nonnegative_int(now_ns), "invalid now_ns")
     _require(isinstance(venues, Mapping), "invalid evidence venues")
     _require(isinstance(expectations, Mapping), "invalid expectation venues")
     _require(set(venues) == VENUES, "invalid evidence venues")
@@ -211,6 +206,17 @@ def validate_startup_structure(
         for name in SURFACES:
             surface = validate_surface_evidence(getattr(evidence, name), now_ns)
             _require_matching_contracts(surface, getattr(expectation, name))
+
+
+def validate_startup_structure(
+    *, startup_started_ns: int, now_ns: int,
+    venues: Mapping[str, VenueEvidence], expectations: Mapping[str, VenueExpectation],
+) -> ValidatedStartup:
+    """Validate two-venue startup structure without deciding admission."""
+    valid_clock = _valid_nonnegative_int(startup_started_ns)
+    valid_clock &= _valid_nonnegative_int(now_ns) and now_ns >= startup_started_ns
+    _require(valid_clock, "startup clock invalid")
+    _validate_venue_maps(now_ns, venues, expectations)
     return ValidatedStartup(
         startup_started_ns=startup_started_ns,
         now_ns=now_ns,
@@ -297,6 +303,29 @@ def _state_reasons(
         if audit is not None and audit.end_ns != actual.balances.observed_ns:
             reasons.append(f"{venue}.balances:ledger_coverage_mismatch")
     return reasons
+
+
+def classify_reconciliation_consistency(
+    *, now_ns: int, max_age_ns: int,
+    venues: Mapping[str, VenueEvidence], expectations: Mapping[str, VenueExpectation],
+) -> bool | None:
+    """Return None when evidence does not produce a streak input."""
+    _require(_valid_nonnegative_int(max_age_ns), "invalid max_age_ns")
+    _validate_venue_maps(now_ns, venues, expectations)
+    authoritative = all(
+        surface_is_authoritative(
+            getattr(evidence, name), now_ns=now_ns, max_age_ns=max_age_ns)
+        for evidence in venues.values() for name in SURFACES
+    )
+    if not authoritative:
+        return None
+    ledgers = (expectations[venue].balance_ledger for venue in sorted(VENUES))
+    if any(
+        ledger is None or ledger.unknown_entry_ids or not ledger.self_consistent
+        for ledger in ledgers
+    ):
+        return None
+    return not _state_reasons(dict(venues), dict(expectations))
 
 
 def _signer_nonce_reasons(
