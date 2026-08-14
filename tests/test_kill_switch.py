@@ -247,14 +247,15 @@ def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> Non
 @pytest.mark.parametrize(
     (
         "triggered", "orders_known", "positions_known", "naked_notional_known",
-        "reconciliation_consistency", "streak_triggered", "action",
+        "stablecoin_known", "reconciliation_consistency", "streak_triggered", "action",
     ),
     [
         (
-            triggered, orders_known, positions_known, notional_known, consistency, streak,
+            triggered, orders_known, positions_known, notional_known, fx_known,
+            consistency, streak,
             "cancel_only_freeze"
             if not orders_known or not positions_known or not notional_known
-            or consistency is None or streak
+            or not fx_known or consistency is None or streak
             or (triggered and consistency is False)
             else "flatten_and_stop" if triggered else "continue",
         )
@@ -262,19 +263,22 @@ def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> Non
         for orders_known in (False, True)
         for positions_known in (False, True)
         for notional_known in (False, True)
+        for fx_known in (False, True)
         for consistency in (None, False, True)
         for streak in (False, True)
     ],
 )
 def test_kill_switch_decision_table(
     triggered: bool, orders_known: bool, positions_known: bool, naked_notional_known: bool,
-    reconciliation_consistency: bool | None, streak_triggered: bool, action: str,
+    stablecoin_known: bool, reconciliation_consistency: bool | None,
+    streak_triggered: bool, action: str,
 ) -> None:
     assert decide_kill_switch(
         triggered=triggered,
         orders_known=orders_known,
         positions_known=positions_known,
         naked_notional_known=naked_notional_known,
+        stablecoin_known=stablecoin_known,
         reconciliation_consistency=reconciliation_consistency,
         reconciliation_streak_triggered=streak_triggered,
     ) == KillSwitchDecision(action)
@@ -283,7 +287,7 @@ def test_kill_switch_decision_table(
 def test_pre_threshold_mismatch_continues_without_an_independent_trigger() -> None:
     assert decide_kill_switch(
         triggered=False, orders_known=True, positions_known=True,
-        naked_notional_known=True,
+        naked_notional_known=True, stablecoin_known=True,
         reconciliation_consistency=False, reconciliation_streak_triggered=False,
     ) == KillSwitchDecision("continue")
 
@@ -291,7 +295,7 @@ def test_pre_threshold_mismatch_continues_without_an_independent_trigger() -> No
 def test_pre_threshold_mismatch_blocks_triggered_flattening() -> None:
     assert decide_kill_switch(
         triggered=True, orders_known=True, positions_known=True,
-        naked_notional_known=True,
+        naked_notional_known=True, stablecoin_known=True,
         reconciliation_consistency=False, reconciliation_streak_triggered=False,
     ) == KillSwitchDecision("cancel_only_freeze")
 
@@ -303,6 +307,7 @@ def test_pre_threshold_mismatch_blocks_triggered_flattening() -> None:
         ("orders_known", 1), ("orders_known", None),
         ("positions_known", 1), ("positions_known", None),
         ("naked_notional_known", 1), ("naked_notional_known", None),
+        ("stablecoin_known", 1), ("stablecoin_known", None),
         ("reconciliation_consistency", 1), ("reconciliation_consistency", "true"),
         ("reconciliation_streak_triggered", 1),
         ("reconciliation_streak_triggered", None),
@@ -314,6 +319,7 @@ def test_kill_switch_decision_requires_exact_booleans(field, value) -> None:
         "orders_known": True,
         "positions_known": True,
         "naked_notional_known": True,
+        "stablecoin_known": True,
         "reconciliation_consistency": True,
         "reconciliation_streak_triggered": False,
     }
@@ -337,7 +343,7 @@ def test_kill_switch_decision_has_one_frozen_closed_action() -> None:
     signature = inspect.signature(decide_kill_switch)
     assert tuple(signature.parameters) == (
         "triggered", "orders_known", "positions_known", "naked_notional_known",
-        "reconciliation_consistency", "reconciliation_streak_triggered",
+        "stablecoin_known", "reconciliation_consistency", "reconciliation_streak_triggered",
     )
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY

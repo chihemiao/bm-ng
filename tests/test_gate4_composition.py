@@ -10,7 +10,7 @@ from data.contracts import VALIDITY_NS, ContractError, validate_envelope
 from execution.wallet import AgentWalletRegistration
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 from reconciliation.exposure import ExposureClock
-from reconciliation.fx import Notional
+from reconciliation.fx import FxRate, Notional
 from reconciliation.kill_switch import KillSwitchDecision, ReconciliationStreak
 from reconciliation.kill_switch_composition import (
     KillSwitchSnapshot,
@@ -60,6 +60,8 @@ def _inputs(observed_ns=100, **changes):
         delta=Decimal(0), previous_exposure=None, delta_tolerance=Decimal("0.01"),
         max_naked_ns=10, naked_notional=Notional(Decimal(0), "USDC"),
         max_naked_notional=Notional(Decimal("1000"), "USDC"),
+        fx_rate=FxRate("USDT", "USDC", Decimal(1), observed_ns),
+        fx_max_age_ns=10, max_abs_fx_deviation=Decimal("0.01"),
         reconciliation_observed_ns=observed_ns,
         now_ns=observed_ns, max_age_ns=0)
     return KillSwitchSnapshotInputs(**(values | changes))
@@ -127,6 +129,22 @@ def test_snapshot_composes_exposure_into_the_existing_decision_table(
             result.exposure.duration_exceeded) == (action, state, exceeded)
 
 
+@pytest.mark.parametrize("changes,action", [
+    ({}, "continue"),
+    ({"fx_rate": FxRate("USDT", "USDC", Decimal("1.01"), 100)}, "continue"),
+    ({"fx_rate": FxRate("USDT", "USDC", Decimal("0.99"), 100)}, "continue"),
+    ({"fx_rate": FxRate("USDT", "USDC", Decimal("1.0101"), 100)}, "flatten_and_stop"),
+    ({"fx_rate": FxRate("USDT", "USDC", Decimal("0.9899"), 100)}, "flatten_and_stop"),
+    ({"fx_rate": None}, "cancel_only_freeze"),
+    ({"fx_rate": FxRate("USDT", "USDC", Decimal(1), 89)}, "cancel_only_freeze"),
+    ({"mismatch": True,
+      "fx_rate": FxRate("USDT", "USDC", Decimal("1.0101"), 100)},
+     "cancel_only_freeze"),
+])
+def test_snapshot_composes_stablecoin_evidence_into_the_decision_table(changes, action):
+    assert build_snapshot(_inputs(**changes)).decision.action == action
+
+
 def test_exposure_clock_uses_the_reconciliation_cycle_not_decision_time():
     result = build_snapshot(_inputs(100, now_ns=101, max_age_ns=1))
     assert result.exposure.observed_ns == 100
@@ -138,11 +156,22 @@ def test_triggered_key_does_not_hide_malformed_exposure_inputs():
             KEY_NOW, naked_notional=Notional(Decimal(0), "USDT")))
 
 
+def test_triggered_key_does_not_hide_malformed_stablecoin_inputs():
+    with pytest.raises(TypeError, match="rate"):
+        build_snapshot(_inputs(KEY_NOW, fx_rate=object()))
+
+
 def test_positions_knowability_reuses_the_derived_exposure_state():
     source = inspect.getsource(build_snapshot)
     assert source.count("delta_state(") == 1
     assert 'positions_known = exposure_state.state != "unknown"' in source
     assert "naked_notional_known=inputs.naked_notional is not None" in source
+
+
+def test_stablecoin_evidence_is_derived_once_and_routes_through_the_table():
+    source = inspect.getsource(build_snapshot)
+    assert source.count("_stablecoin_evidence(") == 1
+    assert "stablecoin_known=stablecoin_known" in source
 
 
 def test_cycle_replay_is_idempotent_and_contradiction_is_rejected():
@@ -165,6 +194,8 @@ def test_cycle_replay_is_idempotent_and_contradiction_is_rejected():
     {"previous_exposure": object()}, {"delta_tolerance": Decimal("NaN")},
     {"max_naked_ns": -1}, {"naked_notional": Decimal(0)},
     {"max_naked_notional": None},
+    {"fx_rate": object()}, {"fx_max_age_ns": 0},
+    {"max_abs_fx_deviation": 0.01}, {"max_abs_fx_deviation": Decimal("-0.01")},
 ])
 def test_invalid_state_is_never_short_circuited(changes):
     with pytest.raises((TypeError, ValueError)):
@@ -176,6 +207,7 @@ def test_snapshot_contract_is_narrow_frozen_slotted_and_keyword_only():
         "registration", "nonce_events", "previous_streak", "streak_threshold",
         "venues", "expectations", "delta", "previous_exposure", "delta_tolerance",
         "max_naked_ns", "naked_notional", "max_naked_notional",
+        "fx_rate", "fx_max_age_ns", "max_abs_fx_deviation",
         "reconciliation_observed_ns", "now_ns", "max_age_ns"]
     assert [field.name for field in fields(KillSwitchSnapshot)] == [
         "decision", "reconciliation_streak", "reconciliation_consistency", "exposure"]
