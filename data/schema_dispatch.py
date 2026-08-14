@@ -9,6 +9,7 @@ ORDER_LEGS = frozenset({"hyperliquid", "bybit"})
 ORDER_STATUSES = frozenset(
     {"absent", "pending", "unknown", "open", "partially_filled", "filled", "cancelled", "rejected"}
 )
+APPLICATION_HEARTBEAT_PHASES = frozenset({"sent", "pong"})
 
 EVENT_KINDS = frozenset({"market", "decision", "order", "reconciliation", "ops"})
 IDENTITY_STATUSES = frozenset({"known", "unknown"})
@@ -38,6 +39,7 @@ COMMON_FIELDS = (
 PAYLOAD_SCHEMAS = frozenset(
     {
         "agent_wallet_rotation",
+        "application_heartbeat",
         "bybit_sequence_gap",
         "account_ledger_entry",
         "collector_config",

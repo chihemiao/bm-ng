@@ -222,7 +222,7 @@ def test_invalid_allocation_time_never_calls_recorder(
 def test_signer_nonce_schema_is_registered_durable_and_bounded() -> None:
     event = _nonce_event()
     assert validate_envelope(event) is event
-    assert "signer_nonce_allocation" in PAYLOAD_SCHEMAS and len(PAYLOAD_SCHEMAS) == 19
+    assert "signer_nonce_allocation" in PAYLOAD_SCHEMAS and len(PAYLOAD_SCHEMAS) == 20
     event.pop("seq_within_boot")
     with pytest.raises(ContractError, match="seq_within_boot"):
         validate_envelope(event)

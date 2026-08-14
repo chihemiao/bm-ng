@@ -109,7 +109,7 @@ def test_wallet_rotation_schema_is_registered_and_accepts_identity_boot_separati
     event = _rotation_event()
 
     assert "agent_wallet_rotation" in contracts.PAYLOAD_SCHEMAS
-    assert len(contracts.PAYLOAD_SCHEMAS) == 19
+    assert len(contracts.PAYLOAD_SCHEMAS) == 20
     assert event["boot_id"] != event["payload"]["boot_id"]
     assert contracts.validate_envelope(event) is event
 

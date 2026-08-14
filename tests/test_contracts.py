@@ -35,6 +35,7 @@ LEGACY_PAYLOAD_SCHEMAS = frozenset(
     }
 )
 FROZEN_PAYLOAD_SCHEMAS = LEGACY_PAYLOAD_SCHEMAS | {
+    "application_heartbeat",
     "account_ledger_entry",
     "reconciliation_decision",
     "reconciliation_surface",
@@ -102,6 +103,7 @@ def test_event_kind_set_is_frozen() -> None:
 
 def test_payload_schema_registry_is_frozen_complete_and_bounded() -> None:
     emitted = {
+        "application_heartbeat",
         "bybit_sequence_gap",
         "collector_config",
         "liveness_failure",
@@ -117,6 +119,20 @@ def test_payload_schema_registry_is_frozen_complete_and_bounded() -> None:
     assert _emitted_payload_schemas() == emitted
     assert emitted <= PAYLOAD_SCHEMAS
     assert len(PAYLOAD_SCHEMAS) <= 20
+
+
+@pytest.mark.parametrize("phase", ["sent", "pong"])
+def test_application_heartbeat_phase_is_a_closed_replay_contract(phase: str) -> None:
+    event = market_event()
+    event.update(event_kind="ops", payload_schema="application_heartbeat")
+    event["payload"] = {"raw": "e30=", "phase": phase}
+    assert validate_envelope(event) is event
+    event["payload"]["phase"] = "ack"
+    with pytest.raises(ContractError, match="heartbeat phase"):
+        validate_envelope(event)
+    del event["payload"]["phase"]
+    with pytest.raises(ContractError, match="heartbeat phase"):
+        validate_envelope(event)
 
 
 def test_legacy_schema_v1_envelopes_remain_replay_compatible() -> None:

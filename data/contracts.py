@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
-from data import schema_order_observation, schema_order_request
+from data import schema_dispatch, schema_order_observation, schema_order_request
 from data.schema_dispatch import (
     COMMON_FIELDS,
     DURABLE_EVENT_SCHEMAS,
@@ -67,7 +67,9 @@ def validate_envelope(event: dict[str, Any]) -> dict[str, Any]:
     for field in ("recv_wall_ns", "recv_mono_ns"):
         _require(_valid_ns(event[field]), f"invalid {field}")
     _require(isinstance(event["payload"], dict), "payload must be a mapping")
-
+    heartbeat = event["payload_schema"] != "application_heartbeat"
+    _require(heartbeat or event["payload"].get("phase") in
+             schema_dispatch.APPLICATION_HEARTBEAT_PHASES, "invalid heartbeat phase")
     if event["event_kind"] == "order":
         _validate_order_identity(event)
     if event["event_kind"] == "ops" and event["payload_schema"] == "raw_quarantine":

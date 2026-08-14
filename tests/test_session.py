@@ -30,11 +30,16 @@ def _protocol(streams=HL_STREAMS):
     def decode(message):
         text = message.decode() if isinstance(message, bytes) else message
         payload = json.loads(text)
+        if payload["type"] == "application_pong":
+            return DecodedFrame(kind="application_pong", stream=payload.get("stream"))
         if payload["type"] not in {"ack", "market"}:
             raise ValueError("unknown frame")
         return DecodedFrame(kind=payload["type"], stream=payload["stream"])
 
-    return SessionProtocol(subscription_frames=subscriptions, decode=decode)
+    return SessionProtocol(
+        subscription_frames=subscriptions, decode=decode,
+        application_ping_frame=json.dumps({"type": "application_ping"}),
+    )
 
 
 def _uri(server) -> str:
@@ -43,7 +48,11 @@ def _uri(server) -> str:
 
 
 def _session(uri, on_record, **options):
-    settings = {"ping_interval": 1, "ping_timeout": 1, "ack_timeout": 1, "max_reconnects": 0}
+    settings = {
+        "transport_ping_interval": 1, "transport_ping_timeout": 1,
+        "application_ping_interval": 1, "application_pong_timeout": 1,
+        "ack_timeout": 1, "max_reconnects": 0,
+    }
     settings.update(options)
     return PublicSession(uri, "hyperliquid", "boot-a", _protocol(), on_record, **settings)
 
@@ -51,23 +60,36 @@ def _session(uri, on_record, **options):
 def test_hard_liveness_types_exclude_soft_arrival_alerts_and_cross_layer_imports() -> None:
     assert websockets.__version__ == "17.0.1"
     assert tuple(field.name for field in fields(HLLivenessEvidence)) == (
-        "pong_ok",
+        "transport_keepalive_ok",
+        "application_pong_ok",
         "subscriptions_acked",
         "file_integrity_ok",
     )
     assert tuple(field.name for field in fields(BybitLivenessEvidence)) == (
-        "pong_ok",
+        "transport_keepalive_ok",
+        "application_pong_ok",
         "sequence_ok",
     )
+    assert tuple(field.name for field in fields(SessionProtocol)) == (
+        "subscription_frames", "decode", "application_ping_frame")
+    assert tuple(field.name for field in fields(DecodedFrame)) == ("kind", "stream")
     assert list(inspect.signature(hl_hard_liveness).parameters) == ["evidence"]
     assert list(inspect.signature(bybit_hard_liveness).parameters) == ["evidence"]
     assert get_type_hints(hl_hard_liveness)["evidence"] is HLLivenessEvidence
     assert get_type_hints(bybit_hard_liveness)["evidence"] is BybitLivenessEvidence
-    assert hl_hard_liveness(HLLivenessEvidence(True, True, True))
-    assert not hl_hard_liveness(HLLivenessEvidence(True, False, True))
-    assert bybit_hard_liveness(BybitLivenessEvidence(True, True))
-    assert not bybit_hard_liveness(BybitLivenessEvidence(True, False))
+    assert hl_hard_liveness(HLLivenessEvidence(False, True, True, True))
+    assert not hl_hard_liveness(HLLivenessEvidence(True, False, True, True))
+    assert bybit_hard_liveness(BybitLivenessEvidence(False, True, True))
+    assert not bybit_hard_liveness(BybitLivenessEvidence(True, False, True))
+    for verdict in (hl_hard_liveness, bybit_hard_liveness):
+        source = inspect.getsource(verdict)
+        assert "application_pong_ok" in source and "transport_keepalive_ok" not in source
     assert "shard" not in session_module.__dict__
+
+
+async def _application_pong(websocket) -> None:
+    assert json.loads(await websocket.recv()) == {"type": "application_ping"}
+    await websocket.send(json.dumps({"type": "application_pong"}))
 
 
 async def _reconnect_scenario() -> None:
@@ -81,6 +103,9 @@ async def _reconnect_scenario() -> None:
         acknowledged = HL_STREAMS if len(cycles) == 1 else HL_STREAMS[:-1]
         for stream in acknowledged:
             await websocket.send(json.dumps({"type": "ack", "stream": stream}))
+        await _application_pong(websocket)
+        if len(cycles) == 2:
+            await _application_pong(websocket)
         if len(cycles) == 1:
             await websocket.send(
                 json.dumps({"type": "market", "stream": HL_STREAMS[0], "value": "first"})
@@ -103,7 +128,8 @@ async def _reconnect_scenario() -> None:
             stop.set()
 
     async with serve(handler, "127.0.0.1", 0, ping_interval=None) as server:
-        session = _session(_uri(server), on_record, max_reconnects=1)
+        session = _session(
+            _uri(server), on_record, max_reconnects=1, application_ping_interval=0.01)
         report = await asyncio.wait_for(session.run(stop), 2)
 
     assert cycles == [list(HL_STREAMS), list(HL_STREAMS)]
@@ -115,6 +141,9 @@ async def _reconnect_scenario() -> None:
     assert [json.loads(record.raw)["value"] for record in pre_ack] == ["early"]
     assert report.reconnects == 1
     assert report.ack_cycles == 2
+    assert len([record for record in records
+                if record.payload_schema == "application_heartbeat"
+                and record.phase == "pong"]) == 3
 
 
 def test_real_disconnect_requires_all_venue_streams_to_reack() -> None:
@@ -130,6 +159,7 @@ async def _quarantine_scenario() -> None:
         for _ in HL_STREAMS:
             stream = json.loads(await websocket.recv())["stream"]
             await websocket.send(json.dumps({"type": "ack", "stream": stream}))
+        await _application_pong(websocket)
         await websocket.send(b"\xff\x00")
         await websocket.send(json.dumps({"type": "market", "stream": HL_STREAMS[0]}))
         await stop.wait()
@@ -182,17 +212,33 @@ async def _liveness_scenario() -> None:
         session = _session(
             _uri(server),
             records.append,
-            ping_interval=0.01,
-            ping_timeout=0.02,
+            transport_ping_interval=0.01,
+            transport_ping_timeout=0.02,
         )
         await asyncio.wait_for(session.run(stop), 1)
-    assert any(record.reason == "ping_timeout" for record in records)
+    assert any(record.reason == "transport_ping_timeout" for record in records)
+
+    async def no_application_pong(websocket):
+        for stream in HL_STREAMS:
+            await websocket.recv()
+            await websocket.send(json.dumps({"type": "ack", "stream": stream}))
+        assert json.loads(await websocket.recv()) == {"type": "application_ping"}
+        await asyncio.sleep(0.1)
+
+    records.clear()
+    async with serve(no_application_pong, "127.0.0.1", 0) as ws_server:
+        session = _session(
+            _uri(ws_server), records.append, application_pong_timeout=0.02)
+        await asyncio.wait_for(session.run(stop), 1)
+    reasons = [record.reason for record in records if record.payload_schema == "liveness_failure"]
+    assert "application_pong_timeout" in reasons and "transport_ping_timeout" not in reasons
 
     async def partial_ack(websocket):
         for index, stream in enumerate(HL_STREAMS):
             await websocket.recv()
             if index < len(HL_STREAMS) - 1:
                 await websocket.send(json.dumps({"type": "ack", "stream": stream}))
+        await _application_pong(websocket)
         await asyncio.sleep(0.2)
 
     records.clear()
@@ -204,3 +250,31 @@ async def _liveness_scenario() -> None:
 
 def test_real_ping_and_subscription_timeouts_are_hard_liveness_failures() -> None:
     asyncio.run(_liveness_scenario())
+
+
+async def _duplicate_pong_scenario() -> None:
+    records = []
+    stop = asyncio.Event()
+
+    async def handler(websocket):
+        for stream in HL_STREAMS:
+            await websocket.recv()
+            await websocket.send(json.dumps({"type": "ack", "stream": stream}))
+        await _application_pong(websocket)
+        await websocket.send(json.dumps({"type": "application_pong"}))
+        await websocket.send(json.dumps({"type": "application_pong", "stream": "wrong"}))
+        await stop.wait()
+
+    def record(value):
+        records.append(value)
+        if sum(item.payload_schema == "raw_quarantine" for item in records) == 2:
+            stop.set()
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        await asyncio.wait_for(_session(_uri(server), record).run(stop), 1)
+    assert [item.phase for item in records if item.payload_schema == "application_heartbeat"] == [
+        "sent", "pong"]
+
+
+def test_duplicate_and_malformed_application_pongs_are_quarantined() -> None:
+    asyncio.run(_duplicate_pong_scenario())
