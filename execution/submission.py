@@ -8,6 +8,7 @@ from data.schema_nonce import signer_nonce_window_bounds
 from execution.nonce import NonceAllocator
 from execution.order_serde import serialize_order_observation
 from execution.orders import (
+    FlattenIntentPlan,
     OrderIntent,
     OrderRequestRecord,
     ReconciliationEvidence,
@@ -15,6 +16,7 @@ from execution.orders import (
     T0APairIntents,
     _require,
     decide_submission,
+    next_flatten_intent,
     order_request_record,
     t0a_pair_intents_match,
 )
@@ -41,6 +43,12 @@ class PairLegSubmissionInputs:
 class PairSubmissionOutcome:
     hyperliquid: object | BaseException
     bybit: object | BaseException
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FlattenStepOutcome:
+    intent: OrderIntent
+    result: tuple[str, object | None]
 
 
 class ObservationMappingError(RuntimeError):
@@ -194,6 +202,37 @@ def submit_order(
     )
     request_recorder(built)
     return decision, transport(built)
+
+
+def submit_flatten_step(
+    plan: FlattenIntentPlan,
+    hyperliquid_input: object,
+    bybit_input: object,
+    *,
+    lease: WriterLease,
+    allocator: NonceAllocator,
+    request_recorder: Callable[[OrderRequestRecord], None],
+    now_ns: int,
+    max_signal_age_ns: int,
+    max_reconcile_attempts: int,
+    now_ms: int,
+    decided_ns: int,
+) -> FlattenStepOutcome | None:
+    """Submit at most one risk-minimizing intent from an authoritative plan."""
+    intent = next_flatten_intent(plan)
+    if intent is None:
+        return None
+    selected = hyperliquid_input if intent.leg == "hyperliquid" else bybit_input
+    if not isinstance(selected, PairLegSubmissionInputs):
+        raise TypeError("selected input must be PairLegSubmissionInputs")
+    result = submit_order(
+        intent, selected.evidence, selected.request, selected.history,
+        lease, allocator, selected.transport, request_recorder,
+        now_ns=now_ns, max_signal_age_ns=max_signal_age_ns,
+        max_reconcile_attempts=max_reconcile_attempts,
+        now_ms=now_ms, decided_ns=decided_ns,
+    )
+    return FlattenStepOutcome(intent=intent, result=result)
 
 
 def submit_t0a_pair(
