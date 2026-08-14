@@ -243,6 +243,7 @@ def test_hl_cancel_binding_calls_once_with_exact_ordered_wire_rows():
             cancel.HLCancelTarget(coin="ETH", oid=2),
             cancel.HLCancelTarget(coin="BTC", oid=1),
             cancel.HLCancelTarget(coin="ETH", oid=2),
+            cancel.HLCancelTarget(coin="BTC", oid=3),
         )
     )
     transport = cancel.bind_hl_cancel(batch, bulk_cancel)
@@ -252,6 +253,7 @@ def test_hl_cancel_binding_calls_once_with_exact_ordered_wire_rows():
         {"coin": "ETH", "oid": 2},
         {"coin": "BTC", "oid": 1},
         {"coin": "ETH", "oid": 2},
+        {"coin": "BTC", "oid": 3},
     ]]
 
 
