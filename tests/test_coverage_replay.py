@@ -43,7 +43,9 @@ def test_bybit_barrier_freezes_delta_gaps_and_allows_snapshot_reset() -> None:
 
 def test_live_collector_delegates_sequence_judgment_to_shared_barrier() -> None:
     tree = ast.parse(textwrap.dedent(inspect.getsource(collector._Sink._sequence)))
-    assert any(isinstance(node, ast.Attribute) and node.attr == "observe" for node in ast.walk(tree))
+    assert any(
+        isinstance(node, ast.Attribute) and node.attr == "observe" for node in ast.walk(tree)
+    )
     source = inspect.getsource(collector._Sink)
     assert "previous_u" not in source
     assert "sequence_topics" not in source
