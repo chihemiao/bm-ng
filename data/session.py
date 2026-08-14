@@ -129,13 +129,17 @@ class PublicSession:
                 self._liveness_failures += 1
                 self._emit("ops", "liveness_failure", b"", None, False, str(error))
             except ConnectionClosed as error:
-                if _is_ping_timeout(error):
-                    self._liveness_failures += 1
-                    self._emit(
-                        "ops", "liveness_failure", b"", None, False,
-                        "transport_ping_timeout")
+                reason = (
+                    "transport_ping_timeout" if _is_ping_timeout(error)
+                    else "transport_disconnected"
+                )
+                self._liveness_failures += 1
+                self._emit("ops", "liveness_failure", b"", None, False, reason)
             except OSError:
-                pass
+                self._liveness_failures += 1
+                self._emit(
+                    "ops", "liveness_failure", b"", None, False,
+                    "transport_disconnected")
             if stop.is_set() or reconnects >= self.max_reconnects:
                 break
             reconnects += 1

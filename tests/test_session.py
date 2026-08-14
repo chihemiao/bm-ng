@@ -92,6 +92,21 @@ async def _application_pong(websocket) -> None:
     await websocket.send(json.dumps({"type": "application_pong"}))
 
 
+def _assert_disconnect_evidence(records, report) -> None:
+    failures = [
+        (index, record) for index, record in enumerate(records)
+        if record.payload_schema == "liveness_failure"
+    ]
+    assert [record.reason for _, record in failures] == ["transport_disconnected"]
+    first_market = next(index for index, record in enumerate(records)
+                        if record.event_kind == "market")
+    second_send = next(index for index, record in enumerate(records)
+                       if record.conn_id.endswith(":2")
+                       and record.payload_schema == "subscription_send")
+    assert first_market < failures[0][0] < second_send
+    assert report.liveness_failures == 1
+
+
 async def _reconnect_scenario() -> None:
     cycles = []
     records = []
@@ -141,6 +156,7 @@ async def _reconnect_scenario() -> None:
     assert [json.loads(record.raw)["value"] for record in pre_ack] == ["early"]
     assert report.reconnects == 1
     assert report.ack_cycles == 2
+    _assert_disconnect_evidence(records, report)
     assert len([record for record in records
                 if record.payload_schema == "application_heartbeat"
                 and record.phase == "pong"]) == 3
@@ -148,6 +164,23 @@ async def _reconnect_scenario() -> None:
 
 def test_real_disconnect_requires_all_venue_streams_to_reack() -> None:
     asyncio.run(_reconnect_scenario())
+
+
+async def _connection_refused_scenario() -> None:
+    server = await asyncio.start_server(_no_pong, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    server.close()
+    await server.wait_closed()
+    records = []
+    report = await _session(f"ws://127.0.0.1:{port}", records.append).run(asyncio.Event())
+    assert report.liveness_failures == 1
+    assert [(record.payload_schema, record.reason) for record in records] == [
+        ("liveness_failure", "transport_disconnected"),
+    ]
+
+
+def test_real_connection_refusal_is_explained_transport_evidence() -> None:
+    asyncio.run(_connection_refused_scenario())
 
 
 async def _quarantine_scenario() -> None:
