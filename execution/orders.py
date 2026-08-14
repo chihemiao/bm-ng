@@ -66,6 +66,20 @@ class FlattenIntentPlan:
                 raise ValueError(f"{leg} intent metadata diverges from plan-level metadata")
 
 
+def next_flatten_intent(plan: FlattenIntentPlan) -> OrderIntent | None:
+    """Choose one intent that minimizes residual exposure if it alone fills."""
+    if not isinstance(plan, FlattenIntentPlan):
+        raise TypeError("plan must be a FlattenIntentPlan")
+    hyperliquid, bybit = plan.hyperliquid, plan.bybit
+    if hyperliquid is None:
+        return bybit
+    if bybit is None:
+        return hyperliquid
+    if hyperliquid.symbol != bybit.symbol:
+        raise ValueError("flatten plan symbols differ")
+    return hyperliquid if hyperliquid.quantity >= bybit.quantity else bybit
+
+
 @dataclass(frozen=True, slots=True)
 class OrderRequestRecord:
     strategy_id: str
