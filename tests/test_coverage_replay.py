@@ -13,25 +13,19 @@ from data.shard import ShardWriter
 
 
 def _book(symbol: str, update: int, kind: str = "snapshot") -> bytes:
-    return json.dumps({
-        "topic": f"orderbook.50.{symbol}USDT", "type": kind, "data": {"u": update},
-    }).encode()
+    payload = {"topic": f"orderbook.50.{symbol}USDT", "type": kind, "data": {"u": update}}
+    return json.dumps(payload).encode()
 
 
 def _event(schema: str, at: int, *, venue: str = "hyperliquid", conn: str = "h1", **extra) -> dict:
-    payload = {"raw": "", "raw_encoding": "base64", "stream": None,
-               "ready": False, "reason": None} | extra
-    return {
-        "schema_ver": 1, "event_kind": "ops", "payload_schema": schema,
-        "venue": venue, "conn_id": conn, "boot_id": "boot", "recv_wall_ns": at,
-        "recv_mono_ns": at, "source": "live_public_ws", "payload": payload,
-        "is_gate1_record": True,
-    }
+    payload = {"raw": "", "ready": False, "reason": None} | extra
+    return dict(schema_ver=1, event_kind="ops", payload_schema=schema, venue=venue,
+                conn_id=conn, boot_id="boot", recv_wall_ns=at, recv_mono_ns=at,
+                source="live_public_ws", payload=payload, is_gate1_record=True)
 
 
 def _config(at: int = 0) -> dict:
-    return _event("collector_config", at, venue="collector", conn="collector",
-                  record_mode="formal")
+    return _event("collector_config", at, venue="collector", conn="collector", record_mode="formal")
 
 
 def _snapshot(at: int, symbol: str, *, conn: str, update: int = 1,
@@ -44,8 +38,7 @@ def _snapshot(at: int, symbol: str, *, conn: str, update: int = 1,
 
 def _barrier(conn: str, at: int, symbols: tuple[str, ...] = ("BTC", "ETH")) -> list[dict]:
     return [_event("subscription_send", at, venue="bybit", conn=conn),
-            *[_snapshot(at + index, symbol, conn=conn)
-              for index, symbol in enumerate(symbols, 1)],
+            *[_snapshot(at + index, symbol, conn=conn) for index, symbol in enumerate(symbols, 1)],
             _event("application_heartbeat", at + 3, venue="bybit", conn=conn, phase="pong"),
             _event("subscription_ack", at + 4, venue="bybit", conn=conn, ready=True)]
 
@@ -110,13 +103,12 @@ def test_replay_emits_hard_points_and_requires_new_connection_after_failure(tmp_
               *_barrier("b3", 18),
               _event("application_heartbeat", 23, venue="bybit", conn="b3", phase="pong")]
     _write(tmp_path, *events)
+    point = coverage.CoveragePoint
     assert coverage.replay_coverage_points(tmp_path) == (
-        coverage.CoveragePoint("hyperliquid", 3, "hard_verified", None),
-        coverage.CoveragePoint("hyperliquid", 4, "hard_verified", None),
-        coverage.CoveragePoint("bybit", 15, "hard_verified", None),
-        coverage.CoveragePoint("bybit", 16, "unexplained_failure", None),
-        coverage.CoveragePoint("bybit", 22, "hard_verified", None),
-        coverage.CoveragePoint("bybit", 23, "hard_verified", None))
+        point("hyperliquid", 3, "hard_verified", None),
+        point("hyperliquid", 4, "hard_verified", None),
+        point("bybit", 15, "hard_verified", None), point("bybit", 16, "unexplained_failure", None),
+        point("bybit", 22, "hard_verified", None), point("bybit", 23, "hard_verified", None))
 
 
 def test_failure_reasons_map_and_sequence_gap_must_match_raw(tmp_path: Path) -> None:
@@ -131,8 +123,7 @@ def test_failure_reasons_map_and_sequence_gap_must_match_raw(tmp_path: Path) -> 
     points = coverage.replay_coverage_points(tmp_path)
     assert [point.reason for point in points if point.kind == "explained_failure"] == [
         *reasons, "venue_down", "bybit_sequence_gap"]
-    for label, suffix in (("missing", events[1:-1]),
-                          ("orphan", [*_barrier("b1", 6), events[-1]])):
+    for label, suffix in (("missing", events[1:-1]), ("orphan", [*_barrier("b1", 6), events[-1]])):
         root = tmp_path / label
         _write(root, _config(), *suffix)
         with pytest.raises(ContractError):
@@ -143,15 +134,14 @@ def test_formal_root_structure_order_and_integrity_are_fail_closed(tmp_path: Pat
     trial = _event("subscription_send", 1)
     trial["is_gate1_record"] = False
     ledger = _event("account_ledger_entry", 1)
-    ledger.update(event_kind="reconciliation", seq_within_boot=1)
-    ledger["payload"] = {"venue": "hyperliquid", "entry_id": "e", "entry_kind": "funding",
-                         "occurred_ns": 0, "asset": "USDC", "signed_amount_canonical": "1",
-                         "caused_by_order_id": None, "source_observed_ns": 0}
+    ledger.update(event_kind="reconciliation", seq_within_boot=1, payload={
+        "venue": "hyperliquid", "entry_id": "e", "entry_kind": "funding", "occurred_ns": 0,
+        "asset": "USDC", "signed_amount_canonical": "1", "caused_by_order_id": None,
+        "source_observed_ns": 0})
     cases = {"missing-config": [_event("subscription_send", 1)],
              "duplicate-config": [_config(), _config(1)], "trial": [_config(), trial],
-             "unrelated": [_config(), ledger],
-             "backwards": [_config(2), _event("subscription_send", 1)],
-             "json": [_config(), b"{"]}
+             "unrelated": [_config(), ledger], "json": [_config(), b"{"],
+             "backwards": [_config(2), _event("subscription_send", 1)]}
     for label, events in cases.items():
         root = tmp_path / label
         _write(root, *events)
