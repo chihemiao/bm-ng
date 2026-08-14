@@ -124,6 +124,120 @@ def test_raw_latency_samples_reject_schema_drift_and_stream_mismatch() -> None:
             latency.raw_latency_samples(event)
 
 
+HOUR_NS = 3_600_000_000_000
+
+
+def _latency_hour(at: int) -> list[dict]:
+    events = []
+    for coin, symbol in (("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")):
+        events.extend((
+            _market("hyperliquid", f"l2Book:{coin}",
+                    {"channel": "l2Book", "data": {"coin": coin, "time": 1}}, at),
+            _market("hyperliquid", f"trades:{coin}",
+                    {"channel": "trades", "data": [{"coin": coin, "time": 1}]}, at),
+            _market("hyperliquid", f"bbo:{coin}",
+                    {"channel": "bbo", "data": {"coin": coin, "time": 1}}, at),
+            _market("bybit", f"orderbook.50.{symbol}",
+                    {"topic": f"orderbook.50.{symbol}", "cts": 1, "data": {"s": symbol}}, at),
+            _market("bybit", f"publicTrade.{symbol}",
+                    {"topic": f"publicTrade.{symbol}",
+                     "data": [{"s": symbol, "T": 1}]}, at),
+            _market("bybit", f"tickers.{symbol}",
+                    {"topic": f"tickers.{symbol}", "ts": 1,
+                     "data": {"symbol": symbol}}, at),
+        ))
+    return events
+
+
+@pytest.mark.parametrize("missing", [None, "l2Book:BTC", "tickers.ETHUSDT"])
+def test_usable_latency_hours_require_all_twelve_streams(missing: str | None) -> None:
+    events = _latency_hour(1)
+    if missing:
+        events = [event for event in events if event["payload"]["stream"] != missing]
+    assert latency.usable_latency_hours(
+        events, start_ns=0, end_ns=HOUR_NS, explained_intervals=()) == (missing is None)
+
+
+def test_non_timestamp_and_empty_trade_frames_do_not_fill_missing_streams() -> None:
+    events = [event for event in _latency_hour(1)
+              if event["payload"]["stream"] != "l2Book:BTC"]
+    active = {"channel": "activeAssetCtx", "data": {"coin": "BTC", "ctx": {}}}
+    events.append(_market("hyperliquid", "activeAssetCtx:BTC", active, 1))
+    assert latency.usable_latency_hours(
+        events, start_ns=0, end_ns=HOUR_NS, explained_intervals=()) == 0
+    for venue, stream, value in (
+        ("hyperliquid", "trades:BTC", {"channel": "trades", "data": []}),
+        ("bybit", "publicTrade.BTCUSDT",
+         {"topic": "publicTrade.BTCUSDT", "data": []}),
+    ):
+        replaced = [event for event in _latency_hour(1)
+                    if event["payload"]["stream"] != stream]
+        replaced.append(_market(venue, stream, value, 1))
+        assert latency.usable_latency_hours(
+            replaced, start_ns=0, end_ns=HOUR_NS, explained_intervals=()) == 0
+
+
+def test_quarantine_and_real_gap_overlap_invalidate_their_hours() -> None:
+    events = _latency_hour(1)
+    quarantine = _event("raw_quarantine", 2, raw="eA==")
+    assert latency.usable_latency_hours(
+        [*events, quarantine], start_ns=0, end_ns=HOUR_NS,
+        explained_intervals=()) == 0
+    assert latency.usable_latency_hours(
+        events, start_ns=0, end_ns=HOUR_NS,
+        explained_intervals=((2, 3),)) == 0
+
+
+def test_gap_touching_hour_boundary_does_not_overlap() -> None:
+    assert latency.usable_latency_hours(
+        _latency_hour(HOUR_NS + 1), start_ns=HOUR_NS, end_ns=2 * HOUR_NS,
+        explained_intervals=((0, HOUR_NS),)) == 1
+
+
+def test_usable_latency_hours_count_only_clean_complete_hours() -> None:
+    events = [*_latency_hour(1), *_latency_hour(HOUR_NS + 1),
+              *_latency_hour(2 * HOUR_NS + 1)]
+    events = [event for event in events if not (
+        event["recv_wall_ns"] > 2 * HOUR_NS
+        and event["payload"]["stream"] == "bbo:ETH")]
+    quarantine = _event("raw_quarantine", HOUR_NS + 2, raw="eA==")
+    assert latency.usable_latency_hours(
+        [*events, quarantine], start_ns=0, end_ns=3 * HOUR_NS,
+        explained_intervals=()) == 1
+    assert latency.usable_latency_hours(
+        events, start_ns=0, end_ns=3 * HOUR_NS,
+        explained_intervals=((0, 1), (3 * HOUR_NS - 1, 3 * HOUR_NS))) == 1
+
+
+def test_window_outside_malformed_wire_is_not_parsed() -> None:
+    malformed = _event("raw_frame", HOUR_NS, venue="bybit", stream="bad", raw="not-base64")
+    malformed["event_kind"] = "market"
+    assert latency.usable_latency_hours(
+        [*_latency_hour(1), malformed], start_ns=0, end_ns=HOUR_NS,
+        explained_intervals=()) == 1
+
+
+@pytest.mark.parametrize(("start", "end"), [(-1, HOUR_NS), (1, HOUR_NS),
+                                             (0, HOUR_NS - 1), (HOUR_NS, HOUR_NS)])
+def test_usable_latency_hours_reject_invalid_window(start: int, end: int) -> None:
+    with pytest.raises(ContractError):
+        latency.usable_latency_hours([], start_ns=start, end_ns=end, explained_intervals=())
+
+
+@pytest.mark.parametrize("intervals", [((2, 1),), ((1, 1),), ((2, 3), (0, 1)), ((1,),)])
+def test_usable_latency_hours_reject_invalid_intervals(intervals: tuple) -> None:
+    with pytest.raises(ContractError):
+        latency.usable_latency_hours(
+            [], start_ns=0, end_ns=HOUR_NS, explained_intervals=intervals)
+
+
+def test_usable_latency_hours_reject_invalid_event_sequences() -> None:
+    for events in ((event for event in ()), [{}]):
+        with pytest.raises(ContractError):
+            latency.usable_latency_hours(
+                events, start_ns=0, end_ns=HOUR_NS, explained_intervals=())
+
+
 def test_bybit_barrier_requires_both_snapshots_and_resets_per_connection() -> None:
     barrier = coverage.BybitBarrier()
     barrier.start("b1")
