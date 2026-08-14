@@ -37,6 +37,35 @@ class T0APairIntents:
     bybit: OrderIntent
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FlattenIntentPlan:
+    strategy_id: str
+    strategy_version: str
+    signal_ns: int
+    hyperliquid: OrderIntent | None
+    bybit: OrderIntent | None
+
+    def __post_init__(self) -> None:
+        if type(self.strategy_id) is not str or not self.strategy_id:
+            raise ValueError("strategy_id must be a non-empty str")
+        if type(self.strategy_version) is not str or not self.strategy_version:
+            raise ValueError("strategy_version must be a non-empty str")
+        if type(self.signal_ns) is not int or self.signal_ns < 0:
+            raise ValueError("signal_ns must be a non-negative int")
+        for leg, intent in (("hyperliquid", self.hyperliquid), ("bybit", self.bybit)):
+            if intent is None:
+                continue
+            if not isinstance(intent, OrderIntent):
+                raise TypeError(f"{leg} slot must be an OrderIntent or None")
+            if intent.leg != leg:
+                raise ValueError(f"{leg} slot holds an intent for leg={intent.leg!r}")
+            if intent.reduce_only is not True:
+                raise ValueError(f"{leg} intent must have reduce_only=True")
+            metadata = (intent.strategy_id, intent.strategy_version, intent.signal_ns)
+            if metadata != (self.strategy_id, self.strategy_version, self.signal_ns):
+                raise ValueError(f"{leg} intent metadata diverges from plan-level metadata")
+
+
 @dataclass(frozen=True, slots=True)
 class OrderRequestRecord:
     strategy_id: str
