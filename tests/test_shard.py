@@ -129,10 +129,11 @@ def _replay_reasons(tmp_path: Path, *events: dict) -> tuple[str, ...]:
 def test_hour_rotation_sidecars_append_only_manifest_and_replay(tmp_path: Path) -> None:
     records = [b'{"n":1}', b'{"n":2}']
     writer = ShardWriter(tmp_path, boot_id="boot-a")
-    writer.append(records[0], recv_wall_ns=_ns(0, 59, 59))
-    writer.append(records[1], recv_wall_ns=_ns(1))
+    first = writer.append(records[0], recv_wall_ns=_ns(0, 59, 59))
+    second = writer.append(records[1], recv_wall_ns=_ns(1))
     manifest_prefix = (tmp_path / "manifest.jsonl").read_bytes()
     writer.close()
+    assert (first, second) == (False, True)
 
     manifest_bytes = (tmp_path / "manifest.jsonl").read_bytes()
     assert manifest_bytes.startswith(manifest_prefix)

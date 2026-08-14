@@ -86,10 +86,11 @@ class ShardWriter:
         self._last_event_key: tuple[int, str, int] | None = None
         self._closed = False
 
-    def append(self, record: bytes, recv_wall_ns: int) -> None:
+    def append(self, record: bytes, recv_wall_ns: int) -> bool:
         _require(not self._closed, "writer is closed")
         _require(isinstance(record, bytes), "record must be bytes")
         hour = _hour_label(recv_wall_ns)
+        finalized = self._hour is not None and hour != self._hour
         if self._hour is not None:
             _require(hour >= self._hour, "UTC hour moved backwards")
         if hour != self._hour:
@@ -101,6 +102,7 @@ class ShardWriter:
         self._records += 1
         self._first_ns = recv_wall_ns if self._first_ns is None else self._first_ns
         self._last_ns = recv_wall_ns
+        return finalized
 
     def close(self) -> None:
         if not self._closed:
