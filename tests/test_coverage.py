@@ -3,13 +3,107 @@ import inspect
 import pytest
 
 from data.coverage import (
+    COMPLETION_WINDOW_HOURS,
+    GATE1_WINDOW_HOURS,
     MAX_EXPLAINED_GAP_NS,
     MAX_EXPLAINED_GAP_PERCENT,
     MIN_LATENCY_USABLE_HOUR_PERCENT,
+    UTC_DAY_NS,
+    UTC_HOUR_NS,
+    eligible_utc_hours,
     window_coverage_ok,
 )
 
 HOUR_NS = 3_600_000_000_000
+
+
+def test_eligible_utc_window_contract_is_frozen_and_keyword_only() -> None:
+    assert UTC_HOUR_NS == HOUR_NS
+    assert UTC_DAY_NS == 24 * HOUR_NS
+    assert GATE1_WINDOW_HOURS == 168
+    assert COMPLETION_WINDOW_HOURS == 720
+    parameters = inspect.signature(eligible_utc_hours).parameters
+    assert list(parameters) == ["start_ns", "end_ns", "window_kind"]
+    assert all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters.values())
+
+
+def test_gate1_accepts_any_utc_hour_and_counts_half_open_hours() -> None:
+    start_ns = HOUR_NS
+    assert eligible_utc_hours(
+        start_ns=start_ns,
+        end_ns=start_ns + 168 * HOUR_NS,
+        window_kind="gate1_7d",
+    ) == 168
+
+
+def test_completion_accepts_exactly_30_utc_calendar_days() -> None:
+    assert eligible_utc_hours(
+        start_ns=0,
+        end_ns=720 * HOUR_NS,
+        window_kind="completion_30d",
+    ) == 720
+
+
+@pytest.mark.parametrize(
+    ("start_ns", "end_ns"),
+    [
+        (1, 168 * HOUR_NS),
+        (0, 168 * HOUR_NS + 1),
+    ],
+)
+def test_utc_window_endpoints_require_exact_hour_alignment(
+    start_ns: int,
+    end_ns: int,
+) -> None:
+    with pytest.raises(ValueError, match="hour alignment"):
+        eligible_utc_hours(start_ns=start_ns, end_ns=end_ns, window_kind="gate1_7d")
+
+
+@pytest.mark.parametrize(
+    ("window_kind", "hours"),
+    [
+        ("gate1_7d", 167),
+        ("gate1_7d", 169),
+        ("completion_30d", 719),
+        ("completion_30d", 721),
+    ],
+)
+def test_utc_window_duration_is_exact(window_kind: str, hours: int) -> None:
+    with pytest.raises(ValueError, match="duration"):
+        eligible_utc_hours(start_ns=0, end_ns=hours * HOUR_NS, window_kind=window_kind)
+
+
+def test_completion_window_must_start_at_utc_midnight() -> None:
+    start_ns = HOUR_NS
+    with pytest.raises(ValueError, match="day aligned"):
+        eligible_utc_hours(
+            start_ns=start_ns,
+            end_ns=start_ns + 720 * HOUR_NS,
+            window_kind="completion_30d",
+        )
+
+
+@pytest.mark.parametrize(
+    ("start_ns", "end_ns", "window_kind"),
+    [
+        (0, 0, "gate1_7d"),
+        (HOUR_NS, 0, "gate1_7d"),
+        (-HOUR_NS, 167 * HOUR_NS, "gate1_7d"),
+        (False, 168 * HOUR_NS, "gate1_7d"),
+        (0.0, 168 * HOUR_NS, "gate1_7d"),
+        (0, True, "gate1_7d"),
+        (0, float(168 * HOUR_NS), "gate1_7d"),
+        (0, 168 * HOUR_NS, "other"),
+        (0, 168 * HOUR_NS, False),
+    ],
+)
+def test_utc_window_inputs_are_closed_exact_and_ordered(
+    start_ns: object,
+    end_ns: object,
+    window_kind: object,
+) -> None:
+    with pytest.raises(ValueError):
+        eligible_utc_hours(start_ns=start_ns, end_ns=end_ns, window_kind=window_kind)
 
 
 def _coverage(**changes) -> bool:
