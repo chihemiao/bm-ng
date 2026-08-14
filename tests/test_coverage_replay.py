@@ -131,8 +131,7 @@ def test_failure_reasons_map_and_sequence_gap_must_match_raw(tmp_path: Path) -> 
 
 
 def test_formal_root_structure_order_and_integrity_are_fail_closed(tmp_path: Path) -> None:
-    trial = _event("subscription_send", 1)
-    trial["is_gate1_record"] = False
+    trial = _event("subscription_send", 1) | {"is_gate1_record": False}
     ledger = _event("account_ledger_entry", 1)
     ledger.update(event_kind="reconciliation", seq_within_boot=1, payload={
         "venue": "hyperliquid", "entry_id": "e", "entry_kind": "funding", "occurred_ns": 0,
@@ -153,3 +152,4 @@ def test_formal_root_structure_order_and_integrity_are_fail_closed(tmp_path: Pat
     shard.write_bytes(shard.read_bytes() + b"x")
     with pytest.raises(ContractError):
         coverage.replay_coverage_points(root)
+    assert "tuple(_formal_events(root))" in inspect.getsource(coverage.replay_coverage_points)
