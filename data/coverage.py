@@ -1,11 +1,14 @@
-"""Pure Gate 1 evidence judgments and window arithmetic."""
+"""Gate 1 evidence extraction and window arithmetic."""
 
+import base64
 import json
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Literal, NamedTuple
 
-from data.contracts import ContractError, bybit_update_gap
-from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
+from data.contracts import ContractError, bybit_update_gap, validate_envelope
+from data.schema_dispatch import BYBIT_WIRE_SYMBOLS, DURABLE_EVENT_SCHEMAS, PAYLOAD_SCHEMAS
+from data.shard import replay_records
 
 MAX_EXPLAINED_GAP_NS = 4 * 3_600 * 1_000_000_000
 MAX_EXPLAINED_GAP_PERCENT = 2
@@ -23,6 +26,9 @@ _COVERAGE_VENUES = frozenset({"hyperliquid", "bybit"})
 _COVERAGE_POINT_KINDS = frozenset("hard_verified explained_failure unexplained_failure".split())
 _BYBIT_BOOK_TOPICS = frozenset(
     f"orderbook.50.{symbol}" for symbol in BYBIT_WIRE_SYMBOLS.values())
+_COLLECTOR_SCHEMAS = PAYLOAD_SCHEMAS - DURABLE_EVENT_SCHEMAS
+_FAILURE_REASONS = {"venue_down": "venue_down", "bybit_sequence_gap": "bybit_sequence_gap"}
+_SESSION_FAILURE_REASONS = EXPLAINED_FAILURE_REASONS - frozenset(_FAILURE_REASONS)
 
 
 class CoveragePoint(NamedTuple):
@@ -81,7 +87,98 @@ class BybitBarrier:
 
 def _require(condition: bool, message: str) -> None:
     if not condition:
-        raise ValueError(message)
+        raise ContractError(message)
+
+
+def _formal_events(root: Path):
+    previous_ns, configs = -1, 0
+    for raw in replay_records(root):
+        try:
+            event = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise ContractError("invalid collector event JSON") from error
+        validate_envelope(event)
+        schema = event["payload_schema"]
+        valid = schema in _COLLECTOR_SCHEMAS and event.get("is_gate1_record") is True
+        valid &= event["source"] == "live_public_ws" and event["recv_wall_ns"] >= previous_ns
+        valid &= event["event_kind"] == ("market" if schema == "raw_frame" else "ops")
+        _require(valid, "invalid formal collector record")
+        previous_ns = event["recv_wall_ns"]
+        is_config = schema == "collector_config"
+        configs += is_config
+        venue_ok = (event["venue"] == "collector" and
+                    event["payload"].get("record_mode") == "formal"
+                    if is_config else event["venue"] in _COVERAGE_VENUES)
+        _require(venue_ok, "invalid coverage venue or config")
+        if not is_config:
+            yield event
+    _require(configs == 1, "coverage root needs one collector config")
+
+
+def _raw_payload(event: dict) -> bytes:
+    try:
+        return base64.b64decode(event["payload"]["raw"], validate=True)
+    except (KeyError, TypeError, ValueError) as error:
+        raise ContractError("invalid raw collector payload") from error
+
+
+def _failure_point(event: dict, pending_gap: tuple | None):
+    schema = event["payload_schema"]
+    matching = schema == "bybit_sequence_gap" and pending_gap == (
+        event["recv_wall_ns"], event["conn_id"])
+    _require(pending_gap is None or matching, "missing Bybit sequence gap event")
+    reason = (event["payload"].get("reason") if schema == "liveness_failure"
+              else _FAILURE_REASONS.get(schema))
+    _require(schema != "liveness_failure" or reason in _SESSION_FAILURE_REASONS,
+             "invalid liveness failure reason")
+    _require(schema != "bybit_sequence_gap" or matching and event["venue"] == "bybit",
+             "orphan Bybit sequence gap")
+    pending_gap = None if schema == "bybit_sequence_gap" else pending_gap
+    if reason is None and schema != "raw_quarantine":
+        return None, pending_gap
+    kind = "explained_failure" if reason is not None else "unexplained_failure"
+    return CoveragePoint(event["venue"], event["recv_wall_ns"], kind, reason), pending_gap
+
+
+def replay_coverage_points(root: Path) -> tuple[CoveragePoint, ...]:
+    _require(isinstance(root, Path), "coverage root must be a Path")
+    states = {venue: dict(conn=None, ack=False, pong=False, active=False, blocked=False)
+              for venue in _COVERAGE_VENUES}
+    barrier, points, pending_gap = BybitBarrier(), [], None
+    starters = {"hyperliquid": lambda _: None, "bybit": barrier.start}
+    for event in tuple(_formal_events(root)):
+        schema, venue, conn = event["payload_schema"], event["venue"], event["conn_id"]
+        state = states[venue]
+        if schema == "subscription_send" and conn != state["conn"]:
+            state.update(conn=conn, ack=False, pong=False, active=False, blocked=False)
+            starters[venue](conn)
+        needs_conn = schema in {"application_heartbeat", "pre_ack_frame", "raw_frame",
+                                "raw_quarantine", "subscription_ack"}
+        _require(not needs_conn or conn == state["conn"], "collector connection mismatch")
+        failure, pending_gap = _failure_point(event, pending_gap)
+        if failure is not None:
+            points.append(failure)
+            state.update(active=False, blocked=True)
+            continue
+        if state["blocked"]:
+            continue
+        if schema == "subscription_ack":
+            _require(type(event["payload"].get("ready")) is bool, "invalid ACK readiness")
+            state["ack"] |= event["payload"]["ready"]
+        elif schema == "application_heartbeat" and event["payload"].get("phase") == "pong":
+            state["pong"] = True
+        elif venue == "bybit" and schema in {"pre_ack_frame", "raw_frame"}:
+            was_gap = barrier.gap
+            if barrier.observe(_raw_payload(event)) and not was_gap:
+                pending_gap = event["recv_wall_ns"], conn
+        ready = bool(state["conn"]) and state["ack"] and state["pong"]
+        ready &= venue != "bybit" or barrier.ready
+        pong_event = schema == "application_heartbeat" and event["payload"].get("phase") == "pong"
+        if ready and (not state["active"] or pong_event):
+            points.append(CoveragePoint(venue, event["recv_wall_ns"], "hard_verified", None))
+        state["active"] = ready
+    _require(pending_gap is None, "missing Bybit sequence gap event")
+    return tuple(points)
 
 
 def _nonnegative_exact_int(value: object) -> bool:
