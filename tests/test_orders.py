@@ -150,6 +150,30 @@ def test_new_order_trade_terms_are_required() -> None:
     assert all(parameters[name].default is Parameter.empty for name in names)
 
 
+def test_reduce_only_is_a_required_keyword_only_intent_term() -> None:
+    for constructor in (make_order_intent, orders.rehydrate_order_intent):
+        parameter = signature(constructor).parameters["reduce_only"]
+        assert parameter.kind is Parameter.KEYWORD_ONLY
+        assert parameter.default is Parameter.empty
+
+
+@pytest.mark.parametrize("reduce_only", [False, True])
+def test_reduce_only_accepts_only_explicit_boolean_semantics(reduce_only) -> None:
+    assert _intent(reduce_only=reduce_only).reduce_only is reduce_only
+
+
+@pytest.mark.parametrize("reduce_only", [0, 1, None])
+def test_reduce_only_rejects_non_boolean_values(reduce_only) -> None:
+    with pytest.raises(TypeError, match="reduce_only"):
+        _intent(reduce_only=reduce_only)
+
+
+def test_reduce_only_changes_the_client_order_identity() -> None:
+    ordinary = _intent(reduce_only=False)
+    reducing = _intent(reduce_only=True)
+    assert ordinary.client_order_id != reducing.client_order_id
+
+
 def test_rehydrate_order_intent_exposes_the_durable_ordinal_boundary() -> None:
     parameters = signature(orders.rehydrate_order_intent).parameters
     assert tuple(parameters) == (

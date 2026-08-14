@@ -11,7 +11,7 @@ from execution.orders import OrderContractError, make_order_intent, order_reques
 REQUEST_FIELDS = (
     "account_digest", "lease_epoch", "writer_instance_id", "wallet_fingerprint",
     "allocated_nonce", "strategy_id", "strategy_version", "signal_ns", "leg",
-    "replacement_ordinal", "symbol", "side", "quantity", "recorded_ns",
+    "replacement_ordinal", "symbol", "side", "quantity", "reduce_only", "recorded_ns",
 )
 NEW_REQUEST_FIELDS = REQUEST_FIELDS[5:]
 
@@ -45,6 +45,7 @@ def _bound_event(venue="hyperliquid", *, allocated_nonce=7, sequence=True, **cha
         "symbol": "BTC",
         "side": "buy",
         "quantity": "1",
+        "reduce_only": False,
         "recorded_ns": 110,
     }
     payload.update(changes)
@@ -255,7 +256,7 @@ def test_bound_order_request_requires_a_durable_sequence() -> None:
     [
         ("symbol", "SOL"), ("symbol", 1),
         ("side", "long"), ("side", 1),
-        ("leg", "unknown"), ("leg", 1),
+        ("leg", "unknown"), ("leg", 1), ("reduce_only", 1),
     ],
 )
 def test_order_request_rejects_invalid_closed_trade_terms(field, value) -> None:
