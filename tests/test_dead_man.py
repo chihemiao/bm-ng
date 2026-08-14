@@ -88,6 +88,18 @@ def test_schedule_cancel_must_be_callable_after_value_preflight():
         )
 
 
+@pytest.mark.parametrize(
+    ("values", "first_error"),
+    [
+        ({"now_ms": True, "deadline_ms": "bad"}, "now_ms"),
+        ({"now_ms": NOW_MS, "deadline_ms": "bad"}, "deadline_ms"),
+    ],
+)
+def test_value_errors_precede_a_non_callable_schedule(values, first_error):
+    with pytest.raises(TypeError, match=first_error):
+        cancel.bind_hl_schedule_cancel(**values, schedule_cancel=object())
+
+
 def test_schedule_cancel_exception_propagates_with_identity():
     error = KeyboardInterrupt("schedule")
 
