@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from data import collector, coverage
+from data import collector, coverage, latency
 from data.contracts import ContractError
 from data.shard import ShardWriter
 
@@ -49,6 +49,79 @@ def _write(root: Path, *events: dict | bytes) -> None:
         raw = event if isinstance(event, bytes) else json.dumps(event).encode()
         writer.append(raw, index if isinstance(event, bytes) else event["recv_wall_ns"])
     writer.close()
+
+
+def _market(venue: str, stream: str, value: dict, at: int = 1_000_000_000) -> dict:
+    event = _event(
+        "raw_frame", at, venue=venue, conn="wire",
+        stream=stream, raw=base64.b64encode(json.dumps(value).encode()).decode(),
+    )
+    event["event_kind"] = "market"
+    return event
+
+
+@pytest.mark.parametrize(("venue", "stream", "value", "expected"), [
+    ("hyperliquid", "l2Book:BTC",
+     {"channel": "l2Book", "data": {"coin": "BTC", "time": 11}}, (11,)),
+    ("hyperliquid", "trades:ETH",
+     {"channel": "trades", "data": [{"coin": "ETH", "time": 12}]}, (12,)),
+    ("hyperliquid", "bbo:BTC",
+     {"channel": "bbo", "data": {"coin": "BTC", "time": 13}}, (13,)),
+    ("bybit", "orderbook.50.BTCUSDT",
+     {"topic": "orderbook.50.BTCUSDT", "ts": 90, "cts": 14,
+      "data": {"s": "BTCUSDT"}}, (14,)),
+    ("bybit", "publicTrade.ETHUSDT",
+     {"topic": "publicTrade.ETHUSDT", "ts": 91,
+      "data": [{"s": "ETHUSDT", "T": 15}]}, (15,)),
+    ("bybit", "tickers.BTCUSDT",
+     {"topic": "tickers.BTCUSDT", "ts": 16,
+      "data": {"symbol": "BTCUSDT"}}, (16,)),
+])
+def test_raw_latency_samples_use_channel_authoritative_exchange_times(
+    venue: str, stream: str, value: dict, expected: tuple[int, ...],
+) -> None:
+    assert latency.raw_latency_samples(_market(venue, stream, value)) == tuple(
+        (stream, timestamp) for timestamp in expected
+    )
+
+
+def test_raw_latency_samples_preserve_all_trades_and_allow_clock_skew() -> None:
+    value = {"topic": "publicTrade.BTCUSDT", "ts": 3,
+             "data": [{"s": "BTCUSDT", "T": 2}, {"s": "BTCUSDT", "T": 4}]}
+    assert latency.raw_latency_samples(_market("bybit", "publicTrade.BTCUSDT", value, 1)) == (
+        ("publicTrade.BTCUSDT", 2), ("publicTrade.BTCUSDT", 4))
+
+
+def test_raw_latency_samples_exclude_non_timestamp_streams_and_empty_trades() -> None:
+    active = {"channel": "activeAssetCtx", "data": {"coin": "BTC", "ctx": {}}}
+    assert latency.raw_latency_samples(_market(
+        "hyperliquid", "activeAssetCtx:BTC", active)) == ()
+    assert latency.raw_latency_samples(_event("subscription_ack", 1)) == ()
+    empty = {"channel": "trades", "data": []}
+    assert latency.raw_latency_samples(_market("hyperliquid", "trades:BTC", empty)) == ()
+
+
+@pytest.mark.parametrize("timestamp", [True, 0, -1])
+def test_raw_latency_samples_reject_invalid_timestamps(timestamp: object) -> None:
+    value = {"channel": "l2Book", "data": {"coin": "BTC", "time": timestamp}}
+    with pytest.raises(ContractError):
+        latency.raw_latency_samples(_market("hyperliquid", "l2Book:BTC", value))
+
+
+def test_raw_latency_samples_reject_schema_drift_and_stream_mismatch() -> None:
+    malformed = {"channel": "trades", "data": [
+        {"coin": "BTC", "time": 1}, {"coin": "BTC", "time": "2"}]}
+    wrong_stream = {"topic": "tickers.ETHUSDT", "ts": 1,
+                    "data": {"symbol": "ETHUSDT"}}
+    ts_only_book = {"topic": "orderbook.50.BTCUSDT", "ts": 1,
+                    "data": {"s": "BTCUSDT"}}
+    for event in (
+        _market("hyperliquid", "trades:BTC", malformed),
+        _market("bybit", "tickers.BTCUSDT", wrong_stream),
+        _market("bybit", "orderbook.50.BTCUSDT", ts_only_book),
+    ):
+        with pytest.raises(ContractError):
+            latency.raw_latency_samples(event)
 
 
 def test_bybit_barrier_requires_both_snapshots_and_resets_per_connection() -> None:
