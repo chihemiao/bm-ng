@@ -92,6 +92,21 @@ async def _application_pong(websocket) -> None:
     await websocket.send(json.dumps({"type": "application_pong"}))
 
 
+def _assert_disconnect_evidence(records, report) -> None:
+    failures = [
+        (index, record) for index, record in enumerate(records)
+        if record.payload_schema == "liveness_failure"
+    ]
+    assert [record.reason for _, record in failures] == ["transport_disconnected"]
+    first_market = next(index for index, record in enumerate(records)
+                        if record.event_kind == "market")
+    second_send = next(index for index, record in enumerate(records)
+                       if record.conn_id.endswith(":2")
+                       and record.payload_schema == "subscription_send")
+    assert first_market < failures[0][0] < second_send
+    assert report.liveness_failures == 1
+
+
 async def _reconnect_scenario() -> None:
     cycles = []
     records = []
@@ -141,18 +156,7 @@ async def _reconnect_scenario() -> None:
     assert [json.loads(record.raw)["value"] for record in pre_ack] == ["early"]
     assert report.reconnects == 1
     assert report.ack_cycles == 2
-    failures = [
-        (index, record) for index, record in enumerate(records)
-        if record.payload_schema == "liveness_failure"
-    ]
-    assert [record.reason for _, record in failures] == ["transport_disconnected"]
-    first_market = next(index for index, record in enumerate(records)
-                        if record.event_kind == "market")
-    second_send = next(index for index, record in enumerate(records)
-                       if record.conn_id.endswith(":2")
-                       and record.payload_schema == "subscription_send")
-    assert first_market < failures[0][0] < second_send
-    assert report.liveness_failures == 1
+    _assert_disconnect_evidence(records, report)
     assert len([record for record in records
                 if record.payload_schema == "application_heartbeat"
                 and record.phase == "pong"]) == 3

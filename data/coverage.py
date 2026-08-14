@@ -11,7 +11,8 @@ UTC_DAY_NS = 24 * UTC_HOUR_NS
 GATE1_WINDOW_HOURS = 168
 COMPLETION_WINDOW_HOURS = 720
 EXPLAINED_FAILURE_REASONS = frozenset({
-    "application_pong_timeout", "subscription_ack_timeout", "transport_ping_timeout",
+    "application_pong_timeout", "subscription_ack_timeout", "transport_disconnected",
+    "transport_ping_timeout",
     "venue_down", "bybit_sequence_gap",
 })
 _COVERAGE_VENUES = frozenset({"hyperliquid", "bybit"})
@@ -23,7 +24,8 @@ class CoveragePoint(NamedTuple):
     observed_ns: int
     kind: Literal["hard_verified", "explained_failure", "unexplained_failure"]
     reason: Literal[
-        "application_pong_timeout", "subscription_ack_timeout", "transport_ping_timeout",
+        "application_pong_timeout", "subscription_ack_timeout", "transport_disconnected",
+        "transport_ping_timeout",
         "venue_down", "bybit_sequence_gap",
     ] | None
 
