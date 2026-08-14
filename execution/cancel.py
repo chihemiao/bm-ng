@@ -65,6 +65,37 @@ def build_hl_cancel_batch(payload: object) -> HLCancelBatch:
     return HLCancelBatch(targets=tuple(targets))
 
 
+def bind_hl_cancel(
+    batch: HLCancelBatch, bulk_cancel: Callable[[list[dict[str, object]]], object]
+) -> Callable[[], object]:
+    """Bind validated targets to one injected Hyperliquid bulk-cancel call."""
+    if not isinstance(batch, HLCancelBatch):
+        raise TypeError("batch must be HLCancelBatch")
+    if not callable(bulk_cancel):
+        raise TypeError("bulk_cancel must be callable")
+
+    def transport() -> object:
+        rows = [{"coin": target.coin, "oid": target.oid} for target in batch.targets]
+        return bulk_cancel(rows)
+
+    return transport
+
+
+def bind_bybit_cancel(
+    scope: BybitCancelScope, cancel_all: Callable[..., object]
+) -> Callable[[], object]:
+    """Bind the frozen scope to one injected Bybit cancel-all call."""
+    if not isinstance(scope, BybitCancelScope):
+        raise TypeError("scope must be BybitCancelScope")
+    if not callable(cancel_all):
+        raise TypeError("cancel_all must be callable")
+
+    def transport() -> object:
+        return cancel_all(category=scope.category, settleCoin=scope.settle_coin)
+
+    return transport
+
+
 def cancel_pair_orders(
     *,
     lease: WriterLease,
