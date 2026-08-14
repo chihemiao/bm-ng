@@ -21,9 +21,7 @@ lease = WriterLease.acquire(
     [].append, acquired_ns=90,
 )
 publish_heartbeat(lease, observed_mono_ns=100)
-print("ready", flush=True)
-sys.stdin.readline()
-lease.release()
+print("ready", flush=True); sys.stdin.readline(); lease.release()
 """
 
 
@@ -382,6 +380,8 @@ def test_lock_and_heartbeat_readers_treat_external_file_failures_as_unknown(tmp_
     path.chmod(0o600)
     heartbeat_path.chmod(0o600)
     assert writer.read_current_epoch(tmp_path, ACCOUNT_ID) is None
+    assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
+    heartbeat_path.write_text('{"account_digest":1,"lease_epoch":1,"observed_mono_ns":100}')
     assert _module().read_heartbeat(tmp_path, ACCOUNT_ID) is None
 
     path.write_text('{"account_id":"test-account","lease_epoch":1}')
