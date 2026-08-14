@@ -79,7 +79,7 @@ def _run_loop(values):
     return asyncio.run(_module().run_hl_dead_man_loop(**values))
 
 
-def _heartbeat_owner(root):
+def heartbeat_owner(root):
     process = subprocess.Popen(
         [sys.executable, "-B", "-u", "-c", HEARTBEAT_OWNER, str(root), ACCOUNT_ID],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -303,7 +303,7 @@ def test_loop_delegates_each_round_and_registers_its_omissions():
 
 
 def test_real_process_heartbeat_is_read_without_acquiring_and_rejects_observer(tmp_path):
-    writer, process = importlib.import_module("execution.writer"), _heartbeat_owner(tmp_path)
+    writer, process = importlib.import_module("execution.writer"), heartbeat_owner(tmp_path)
     try:
         expected = writer.read_current_epoch(tmp_path, ACCOUNT_ID)
         heartbeat = _module().read_heartbeat(tmp_path, ACCOUNT_ID)
