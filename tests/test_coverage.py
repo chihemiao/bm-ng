@@ -115,13 +115,11 @@ def test_coverage_point_structure_and_combinations_are_closed() -> None:
         point([], 1, "hard_verified", None), point("other", 1, "hard_verified", None),
         point(hl, -1, "hard_verified", None), point(hl, True, "hard_verified", None),
         point(hl, 1.0, "hard_verified", None), point(hl, 1, [], None),
-        point(hl, 1, "other", None),
-        point(hl, 1, "explained_failure", None),
+        point(hl, 1, "other", None), point(hl, 1, "explained_failure", None),
         point(hl, 1, "explained_failure", "other"),
         point(hl, 1, "hard_verified", "venue_down"),
-        point("bybit", 1, "unexplained_failure", "venue_down"),
+        point("bybit", 1, "unexplained_failure", "venue_down"), (hl, 1, "hard_verified", None),
         point(hl, 1, "explained_failure", "bybit_sequence_gap"),
-        ("hyperliquid", 1, "hard_verified", None),
     ]
     for point in invalid:
         with pytest.raises(ValueError):

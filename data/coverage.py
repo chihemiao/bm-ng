@@ -41,9 +41,11 @@ def _nonnegative_exact_int(value: object) -> bool:
 
 def _validate_coverage_point(point: object) -> None:
     _require(type(point) is CoveragePoint, "invalid coverage point")
-    _require(point.venue in _COVERAGE_VENUES, "invalid coverage venue")
+    _require(isinstance(point.venue, str) and point.venue in _COVERAGE_VENUES,
+             "invalid coverage venue")
     _require(_nonnegative_exact_int(point.observed_ns), "invalid coverage point time")
-    _require(point.kind in _COVERAGE_POINT_KINDS, "invalid coverage point kind")
+    _require(isinstance(point.kind, str) and point.kind in _COVERAGE_POINT_KINDS,
+             "invalid coverage point kind")
     explained = point.kind == "explained_failure"
     valid_reason = isinstance(point.reason, str) and point.reason in EXPLAINED_FAILURE_REASONS
     _require(valid_reason if explained else point.reason is None, "invalid coverage point reason")
