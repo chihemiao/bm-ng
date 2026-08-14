@@ -22,7 +22,10 @@ class CoveragePoint(NamedTuple):
     venue: Literal["hyperliquid", "bybit"]
     observed_ns: int
     kind: Literal["hard_verified", "explained_failure", "unexplained_failure"]
-    reason: str | None
+    reason: Literal[
+        "application_pong_timeout", "subscription_ack_timeout", "transport_ping_timeout",
+        "venue_down", "bybit_sequence_gap",
+    ] | None
 
 
 class PairingResult(NamedTuple):
