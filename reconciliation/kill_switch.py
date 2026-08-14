@@ -87,7 +87,7 @@ def reconciliation_streak_triggered(
 
 def decide_kill_switch(
     *, triggered: bool, orders_known: bool, positions_known: bool,
-    naked_notional_known: bool,
+    naked_notional_known: bool, stablecoin_known: bool,
     reconciliation_consistency: bool | None,
     reconciliation_streak_triggered: bool,
 ) -> KillSwitchDecision:
@@ -97,6 +97,7 @@ def decide_kill_switch(
         ("orders_known", orders_known),
         ("positions_known", positions_known),
         ("naked_notional_known", naked_notional_known),
+        ("stablecoin_known", stablecoin_known),
         ("reconciliation_streak_triggered", reconciliation_streak_triggered),
     ):
         if type(value) is not bool:
@@ -104,7 +105,7 @@ def decide_kill_switch(
     if reconciliation_consistency is not None and type(reconciliation_consistency) is not bool:
         raise TypeError("reconciliation_consistency must be a boolean or None")
     unknown = (not orders_known or not positions_known or not naked_notional_known
-               or reconciliation_consistency is None)
+               or not stablecoin_known or reconciliation_consistency is None)
     if unknown or reconciliation_streak_triggered:
         return KillSwitchDecision("cancel_only_freeze")
     if triggered and not reconciliation_consistency:
@@ -142,6 +143,19 @@ def _fx_rate_fresh(rate: FxRate | None, *, now_ns: int, max_age_ns: int) -> bool
     ) is not None
 
 
+def _stablecoin_evidence(
+    rate: FxRate | None, *, now_ns: int, max_age_ns: int,
+    max_abs_deviation: Decimal,
+) -> tuple[bool, bool]:
+    if type(max_abs_deviation) is not Decimal:
+        raise TypeError("max_abs_deviation must be Decimal")
+    if not max_abs_deviation.is_finite() or max_abs_deviation < 0:
+        raise ValueError("max_abs_deviation must be finite and nonnegative")
+    known = _fx_rate_fresh(rate, now_ns=now_ns, max_age_ns=max_age_ns)
+    triggered = not known or abs(rate.rate - Decimal(1)) > max_abs_deviation
+    return known, triggered
+
+
 def stablecoin_spread_known(
     rate: FxRate | None, *, now_ns: int, max_age_ns: int,
 ) -> bool:
@@ -157,13 +171,10 @@ def stablecoin_spread_trigger(
     max_abs_deviation: Decimal,
 ) -> bool:
     """Trigger on missing evidence or deviation strictly beyond the limit."""
-    if type(max_abs_deviation) is not Decimal:
-        raise TypeError("max_abs_deviation must be Decimal")
-    if not max_abs_deviation.is_finite() or max_abs_deviation < 0:
-        raise ValueError("max_abs_deviation must be finite and nonnegative")
-    if not _fx_rate_fresh(rate, now_ns=now_ns, max_age_ns=max_age_ns):
-        return True
-    return abs(rate.rate - Decimal(1)) > max_abs_deviation
+    return _stablecoin_evidence(
+        rate, now_ns=now_ns, max_age_ns=max_age_ns,
+        max_abs_deviation=max_abs_deviation,
+    )[1]
 
 
 def key_expiry_triggered(
