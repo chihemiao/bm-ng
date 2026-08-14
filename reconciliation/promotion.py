@@ -13,6 +13,7 @@ from reconciliation.admission import (
 from reconciliation.clock import StateClock
 from reconciliation.exposure import ExposureClock
 from reconciliation.fx import Notional
+from reconciliation.kill_switch import KillSwitchDecision
 from reconciliation.legs import PairState
 from reconciliation.state import AdmissionDecision, StartupContractError
 
@@ -94,6 +95,16 @@ def demotion_reason(admission: AdmissionDecision) -> str:
     return DEMOTION_PREFIX + ",".join(keys)
 
 
+def _demote(lease: WriterLease, *, now_ns: int, reason: str) -> WriterAuthority:
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be a WriterLease")
+    if type(now_ns) is not int:
+        raise TypeError("now_ns must be an integer")
+    if now_ns <= 0:
+        raise ValueError("now_ns must be positive")
+    return lease.demote_to_cancel_only(demotion_ns=now_ns, reason=reason)
+
+
 def demote_writer(
     lease: WriterLease, admission: AdmissionDecision, *, now_ns: int
 ) -> WriterAuthority:
@@ -102,12 +113,19 @@ def demote_writer(
         raise TypeError("lease must be a WriterLease")
     if not isinstance(admission, AdmissionDecision):
         raise TypeError("admission must be an AdmissionDecision")
-    if type(now_ns) is not int:
-        raise TypeError("now_ns must be an integer")
-    if now_ns <= 0:
-        raise ValueError("now_ns must be positive")
-    reason = demotion_reason(admission)
-    return lease.demote_to_cancel_only(demotion_ns=now_ns, reason=reason)
+    return _demote(lease, now_ns=now_ns, reason=demotion_reason(admission))
+
+
+def demote_kill_switch_freeze(
+    lease: WriterLease, decision: KillSwitchDecision, *, now_ns: int,
+) -> WriterAuthority:
+    """仅撤销本机 risk-increasing authority,不会撤销 venue open orders,cancel-all 尚未实现"""
+    if not isinstance(decision, KillSwitchDecision):
+        raise TypeError("decision must be a KillSwitchDecision")
+    if decision.action != "cancel_only_freeze":
+        raise ValueError("kill switch decision is not a freeze")
+    reason = f"{DEMOTION_PREFIX}kill_switch:cancel_only_freeze"
+    return _demote(lease, now_ns=now_ns, reason=reason)
 
 
 def apply_continuous_admission(
