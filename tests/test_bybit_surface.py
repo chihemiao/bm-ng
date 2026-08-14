@@ -311,3 +311,89 @@ def test_leg_builder_propagates_position_payload_contract_errors(payload):
     error = TypeError if isinstance(payload, list) else ValueError
     with pytest.raises(error):
         _build(payload)
+
+
+ORDER = dict(orderId="venue-1", orderLinkId="client-1", orderStatus="New",
+             symbol="BTCUSDT", positionIdx=0, side="Buy", price="100", qty="1")
+
+
+def _orders(*rows, cursor="", observed_ns=100):
+    pages = [_payload(*rows, cursor=cursor)]
+    return _module().parse_bybit_orders_surface(pages, observed_ns=observed_ns)
+
+
+@pytest.mark.parametrize("status", ["New", "PartiallyFilled", "Untriggered"])
+def test_open_order_statuses_are_known(status):
+    evidence = _orders({**ORDER, "orderStatus": status})
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+    assert evidence.page_complete and not evidence.truncated
+    assert evidence.entities.scheme_id == "bybit.orders.state"
+    assert evidence.identities.scheme_id == "bybit.orders.identity"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("symbol", "SOLUSDT"), ("positionIdx", 1), ("positionIdx", True),
+        ("side", "None"), ("orderStatus", "Filled"), ("orderId", ""), ("orderId", 1),
+        ("orderLinkId", ""), ("orderLinkId", None), ("price", ""),
+        ("price", "bad"), ("price", "NaN"),
+        ("price", "Infinity"), ("price", "-1"), ("qty", ""), ("qty", "bad"),
+        ("qty", "NaN"), ("qty", "Infinity"), ("qty", "0"), ("qty", "-1"),
+    ],
+)
+def test_unprovable_open_order_fields_are_unknown(field, value):
+    evidence = _orders({**ORDER, field: value})
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "field", ["orderId", "orderLinkId", "orderStatus", "symbol", "positionIdx", "side",
+              "price", "qty"],
+)
+def test_missing_open_order_field_is_unknown(field):
+    row = dict(ORDER)
+    row.pop(field)
+    assert _orders(row).unknown_count == 1
+
+
+def test_order_state_is_identity_bearing_and_preserves_link_binding():
+    row = {**ORDER, "unconsumed": "ignored"}
+    projection = {name: row[name] for name in ORDER if name != "positionIdx"}
+    assert _orders(row).entities.fingerprints == frozenset(
+        {_module()._fingerprint(projection)})
+    changed = {**ORDER, "orderLinkId": "client-2"}
+    assert _orders(ORDER).entities.fingerprints != _orders(changed).entities.fingerprints
+
+
+def test_distinct_same_shape_orders_do_not_collapse():
+    second = {**ORDER, "orderId": "venue-2", "orderLinkId": "client-2"}
+    evidence = _orders(ORDER, second)
+    assert len(evidence.entities.fingerprints) == len(evidence.identities.fingerprints) == 2
+
+@pytest.mark.parametrize("link", ["client-1", "client-2"])
+def test_duplicate_order_identity_is_unknown_and_mismatched(link):
+    evidence = _orders(ORDER, {**ORDER, "orderLinkId": link})
+    assert (evidence.fetched_count, evidence.unknown_count, evidence.mismatch_count) == (2, 1, 1)
+
+
+def test_empty_terminal_page_is_an_authoritative_empty_set():
+    evidence = _orders()
+    assert evidence.page_complete and not evidence.truncated
+    assert evidence.fetched_count == len(evidence.entities.fingerprints) == 0
+
+
+def test_order_page_chain_and_terminal_cursor_are_fail_closed():
+    parser = _module().parse_bybit_orders_surface
+    assert tuple(inspect.signature(parser).parameters) == ("pages", "observed_ns")
+    with pytest.raises(ValueError, match="non-terminal"):
+        parser([_payload(), _payload()], observed_ns=100)
+    evidence = parser([_payload(ORDER, cursor="next")], observed_ns=100)
+    assert not evidence.page_complete and evidence.truncated
+    assert parser([_payload(ORDER, cursor="next"), _payload()], observed_ns=100).page_complete
+
+
+@pytest.mark.parametrize("pages", [[], "page", b"page", [{}]])
+def test_order_pages_must_be_a_nonempty_response_sequence(pages):
+    with pytest.raises((TypeError, ValueError)):
+        _module().parse_bybit_orders_surface(pages, observed_ns=100)
