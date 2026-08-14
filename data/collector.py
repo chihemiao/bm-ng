@@ -28,8 +28,10 @@ class CollectorConfig:
     boot_id: str
     hl_uri: str = HL_URI
     bybit_uri: str = BYBIT_URI
-    ping_interval: float = 20
-    ping_timeout: float = 10
+    transport_ping_interval: float = 20
+    transport_ping_timeout: float = 10
+    application_ping_interval: float = 20
+    application_pong_timeout: float = 10
     ack_timeout: float = 10
     max_reconnects: int = 3
     reconnect_backoff: float = 5
@@ -40,6 +42,8 @@ CollectorReport = namedtuple("CollectorReport", "file_integrity_ok hl_liveness b
 
 def _hl_decode(message: str | bytes) -> DecodedFrame:
     value = json.loads(message)
+    if value.get("channel") == "pong":
+        return DecodedFrame("application_pong", None)
     if value.get("channel") == "subscriptionResponse":
         subscription = value["data"]["subscription"]
         return DecodedFrame("ack", f'{subscription["type"]}:{subscription["coin"]}')
@@ -50,6 +54,9 @@ def _hl_decode(message: str | bytes) -> DecodedFrame:
 
 def _bybit_decode(message: str | bytes) -> DecodedFrame:
     value = json.loads(message)
+    pong = value.get("op") == "ping" and value.get("ret_msg") == "pong"
+    if value.get("success") is True and pong:
+        return DecodedFrame("application_pong", None)
     if value.get("op") == "subscribe" and value.get("success") is True:
         return DecodedFrame("ack", value["req_id"])
     return DecodedFrame("market", value["topic"])
@@ -67,7 +74,11 @@ def _protocols() -> tuple[SessionProtocol, SessionProtocol]:
         for feed in ("orderbook.50", "publicTrade", "tickers"):
             topic = f"{feed}.{wire_symbol}"
             bybit[topic] = json.dumps({"op": "subscribe", "req_id": topic, "args": [topic]})
-    return SessionProtocol(hl, _hl_decode), SessionProtocol(bybit, _bybit_decode)
+    return (
+        SessionProtocol(hl, _hl_decode, json.dumps({"method": "ping"})),
+        SessionProtocol(bybit, _bybit_decode, json.dumps(
+            {"req_id": "collector-heartbeat", "op": "ping"})),
+    )
 
 
 class _Sink:
@@ -78,6 +89,7 @@ class _Sink:
         self.previous_u: dict[str, int] = {}
         self.sequence_ok = True
         self.ready_seen = {"hyperliquid": False, "bybit": False}
+        self.application_pong_seen = {"hyperliquid": False, "bybit": False}
         self.failures = {"hyperliquid": set(), "bybit": set()}
         self.down = {"hyperliquid": 0, "bybit": 0}
 
@@ -85,6 +97,10 @@ class _Sink:
         self._append(venue, record)
         if record.payload_schema == "liveness_failure" and record.reason:
             self.failures[venue].add(record.reason)
+        if record.payload_schema == "application_heartbeat":
+            self.application_pong_seen[venue] = record.phase == "pong"
+        if record.payload_schema == "subscription_send":
+            self.ready_seen[venue] = False
         if record.payload_schema == "subscription_ack" and record.ready:
             self.ready_seen[venue] = True
             if self.down[venue]:
@@ -99,9 +115,11 @@ class _Sink:
 
     def config_event(self, config: CollectorConfig) -> None:
         active = [
-            config.ping_interval, config.ping_timeout, config.ack_timeout, config.max_reconnects
+            config.transport_ping_interval, config.transport_ping_timeout,
+            config.application_ping_interval, config.application_pong_timeout,
+            config.ack_timeout, config.max_reconnects,
         ]
-        extra = {"status": "provisional", "provisional_defaults": [20, 10, 10, 3]}
+        extra = {"status": "provisional", "provisional_defaults": [20, 10, 20, 10, 10, 3]}
         self._ops("collector", "collector_config", extra | {"active": active})
 
     def _sequence(self, record: SessionRecord) -> None:
@@ -134,6 +152,8 @@ class _Sink:
             "raw_encoding": "base64", "stream": record.stream,
             "ready": record.ready, "reason": record.reason,
         }
+        if record.phase is not None:
+            payload["phase"] = record.phase
         payload.update(extra or {})
         event = {
             "schema_ver": 1, "event_kind": kind or record.event_kind,
@@ -154,7 +174,10 @@ async def _supervise(
     while not stop.is_set():
         session = PublicSession(
             uri, venue, config.boot_id, protocol, lambda record: sink.record(venue, record),
-            ping_interval=config.ping_interval, ping_timeout=config.ping_timeout,
+            transport_ping_interval=config.transport_ping_interval,
+            transport_ping_timeout=config.transport_ping_timeout,
+            application_ping_interval=config.application_ping_interval,
+            application_pong_timeout=config.application_pong_timeout,
             ack_timeout=config.ack_timeout, max_reconnects=config.max_reconnects,
         )
         await session.run(stop)
@@ -188,10 +211,13 @@ async def run_collector(config: CollectorConfig, stop: asyncio.Event) -> Collect
     except (ContractError, OSError, json.JSONDecodeError):
         integrity = False
     hl = HLLivenessEvidence(
-        "ping_timeout" not in sink.failures["hyperliquid"],
+        "transport_ping_timeout" not in sink.failures["hyperliquid"],
+        sink.application_pong_seen["hyperliquid"],
         sink.ready_seen["hyperliquid"]
         and "subscription_ack_timeout" not in sink.failures["hyperliquid"],
         integrity,
     )
-    bybit = BybitLivenessEvidence("ping_timeout" not in sink.failures["bybit"], sink.sequence_ok)
+    bybit = BybitLivenessEvidence(
+        "transport_ping_timeout" not in sink.failures["bybit"],
+        sink.application_pong_seen["bybit"], sink.sequence_ok)
     return CollectorReport(integrity, hl, bybit)
