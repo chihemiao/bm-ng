@@ -176,7 +176,7 @@ def submit_order(
     )
     if decision not in {"persist", "submit"}:
         return decision, None
-    authority = lease.authorize("submit")
+    authority = lease.authorize("reduce_only" if intent.reduce_only else "submit")
     if decision == "submit":
         assert request is not None  # Guaranteed by decide_submission.
         _validate_resume_request(
