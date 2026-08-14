@@ -51,9 +51,10 @@ def _write(root: Path, *events: dict | bytes) -> None:
     writer.close()
 
 
-def _market(venue: str, stream: str, value: dict, at: int = 1_000_000_000) -> dict:
+def _market(venue: str, stream: str, value: dict, at: int = 1_000_000_000,
+            conn: str = "wire") -> dict:
     event = _event(
-        "raw_frame", at, venue=venue, conn="wire",
+        "raw_frame", at, venue=venue, conn=conn,
         stream=stream, raw=base64.b64encode(json.dumps(value).encode()).decode(),
     )
     event["event_kind"] = "market"
@@ -127,24 +128,25 @@ def test_raw_latency_samples_reject_schema_drift_and_stream_mismatch() -> None:
 HOUR_NS = 3_600_000_000_000
 
 
-def _latency_hour(at: int) -> list[dict]:
+def _latency_hour(at: int, hl_conn: str = "wire", bybit_conn: str = "wire") -> list[dict]:
     events = []
     for coin, symbol in (("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")):
         events.extend((
             _market("hyperliquid", f"l2Book:{coin}",
-                    {"channel": "l2Book", "data": {"coin": coin, "time": 1}}, at),
+                    {"channel": "l2Book", "data": {"coin": coin, "time": 1}}, at, hl_conn),
             _market("hyperliquid", f"trades:{coin}",
-                    {"channel": "trades", "data": [{"coin": coin, "time": 1}]}, at),
+                    {"channel": "trades", "data": [{"coin": coin, "time": 1}]}, at, hl_conn),
             _market("hyperliquid", f"bbo:{coin}",
-                    {"channel": "bbo", "data": {"coin": coin, "time": 1}}, at),
+                    {"channel": "bbo", "data": {"coin": coin, "time": 1}}, at, hl_conn),
             _market("bybit", f"orderbook.50.{symbol}",
-                    {"topic": f"orderbook.50.{symbol}", "cts": 1, "data": {"s": symbol}}, at),
+                    {"topic": f"orderbook.50.{symbol}", "cts": 1,
+                     "data": {"s": symbol}}, at, bybit_conn),
             _market("bybit", f"publicTrade.{symbol}",
                     {"topic": f"publicTrade.{symbol}",
-                     "data": [{"s": symbol, "T": 1}]}, at),
+                     "data": [{"s": symbol, "T": 1}]}, at, bybit_conn),
             _market("bybit", f"tickers.{symbol}",
                     {"topic": f"tickers.{symbol}", "ts": 1,
-                     "data": {"symbol": symbol}}, at),
+                     "data": {"symbol": symbol}}, at, bybit_conn),
         ))
     return events
 
@@ -340,3 +342,50 @@ def test_formal_root_structure_order_and_integrity_are_fail_closed(tmp_path: Pat
     with pytest.raises(ContractError):
         coverage.replay_coverage_points(root)
     assert "tuple(_formal_events(root))" in inspect.getsource(coverage.replay_coverage_points)
+
+
+def _formal_window(root: Path, start: int = 0, extras=(), hl_conn: str = "wire"):
+    events = [_config(), _event("subscription_send", 1, conn="wire"),
+              _event("subscription_ack", 2, conn="wire", ready=True),
+              _event("application_heartbeat", 3, conn="wire", phase="pong"),
+              *_barrier("wire", 4), *extras]
+    for hour in range(168):
+        events.extend(_latency_hour(start + hour * HOUR_NS + 100, hl_conn))
+    _write(root, *sorted(events, key=lambda event: event["recv_wall_ns"]))
+    return coverage.replay_window_coverage(
+        root, start_ns=start, end_ns=start + 168 * HOUR_NS, window_kind="gate1_7d")
+
+
+def test_replay_window_coverage_passes_complete_clean_formal_root(tmp_path: Path) -> None:
+    result = _formal_window(tmp_path)
+    assert result == coverage.CoverageWindowResult(
+        coverage.PairingResult((), False), 0, 0, 168, 168, True)
+    source = inspect.getsource(coverage.replay_window_coverage)
+    assert source.count("_formal_events(root)") == 1
+    assert "replay_coverage_points(root)" not in source
+
+
+def test_replay_window_coverage_clips_and_aggregates_closed_gaps(tmp_path: Path) -> None:
+    start = HOUR_NS
+    extras = [_event("liveness_failure", start - 10, conn="wire",
+                     reason="transport_disconnected"),
+              _event("subscription_send", start, conn="h2"),
+              _event("subscription_ack", start, conn="h2", ready=True),
+              _event("application_heartbeat", start + 1, conn="h2", phase="pong"),
+              _event("application_heartbeat", start + 2, conn="h2", phase="pong"),
+              _event("liveness_failure", start + 3, conn="h2",
+                     reason="transport_disconnected"),
+              _event("subscription_send", start + 4, conn="h3"),
+              _event("subscription_ack", start + 4, conn="h3", ready=True),
+              _event("application_heartbeat", start + 10, conn="h3", phase="pong")]
+    assert _formal_window(tmp_path, start, extras, "h3") == coverage.CoverageWindowResult(
+        coverage.PairingResult(((start, start + 1), (start + 2, start + 10)), False),
+        8, 9, 167, 168, True)
+
+
+def test_replay_window_coverage_rejects_unexplained_without_open_gap_deduction(
+    tmp_path: Path,
+) -> None:
+    quarantine = _event("raw_quarantine", HOUR_NS + 5, conn="wire", raw="eA==")
+    assert _formal_window(tmp_path, extras=(quarantine,)) == coverage.CoverageWindowResult(
+        coverage.PairingResult((), True), 0, 0, 167, 168, False)
