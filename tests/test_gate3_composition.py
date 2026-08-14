@@ -157,7 +157,7 @@ def _submit(runtime):
     lease, allocator, _, effects = runtime
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
 
     def transport(request):
@@ -239,7 +239,7 @@ def test_real_ack_loss_never_retransports_before_venue_truth_catches_up(
     lease, allocator, _, _ = authorized_runtime
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
     event_root = tmp_path / "ack-loss-events"
     event_writer = shard.ShardWriter(event_root, boot_id="boot-orders")

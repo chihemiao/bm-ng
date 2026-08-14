@@ -27,7 +27,7 @@ def _serialized(leg="hyperliquid", quantity="1E+2"):
     intent = orders.rehydrate_order_intent(
         "funding-carry", "git-deadbeef", 100, leg,
         symbol="BTC", side="buy", quantity=Decimal(quantity),
-        replacement_ordinal=2,
+        reduce_only=False, replacement_ordinal=2,
     )
     request = order_request_record(
         intent, 110, account_digest="a" * 64, lease_epoch=1,
@@ -122,7 +122,7 @@ def test_serialize_rejects_an_intent_record_mismatch(changes) -> None:
     intent, _, _ = _serialized()
     fields = (
         "strategy_id", "strategy_version", "signal_ns", "leg",
-        "symbol", "side", "quantity", "replacement_ordinal",
+        "symbol", "side", "quantity", "reduce_only", "replacement_ordinal",
     )
     values = {field: getattr(intent, field) for field in fields}
     values.update(changes)

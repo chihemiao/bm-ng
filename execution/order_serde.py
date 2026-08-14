@@ -80,7 +80,10 @@ def serialize_order_request(
         for field in fields(record)
         if field.name != "client_order_id"
     }
-    payload.update(symbol=intent.symbol, side=intent.side, quantity=str(intent.quantity))
+    payload.update(
+        symbol=intent.symbol, side=intent.side, quantity=str(intent.quantity),
+        reduce_only=intent.reduce_only,
+    )
     return validate_envelope(
         {
             "schema_ver": 1,
@@ -118,6 +121,7 @@ def rehydrate_order_request(
         payload["signal_ns"], payload["leg"],
         symbol=payload["symbol"], side=payload["side"],
         quantity=Decimal(payload["quantity"]),
+        reduce_only=payload["reduce_only"],
         replacement_ordinal=payload["replacement_ordinal"],
     )
     if intent.client_order_id != validated["client_order_id"]:

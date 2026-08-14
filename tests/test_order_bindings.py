@@ -304,7 +304,7 @@ def test_explicit_absence_cannot_invent_fill_or_position_query_times(tmp_path):
 
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
     request = order_request_record(
         intent, 110, account_digest="a" * 64, lease_epoch=1,
@@ -318,7 +318,7 @@ def test_explicit_absence_cannot_invent_fill_or_position_query_times(tmp_path):
 def test_real_disconnect_fill_reconciles_without_a_duplicate_submission(tmp_path):
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
     request = order_request_record(
         intent, 100, account_digest="a" * 64, lease_epoch=1,

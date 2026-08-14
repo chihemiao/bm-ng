@@ -19,7 +19,7 @@ ORDER_LEASE_FIELDS = (
 ORDER_SIGNER_FIELDS = ("allocated_nonce",)
 ORDER_INTENT_FIELDS = (
     "strategy_id", "strategy_version", "signal_ns", "leg", "replacement_ordinal",
-    "symbol", "side", "quantity", "recorded_ns",
+    "symbol", "side", "quantity", "reduce_only", "recorded_ns",
 )
 ORDER_BOUND_FIELDS = ORDER_LEASE_FIELDS + ORDER_SIGNER_FIELDS + ORDER_INTENT_FIELDS
 SURFACES = frozenset({"orders", "fills", "positions", "balances"})

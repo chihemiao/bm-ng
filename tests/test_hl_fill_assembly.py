@@ -19,7 +19,7 @@ FILL = {
 }
 INTENT = make_order_intent(
     "funding-carry", "git-deadbeef", 100, "hyperliquid",
-    symbol="BTC", side="buy", quantity=Decimal("1"),
+    symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
 )
 BINDING = OrderBinding(
     venue="hyperliquid",
@@ -91,7 +91,7 @@ def test_invalid_matching_id_is_rejected_before_the_replay_freeze_gate():
             REPLAY,
             make_order_intent(
                 "funding-carry", "git-deadbeef", 100, "bybit",
-                symbol="BTC", side="buy", quantity=Decimal("1"),
+                symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
             ),
             ValueError,
             "hyperliquid",

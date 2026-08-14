@@ -26,6 +26,7 @@ class OrderIntent:
     symbol: str
     side: str
     quantity: Decimal
+    reduce_only: bool
     replacement_ordinal: int
     client_order_id: str
 
@@ -109,7 +110,7 @@ def _validate_request_binding(
 
 def _client_order_id(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
-    symbol: str, side: str, quantity: Decimal, ordinal: int,
+    symbol: str, side: str, quantity: Decimal, reduce_only: bool, ordinal: int,
 ) -> str:
     # Venue evidence preserves raw strings; our identity is numeric and context-independent.
     sign, digits, exponent = quantity.as_tuple()
@@ -120,7 +121,7 @@ def _client_order_id(
     canonical_quantity = [sign, "".join(map(str, coefficient)), exponent]
     identity = [
         strategy_id, strategy_version, signal_ns, leg,
-        symbol, side, canonical_quantity, ordinal,
+        symbol, side, canonical_quantity, reduce_only, ordinal,
     ]
     payload = json.dumps(identity, ensure_ascii=True, separators=(",", ":")).encode()
     digest = hashlib.blake2s(payload, digest_size=16, person=b"hlcarry").hexdigest()
@@ -129,7 +130,8 @@ def _client_order_id(
 
 def rehydrate_order_intent(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
-    *, symbol: str, side: str, quantity: Decimal, replacement_ordinal: int,
+    *, symbol: str, side: str, quantity: Decimal, reduce_only: bool,
+    replacement_ordinal: int,
 ) -> OrderIntent:
     _require(isinstance(strategy_id, str) and bool(strategy_id), "invalid strategy_id")
     valid_version = isinstance(strategy_version, str) and bool(strategy_version)
@@ -145,24 +147,27 @@ def rehydrate_order_intent(
     if not isinstance(quantity, Decimal):
         raise TypeError("quantity must be Decimal")
     _require(quantity.is_finite() and quantity > 0, "invalid quantity")
+    if type(reduce_only) is not bool:
+        raise TypeError("reduce_only must be bool")
     _require(_valid_ns(replacement_ordinal), "invalid replacement_ordinal")
     client_order_id = _client_order_id(
         strategy_id, strategy_version, signal_ns, leg,
-        symbol, side, quantity, replacement_ordinal,
+        symbol, side, quantity, reduce_only, replacement_ordinal,
     )
     return OrderIntent(
         strategy_id, strategy_version, signal_ns, leg,
-        symbol, side, quantity, replacement_ordinal, client_order_id,
+        symbol, side, quantity, reduce_only, replacement_ordinal, client_order_id,
     )
 
 
 def make_order_intent(
     strategy_id: str, strategy_version: str, signal_ns: int, leg: str,
-    *, symbol: str, side: str, quantity: Decimal,
+    *, symbol: str, side: str, quantity: Decimal, reduce_only: bool,
 ) -> OrderIntent:
     return rehydrate_order_intent(
         strategy_id, strategy_version, signal_ns, leg,
-        symbol=symbol, side=side, quantity=quantity, replacement_ordinal=0,
+        symbol=symbol, side=side, quantity=quantity,
+        reduce_only=reduce_only, replacement_ordinal=0,
     )
 
 
@@ -172,11 +177,11 @@ def make_t0a_pair_intents(
 ) -> T0APairIntents:
     hyperliquid = make_order_intent(
         strategy_id, strategy_version, signal_ns, "hyperliquid",
-        symbol=symbol, side="sell", quantity=quantity,
+        symbol=symbol, side="sell", quantity=quantity, reduce_only=False,
     )
     bybit = make_order_intent(
         strategy_id, strategy_version, signal_ns, "bybit",
-        symbol=symbol, side="buy", quantity=quantity,
+        symbol=symbol, side="buy", quantity=quantity, reduce_only=False,
     )
     return T0APairIntents(hyperliquid=hyperliquid, bybit=bybit)
 
@@ -186,8 +191,9 @@ def t0a_pair_intents_match(pair: T0APairIntents) -> bool:
         raise TypeError("pair must be T0APairIntents")
     hyperliquid, bybit = pair.hyperliquid, pair.bybit
     topology = (
-        hyperliquid.leg, hyperliquid.side, bybit.leg, bybit.side,
-    ) == ("hyperliquid", "sell", "bybit", "buy")
+        hyperliquid.leg, hyperliquid.side, hyperliquid.reduce_only,
+        bybit.leg, bybit.side, bybit.reduce_only,
+    ) == ("hyperliquid", "sell", False, "bybit", "buy", False)
     shared = ("strategy_id", "strategy_version", "signal_ns", "symbol", "quantity")
     return topology and all(
         getattr(hyperliquid, field) == getattr(bybit, field) for field in shared
@@ -199,7 +205,7 @@ def _validate_intent(intent: OrderIntent) -> None:
     expected = rehydrate_order_intent(
         intent.strategy_id, intent.strategy_version, intent.signal_ns, intent.leg,
         symbol=intent.symbol, side=intent.side, quantity=intent.quantity,
-        replacement_ordinal=intent.replacement_ordinal,
+        reduce_only=intent.reduce_only, replacement_ordinal=intent.replacement_ordinal,
     )
     _require(intent.client_order_id == expected.client_order_id, "invalid client_order_id")
 
@@ -317,5 +323,6 @@ def replacement_intent(
     return rehydrate_order_intent(
         previous.strategy_id, previous.strategy_version, previous.signal_ns, previous.leg,
         symbol=previous.symbol, side=previous.side, quantity=quantity,
+        reduce_only=previous.reduce_only,
         replacement_ordinal=previous.replacement_ordinal + 1,
     )

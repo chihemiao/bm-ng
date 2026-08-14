@@ -42,7 +42,7 @@ class CountingNonceAllocator(NonceAllocator):
 def _intent(leg: str = "hyperliquid"):
     return make_order_intent(
         "funding-carry", "git-deadbeef", 100, leg,
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
 
 

@@ -15,7 +15,7 @@ from execution.orders import make_order_intent, order_request_record
 
 INTENT = make_order_intent(
     "funding-carry", "git-deadbeef", 100, "hyperliquid", symbol="BTC", side="buy",
-    quantity=Decimal("1"))
+    quantity=Decimal("1"), reduce_only=False)
 REQUEST = order_request_record(
     INTENT, 110, account_digest="a" * 64, lease_epoch=1,
     writer_instance_id="writer-one", wallet_fingerprint="b" * 64, allocated_nonce=7)

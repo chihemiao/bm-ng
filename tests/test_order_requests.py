@@ -25,6 +25,7 @@ def _intent(**changes):
         "symbol": "BTC",
         "side": "buy",
         "quantity": Decimal("1"),
+        "reduce_only": False,
     }
     values.update(changes)
     return make_order_intent(**values)

@@ -86,7 +86,7 @@ def _process_a(root: Path, base_url: str) -> None:
     lease, _, allocator = _runtime(root, "writer-a", "boot-a", 0)
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
 
     def record_request(request):
