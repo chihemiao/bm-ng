@@ -239,10 +239,10 @@ def test_later_wall_clock_values_must_strictly_increase(tmp_path, second):
     lease.release()
 
 
-@pytest.mark.parametrize("source", ["stop", "wall", "schedule", "wait", "cancel"])
-def test_loop_failures_propagate_by_identity_without_retry_or_disarm(tmp_path, source):
+@pytest.mark.parametrize("failure_point", ["stop", "wall", "schedule", "wait", "cancel"])
+def test_loop_failures_propagate_by_identity_without_retry_or_disarm(tmp_path, failure_point):
     values, events, lease = _loop_case(tmp_path, (NOW_MS,))
-    error = asyncio.CancelledError() if source == "cancel" else OSError(source)
+    error = asyncio.CancelledError() if failure_point == "cancel" else OSError(failure_point)
 
     def fail(*_args):
         raise error
@@ -251,15 +251,16 @@ def test_loop_failures_propagate_by_identity_without_retry_or_disarm(tmp_path, s
         events.append(("wait", value))
         raise error
 
-    if source in {"wait", "cancel"}:
+    if failure_point in {"wait", "cancel"}:
         values["wait_ms"] = fail_async
-    elif source == "schedule":
+    elif failure_point == "schedule":
         def fail_schedule(deadline_ms):
             events.append(("schedule", deadline_ms))
             raise error
         values["schedule_cancel"] = fail_schedule
     else:
-        values[f"{source}_ms" if source == "wall" else "stop_requested"] = fail
+        field = "wall_ms" if failure_point == "wall" else "stop_requested"
+        values[field] = fail
     with pytest.raises(BaseException) as caught:
         _run_loop(values)
     assert caught.value is error
