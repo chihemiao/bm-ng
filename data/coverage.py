@@ -1,6 +1,7 @@
 """Pure Gate 1 window arithmetic over already-classified coverage evidence."""
 
-from typing import Literal
+from collections.abc import Sequence
+from typing import Literal, NamedTuple
 
 MAX_EXPLAINED_GAP_NS = 4 * 3_600 * 1_000_000_000
 MAX_EXPLAINED_GAP_PERCENT = 2
@@ -9,6 +10,24 @@ UTC_HOUR_NS = 3_600_000_000_000
 UTC_DAY_NS = 24 * UTC_HOUR_NS
 GATE1_WINDOW_HOURS = 168
 COMPLETION_WINDOW_HOURS = 720
+EXPLAINED_FAILURE_REASONS = frozenset({
+    "application_pong_timeout", "subscription_ack_timeout", "transport_ping_timeout",
+    "venue_down", "bybit_sequence_gap",
+})
+_COVERAGE_VENUES = frozenset({"hyperliquid", "bybit"})
+_COVERAGE_POINT_KINDS = frozenset("hard_verified explained_failure unexplained_failure".split())
+
+
+class CoveragePoint(NamedTuple):
+    venue: Literal["hyperliquid", "bybit"]
+    observed_ns: int
+    kind: Literal["hard_verified", "explained_failure", "unexplained_failure"]
+    reason: str | None
+
+
+class PairingResult(NamedTuple):
+    explained_intervals: tuple[tuple[int, int], ...]
+    unexplained_gap_present: bool
 
 
 def _require(condition: bool, message: str) -> None:
@@ -18,6 +37,68 @@ def _require(condition: bool, message: str) -> None:
 
 def _nonnegative_exact_int(value: object) -> bool:
     return type(value) is int and value >= 0
+
+
+def _validate_coverage_point(point: object) -> None:
+    _require(type(point) is CoveragePoint, "invalid coverage point")
+    _require(isinstance(point.venue, str) and point.venue in _COVERAGE_VENUES,
+             "invalid coverage venue")
+    _require(_nonnegative_exact_int(point.observed_ns), "invalid coverage point time")
+    _require(isinstance(point.kind, str) and point.kind in _COVERAGE_POINT_KINDS,
+             "invalid coverage point kind")
+    explained = point.kind == "explained_failure"
+    valid_reason = isinstance(point.reason, str) and point.reason in EXPLAINED_FAILURE_REASONS
+    _require(valid_reason if explained else point.reason is None, "invalid coverage point reason")
+    _require(point.reason != "bybit_sequence_gap" or point.venue == "bybit",
+             "invalid failure venue")
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    merged: list[tuple[int, int]] = []
+    for start_ns, end_ns in sorted(intervals):
+        if merged and start_ns <= merged[-1][1]:
+            merged[-1] = merged[-1][0], max(merged[-1][1], end_ns)
+        else:
+            merged.append((start_ns, end_ns))
+    return tuple(merged)
+
+
+def pair_explained_intervals(
+    points: Sequence[CoveragePoint],
+    *,
+    window_start_ns: int,
+    window_end_ns: int,
+) -> PairingResult:
+    _require(_nonnegative_exact_int(window_start_ns), "invalid window_start_ns")
+    _require(_nonnegative_exact_int(window_end_ns), "invalid window_end_ns")
+    _require(window_end_ns > window_start_ns, "invalid pairing window")
+    _require(isinstance(points, Sequence), "invalid coverage points")
+    last_verified: dict[str, int] = {}
+    pending: dict[str, list[int | None]] = {venue: [] for venue in _COVERAGE_VENUES}
+    intervals: list[tuple[int, int]] = []
+    unexplained, previous_ns = False, -1
+    for point in points:
+        _validate_coverage_point(point)
+        _require(point.observed_ns >= previous_ns, "coverage point order moved backwards")
+        previous_ns = point.observed_ns
+        if point.observed_ns >= window_end_ns:
+            continue
+        if point.kind == "hard_verified":
+            starts = pending[point.venue]
+            if point.observed_ns > window_start_ns:
+                for start_ns in starts:
+                    if start_ns is None:
+                        unexplained = True
+                    elif (clipped := max(start_ns, window_start_ns)) < point.observed_ns:
+                        intervals.append((clipped, point.observed_ns))
+            starts.clear()
+            last_verified[point.venue] = point.observed_ns
+        elif point.kind == "explained_failure":
+            pending[point.venue].append(last_verified.get(point.venue))
+        elif point.observed_ns >= window_start_ns:
+            unexplained = True
+    unexplained |= any(pending.values())
+    return PairingResult(_merge_intervals(intervals), unexplained)
 
 
 def eligible_utc_hours(
