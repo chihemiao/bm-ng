@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from execution.wallet import AgentWalletRegistration
-from reconciliation import exposure, kill_switch, state
+from reconciliation import exposure, fx, kill_switch, state
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -15,6 +15,11 @@ class KillSwitchSnapshotInputs:
     venues: Mapping[str, state.VenueEvidence]
     expectations: Mapping[str, state.VenueExpectation]
     delta: Decimal | None
+    previous_exposure: exposure.ExposureClock | None
+    delta_tolerance: Decimal
+    max_naked_ns: int
+    naked_notional: fx.Notional | None
+    max_naked_notional: fx.Notional
     reconciliation_observed_ns: int
     now_ns: int
     max_age_ns: int
@@ -25,6 +30,7 @@ class KillSwitchSnapshot:
     decision: kill_switch.KillSwitchDecision
     reconciliation_streak: kill_switch.ReconciliationStreak | None
     reconciliation_consistency: bool | None
+    exposure: exposure.ExposureClock
 
 
 def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSnapshot:
@@ -34,6 +40,10 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
     invalid_type = type(cycle) is not int or type(now) is not int
     if invalid_type or not 0 < cycle <= now:
         raise (TypeError if invalid_type else ValueError)("snapshot times are invalid")
+    exposure_state = exposure.advance_exposure_clock(
+        inputs.previous_exposure,
+        state=exposure.delta_state(inputs.delta, tolerance=inputs.delta_tolerance),
+        observed_ns=cycle, max_naked_ns=inputs.max_naked_ns)
     consistency = state.classify_reconciliation_consistency(
         now_ns=now, max_age_ns=inputs.max_age_ns,
         venues=inputs.venues, expectations=inputs.expectations)
@@ -55,11 +65,17 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
     orders_known = all(state.surface_is_authoritative(
         evidence.orders, now_ns=now, max_age_ns=inputs.max_age_ns)
         for evidence in inputs.venues.values())
-    positions_known = exposure.delta_state(inputs.delta, tolerance=Decimal(0)) != "unknown"
-    triggered = kill_switch.key_and_nonce_triggered(
+    positions_known = exposure_state.state != "unknown"
+    key_triggered = kill_switch.key_and_nonce_triggered(
         inputs.registration, inputs.nonce_events, now_ns=now)
+    exposure_triggered = kill_switch.exposure_kill_trigger(
+        exposure_state, inputs.naked_notional,
+        max_naked_notional=inputs.max_naked_notional)
+    triggered = key_triggered or exposure_triggered
     decision = kill_switch.decide_kill_switch(
         triggered=triggered, orders_known=orders_known,
-        positions_known=positions_known, reconciliation_consistency=consistency,
+        positions_known=positions_known,
+        naked_notional_known=inputs.naked_notional is not None,
+        reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)
-    return KillSwitchSnapshot(decision, streak, consistency)
+    return KillSwitchSnapshot(decision, streak, consistency, exposure_state)
