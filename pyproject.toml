@@ -28,7 +28,7 @@ line-length = 100
 select = ["B", "C90", "E", "F", "I"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["data", "execution", "reconciliation"]
+known-first-party = ["data", "execution", "ops", "reconciliation"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
@@ -37,23 +37,29 @@ max-complexity = 10
 required-version = "==0.9.21"
 
 [tool.uv.build-backend]
-module-name = ["data", "execution", "reconciliation"]
+module-name = ["data", "execution", "ops", "reconciliation"]
 module-root = ""
 namespace = true
 
 [tool.vulture]
 min_confidence = 80
-paths = ["data", "execution", "reconciliation"]
+paths = ["data", "execution", "ops", "reconciliation"]
 
 [tool.importlinter]
-root_packages = ["data", "execution", "reconciliation"]
+root_packages = ["data", "execution", "ops", "reconciliation"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Runtime cannot import tests or research"
 type = "forbidden"
-source_modules = ["data", "execution", "reconciliation"]
+source_modules = ["data", "execution", "ops", "reconciliation"]
 forbidden_modules = ["tests", "research"]
+
+[[tool.importlinter.contracts]]
+name = "Ops cannot import order placement"
+type = "forbidden"
+source_modules = ["ops"]
+forbidden_modules = ["execution.orders"]
 
 [[tool.importlinter.contracts]]
 name = "Runtime layering"

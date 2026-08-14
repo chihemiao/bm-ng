@@ -87,7 +87,7 @@ def test_supply_chain_dependencies_and_tools_are_exactly_pinned() -> None:
     assert config["tool"]["uv"]["required-version"] == "==0.9.21"
     assert config["tool"]["vulture"] == {
         "min_confidence": 80,
-        "paths": ["data", "execution", "reconciliation"],
+        "paths": ["data", "execution", "ops", "reconciliation"],
     }
 
 
@@ -97,7 +97,7 @@ def test_build_and_import_roots_match_the_current_runtime_packages() -> None:
     imports = tools["importlinter"]
     runtime_packages = _runtime_packages()
 
-    expected_packages = ["data", "execution", "reconciliation"]
+    expected_packages = ["data", "execution", "ops", "reconciliation"]
     assert build["module-name"] == imports["root_packages"] == runtime_packages
     assert tools["ruff"]["lint"]["isort"]["known-first-party"] == runtime_packages
     assert runtime_packages == expected_packages
@@ -108,8 +108,14 @@ def test_build_and_import_roots_match_the_current_runtime_packages() -> None:
         {
             "name": "Runtime cannot import tests or research",
             "type": "forbidden",
-            "source_modules": ["data", "execution", "reconciliation"],
+            "source_modules": ["data", "execution", "ops", "reconciliation"],
             "forbidden_modules": ["tests", "research"],
+        },
+        {
+            "name": "Ops cannot import order placement",
+            "type": "forbidden",
+            "source_modules": ["ops"],
+            "forbidden_modules": ["execution.orders"],
         },
         {
             "name": "Runtime layering",
