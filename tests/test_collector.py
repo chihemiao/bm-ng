@@ -79,12 +79,14 @@ def _events(root: Path) -> list[dict]:
     return [json.loads(record) for record in replay_records(root)]
 
 
-def test_bybit_wire_symbols_have_one_shared_closed_source() -> None:
+def test_collector_stream_counts_have_one_closed_specification() -> None:
     assert schema_dispatch.BYBIT_WIRE_SYMBOLS == {
         "BTC": "BTCUSDT",
         "ETH": "ETHUSDT",
     }
     assert collector.BYBIT_WIRE_SYMBOLS is schema_dispatch.BYBIT_WIRE_SYMBOLS
+    assert [len(item.subscription_frames) for item in collector._protocols()] == [8, 6]
+    assert "重连后须重确认全部 8 条 HL 流" in Path("GOAL.md").read_text()
 
 
 async def _normal_handler(websocket, venue: str) -> None:
