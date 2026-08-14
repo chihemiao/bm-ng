@@ -185,7 +185,7 @@ def test_non_list_orders_payload_is_a_type_error():
     "change",
     [
         {"extra": "drift"}, {"coin": "SOL"}, {"side": "long"},
-        {"oid": True}, {"limitPx": object()},
+        {"oid": True}, {"oid": 2**64}, {"limitPx": object()},
     ],
 )
 def test_unusable_orders_are_unknown_without_being_discarded(change):
@@ -193,6 +193,18 @@ def test_unusable_orders_are_unknown_without_being_discarded(change):
 
     assert (evidence.fetched_count, evidence.unknown_count) == (1, 1)
     assert evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+
+
+def test_uint64_max_order_id_remains_known():
+    evidence = _parse_orders([{**ORDER, "oid": 2**64 - 1}])
+    assert (evidence.fetched_count, evidence.unknown_count) == (1, 0)
+
+
+def test_hl_surface_parsers_share_one_uint64_limit_object():
+    common = importlib.import_module("reconciliation.hl_common")
+    fills = importlib.import_module("reconciliation.hl_fills")
+    orders = importlib.import_module("reconciliation.hl_orders")
+    assert orders.HL_UINT64_MAX is fills.HL_UINT64_MAX is common.HL_UINT64_MAX
 
 
 def test_duplicate_oid_is_one_unknown_mismatch_and_keeps_first_order():
