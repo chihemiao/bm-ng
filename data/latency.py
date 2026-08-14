@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Sequence
 
 from data.contracts import ContractError
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
@@ -13,6 +14,10 @@ _HL_STREAMS = frozenset(
 )
 _BYBIT_STREAMS = frozenset(
     f"{channel}.{symbol}" for channel in _BYBIT_CHANNELS for symbol in BYBIT_WIRE_SYMBOLS.values()
+)
+UTC_HOUR_NS = 3_600_000_000_000
+_REQUIRED_LATENCY_STREAMS = (_HL_STREAMS | _BYBIT_STREAMS) - frozenset(
+    f"activeAssetCtx:{coin}" for coin in BYBIT_WIRE_SYMBOLS
 )
 
 
@@ -89,3 +94,83 @@ def raw_latency_samples(event: dict) -> tuple[tuple[str, int], ...]:
         return tuple((stream, timestamp) for timestamp in times)
     except (KeyError, TypeError, ValueError) as error:
         raise ContractError("invalid latency frame") from error
+
+
+def _hour_inputs(
+    events: object,
+    start_ns: object,
+    end_ns: object,
+    intervals: object,
+) -> tuple[Sequence[dict], tuple[tuple[int, int], ...]]:
+    _require(
+        isinstance(events, Sequence) and not isinstance(events, (str, bytes)),
+        "latency events must be a sequence",
+    )
+    valid_window = (
+        type(start_ns) is int
+        and type(end_ns) is int
+        and start_ns >= 0
+        and end_ns > start_ns
+        and start_ns % UTC_HOUR_NS == 0
+        and end_ns % UTC_HOUR_NS == 0
+    )
+    _require(valid_window, "invalid latency hour window")
+    _require(
+        isinstance(intervals, Sequence) and not isinstance(intervals, (str, bytes)),
+        "explained intervals must be a sequence",
+    )
+    result, previous_start = [], -1
+    for interval in intervals:
+        valid = type(interval) is tuple and len(interval) == 2
+        if valid:
+            left, right = interval
+            valid &= (
+                type(left) is int
+                and type(right) is int
+                and 0 <= left < right
+                and left >= previous_start
+            )
+        _require(valid, "invalid explained interval")
+        result.append((left, right))
+        previous_start = left
+    return events, tuple(result)
+
+
+def usable_latency_hours(
+    events: Sequence[dict],
+    *,
+    start_ns: int,
+    end_ns: int,
+    explained_intervals: Sequence[tuple[int, int]],
+) -> int:
+    """Count 12-stream hours clear of closed gaps/quarantine.
+
+    Open unexplained gaps are deliberately excluded here; the window verdict rejects them.
+    """
+    events, intervals = _hour_inputs(events, start_ns, end_ns, explained_intervals)
+    samples: dict[int, set[str]] = {}
+    invalid_hours: set[int] = set()
+    for event in events:
+        valid = (
+            type(event) is dict
+            and type(event.get("recv_wall_ns")) is int
+            and event["recv_wall_ns"] >= 0
+            and type(event.get("payload_schema")) is str
+        )
+        _require(valid, "invalid latency event")
+        observed_ns = event["recv_wall_ns"]
+        if not start_ns <= observed_ns < end_ns:
+            continue
+        hour = observed_ns - observed_ns % UTC_HOUR_NS
+        if event["payload_schema"] == "raw_quarantine":
+            invalid_hours.add(hour)
+        elif event["payload_schema"] == "raw_frame":
+            samples.setdefault(hour, set()).update(
+                stream for stream, _ in raw_latency_samples(event)
+            )
+    return sum(
+        _REQUIRED_LATENCY_STREAMS <= samples.get(hour, set())
+        and hour not in invalid_hours
+        and not any(left < hour + UTC_HOUR_NS and hour < right for left, right in intervals)
+        for hour in range(start_ns, end_ns, UTC_HOUR_NS)
+    )
