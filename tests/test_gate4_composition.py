@@ -1,11 +1,14 @@
+import ast
 import inspect
 from dataclasses import fields, replace
 from decimal import Decimal
 
 import pytest
 
-from data.contracts import VALIDITY_NS
+import reconciliation.promotion as promotion
+from data.contracts import VALIDITY_NS, ContractError, validate_envelope
 from execution.wallet import AgentWalletRegistration
+from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 from reconciliation.kill_switch import KillSwitchDecision, ReconciliationStreak
 from reconciliation.kill_switch_composition import (
     KillSwitchSnapshot,
@@ -133,3 +136,103 @@ def test_snapshot_contract_is_narrow_frozen_slotted_and_keyword_only():
     source = inspect.getsource(build_snapshot)
     assert all(text in source for text in (
         "surface_is_authoritative", "evidence.orders", "now_ns=now"))
+
+
+def _lease(root, mode, recorder):
+    identity = WriterIdentity("hyperliquid:test", "writer-one", "b" * 64, "boot-one")
+    lease = WriterLease.acquire(root, identity, recorder, acquired_ns=100)
+    lease._authority = lease.authority._replace(mode=mode)
+    return lease
+
+
+def _writer_event(reason):
+    return {
+        "schema_ver": 1, "event_kind": "decision", "payload_schema": "writer_lease_decision",
+        "venue": "hyperliquid", "conn_id": "writer-one", "boot_id": "boot-one",
+        "recv_wall_ns": 101, "recv_mono_ns": 101, "source": "writer_lease",
+        "seq_within_boot": 1, "payload": {
+            "action": "demote", "outcome": "cancel_only", "reason": reason,
+            "account_digest": "a" * 64, "instance_id": "writer-one",
+            "wallet_fingerprint": "b" * 64, "boot_id": "boot-one", "lease_epoch": 1,
+            "lock_path_digest": "c" * 64, "prior_epoch_valid": True}}
+
+
+def test_gate4_freeze_demotes_before_recording_canonical_evidence(tmp_path):
+    recorded = []
+    lease = _lease(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    authority = promotion.demote_kill_switch_freeze(
+        lease, KillSwitchDecision("cancel_only_freeze"), now_ns=101)
+    assert authority == lease.authority and authority.mode == "cancel_only"
+    assert len(recorded) == 1
+    assert recorded[0].reason == "writer_demoted:kill_switch:cancel_only_freeze"
+    assert validate_envelope(_writer_event(recorded[0].reason))
+    with pytest.raises(WriterLeaseError, match="not authorized"):
+        lease.authorize("submit")
+    lease.release()
+
+
+@pytest.mark.parametrize("decision", [KillSwitchDecision("continue"),
+                                        KillSwitchDecision("flatten_and_stop"), object()])
+def test_non_freeze_decisions_cannot_demote_or_record(tmp_path, decision):
+    recorded = []
+    lease = _lease(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    with pytest.raises((TypeError, ValueError)):
+        promotion.demote_kill_switch_freeze(lease, decision, now_ns=101)
+    assert lease.authority.mode == "risk_increasing" and recorded == []
+    lease.release()
+
+
+@pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only"])
+def test_gate4_freeze_is_idempotent_outside_risk_increasing(tmp_path, mode):
+    recorded = []
+    lease = _lease(tmp_path, mode, recorded.append)
+    recorded.clear()
+    promotion.demote_kill_switch_freeze(
+        lease, KillSwitchDecision("cancel_only_freeze"), now_ns=101)
+    assert lease.authority.mode == mode and recorded == []
+    lease.release()
+
+
+@pytest.mark.parametrize("now_ns,error", [(True, TypeError), (0, ValueError)])
+def test_gate4_freeze_rejects_invalid_time_before_state_change(tmp_path, now_ns, error):
+    recorded = []
+    lease = _lease(tmp_path, "risk_increasing", recorded.append)
+    recorded.clear()
+    with pytest.raises(error):
+        promotion.demote_kill_switch_freeze(
+            lease, KillSwitchDecision("cancel_only_freeze"), now_ns=now_ns)
+    assert lease.authority.mode == "risk_increasing" and recorded == []
+    lease.release()
+
+
+@pytest.mark.parametrize("reason", [
+    "writer_demoted:kill_switch:continue", "writer_demoted:kill_switch:flatten_and_stop",
+    "writer_demoted:kill_switch:cancel_only_freeze:detail",
+    "writer_demoted:continuous_admission:pair_unknown,kill_switch:cancel_only_freeze",
+    "writer_demoted:kill_switch:cancel_only_freeze,kill_switch:cancel_only_freeze",
+])
+def test_schema_rejects_every_other_gate4_demotion_reason(reason):
+    with pytest.raises(ContractError, match="writer decision combination"):
+        validate_envelope(_writer_event(reason))
+
+
+def test_gate4_freeze_preserves_applied_demotion_when_evidence_fails(tmp_path):
+    failure = OSError("decision stream unavailable")
+    def recorder(decision):
+        if decision.action == "demote":
+            raise failure
+    lease = _lease(tmp_path, "risk_increasing", recorder)
+    with pytest.raises(WriterLeaseError, match="demotion applied.*evidence") as caught:
+        promotion.demote_kill_switch_freeze(
+            lease, KillSwitchDecision("cancel_only_freeze"), now_ns=101)
+    assert caught.value.__cause__ is failure and lease.authority.mode == "cancel_only"
+    lease.release()
+
+
+def test_gate4_freeze_delegates_only_to_the_authority_demotion_atom():
+    tree = ast.parse(inspect.getsource(promotion.demote_kill_switch_freeze))
+    calls = {node.func.id if isinstance(node.func, ast.Name) else node.func.attr
+             for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    assert calls == {"_demote", "TypeError", "ValueError", "isinstance"}
