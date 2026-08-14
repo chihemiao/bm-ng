@@ -7,8 +7,10 @@ import pytest
 
 import execution.orders as orders
 import execution.submission as submission
+import reconciliation.promotion as promotion
 from execution.nonce import NonceAllocator, SignerFence
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
+from reconciliation.kill_switch import KillSwitchDecision
 
 META = {"strategy_id": "funding-carry", "strategy_version": "git-deadbeef", "signal_ns": 100}
 WALLET = "b" * 64
@@ -60,10 +62,14 @@ class _Unreadable:
 
 
 @contextmanager
-def _runtime(root, *, mode="risk_increasing"):
+def _runtime(root, *, mode="flatten_only"):
     identity = WriterIdentity("test-account", "writer-one", WALLET, "boot-one")
     lease = WriterLease.acquire(root, identity, [].append, acquired_ns=90)
-    lease._authority = lease.authority._replace(mode=mode)
+    initial_mode = "risk_increasing" if mode == "flatten_only" else mode
+    lease._authority = lease.authority._replace(mode=initial_mode)
+    if mode == "flatten_only":
+        promotion.demote_kill_switch_flatten(
+            lease, KillSwitchDecision("flatten_and_stop"), now_ns=91)
     fence = SignerFence.acquire(root, WALLET, "writer-one")
     allocator = NonceAllocator(
         fence, lease, account_digest="a" * 64, replayed_last=0,
