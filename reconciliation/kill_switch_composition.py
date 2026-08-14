@@ -2,6 +2,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
+from data.collector import CollectorLivenessSnapshot
 from execution.wallet import AgentWalletRegistration
 from reconciliation import exposure, fx, kill_switch, state
 
@@ -23,6 +24,8 @@ class KillSwitchSnapshotInputs:
     fx_rate: fx.FxRate | None
     fx_max_age_ns: int
     max_abs_fx_deviation: Decimal
+    liveness: CollectorLivenessSnapshot
+    max_data_gap_ns: int
     reconciliation_observed_ns: int
     now_ns: int
     max_age_ns: int
@@ -77,13 +80,16 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
     stablecoin_known, stablecoin_triggered = kill_switch._stablecoin_evidence(
         inputs.fx_rate, now_ns=now, max_age_ns=inputs.fx_max_age_ns,
         max_abs_deviation=inputs.max_abs_fx_deviation)
-    triggered = key_triggered or exposure_triggered or stablecoin_triggered
+    data_known, data_triggered = kill_switch.data_liveness_evidence(
+        inputs.liveness, now_ns=now, max_gap_ns=inputs.max_data_gap_ns)
+    triggered = key_triggered or exposure_triggered or stablecoin_triggered or data_triggered
     decision = kill_switch.decide_kill_switch(
         triggered=triggered, known_evidence=kill_switch.KnownEvidence(
             orders=orders_known,
             positions=positions_known,
             naked_notional=inputs.naked_notional is not None,
             stablecoin=stablecoin_known,
+            data_liveness=data_known,
         ),
         reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)

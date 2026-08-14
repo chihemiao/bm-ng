@@ -248,7 +248,7 @@ def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> Non
 def _known_evidence(orders, positions, naked_notional, stablecoin):
     return kill_switch.KnownEvidence(
         orders=orders, positions=positions,
-        naked_notional=naked_notional, stablecoin=stablecoin,
+        naked_notional=naked_notional, stablecoin=stablecoin, data_liveness=True,
     )
 
 
