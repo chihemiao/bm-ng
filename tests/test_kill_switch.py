@@ -2,6 +2,7 @@ import ast
 import inspect
 from collections.abc import Mapping, Sequence
 from dataclasses import FrozenInstanceError, fields
+from decimal import Decimal
 from typing import get_args, get_type_hints
 
 import pytest
@@ -12,10 +13,13 @@ from reconciliation.kill_switch import (
     KILL_SWITCH_KEY_EXPIRY_LEAD_NS,
     KillSwitchDecision,
     decide_kill_switch,
+    exposure_kill_trigger,
     key_and_nonce_triggered,
     key_expiry_triggered,
     nonce_anomaly_triggered,
 )
+from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
 
 DAY_NS = 86_400 * 1_000_000_000
 ISSUED_NS = DAY_NS
@@ -333,3 +337,47 @@ def test_kill_switch_decision_has_one_frozen_closed_action() -> None:
         for parameter in signature.parameters.values()
     )
     assert get_type_hints(decide_kill_switch)["return"] is KillSwitchDecision
+
+
+def _exposure(*, state="naked", duration_exceeded=False):
+    active_since = None if state == "flat" else ISSUED_NS
+    return ExposureClock(state, ISSUED_NS, active_since, duration_exceeded)
+
+
+@pytest.mark.parametrize(
+    ("exposure", "amount", "maximum", "triggered"),
+    [
+        (_exposure(state="flat"), "0", "1000", False),
+        (_exposure(), "1000", "1000", False),
+        (_exposure(duration_exceeded=True), "0", "1000", True),
+        (_exposure(), "1000.01", "1000", True),
+        (_exposure(state="unknown", duration_exceeded=None), "0", "1000", True),
+    ],
+)
+def test_exposure_kill_trigger_has_strict_independent_boundaries(
+    exposure, amount, maximum, triggered,
+) -> None:
+    assert exposure_kill_trigger(
+        exposure, Notional(Decimal(amount), "USDC"),
+        max_naked_notional=Notional(Decimal(maximum), "USDC"),
+    ) is triggered
+
+
+def test_unknown_notional_triggers_even_with_healthy_exposure() -> None:
+    assert exposure_kill_trigger(
+        _exposure(state="flat"), None,
+        max_naked_notional=Notional(Decimal("1000"), "USDC"),
+    ) is True
+
+
+@pytest.mark.parametrize("exposure,naked,maximum,error", [
+    (object(), Notional(Decimal(0), "USDC"), Notional(Decimal(1), "USDC"), TypeError),
+    (_exposure(), Decimal(0), Notional(Decimal(1), "USDC"), TypeError),
+    (_exposure(), Notional(Decimal(0), "USDC"), None, TypeError),
+    (_exposure(), Notional(Decimal(0), "USDT"), Notional(Decimal(1), "USDC"), ValueError),
+])
+def test_exposure_kill_trigger_validates_all_inputs_before_deciding(
+    exposure, naked, maximum, error,
+) -> None:
+    with pytest.raises(error):
+        exposure_kill_trigger(exposure, naked, max_naked_notional=maximum)
