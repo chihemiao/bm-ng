@@ -7,6 +7,7 @@ from execution.writer import WriterLease
 
 HL_UINT64_MAX = 2**64 - 1
 HL_CANCEL_COINS = frozenset({"BTC", "ETH"})
+HL_SCHEDULE_MIN_LEAD_MS = 5_000
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -92,6 +93,29 @@ def bind_bybit_cancel(
 
     def transport() -> object:
         return cancel_all(category=scope.category, settleCoin=scope.settle_coin)
+
+    return transport
+
+
+def bind_hl_schedule_cancel(
+    *, now_ms: int, deadline_ms: int | None,
+    schedule_cancel: Callable[[int | None], object],
+) -> Callable[[], object]:
+    """Bind one validated Hyperliquid dead-man arm or disarm call."""
+    if type(now_ms) is not int:
+        raise TypeError("now_ms must be an integer")
+    if now_ms <= 0:
+        raise ValueError("now_ms must be positive")
+    if deadline_ms is not None:
+        if type(deadline_ms) is not int:
+            raise TypeError("deadline_ms must be an integer or None")
+        if deadline_ms < now_ms + HL_SCHEDULE_MIN_LEAD_MS:
+            raise ValueError("deadline_ms must be at least five seconds after now_ms")
+    if not callable(schedule_cancel):
+        raise TypeError("schedule_cancel must be callable")
+
+    def transport() -> object:
+        return schedule_cancel(deadline_ms)
 
     return transport
 
