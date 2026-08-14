@@ -14,7 +14,7 @@ from data.shard import ShardWriter, replay_records
 collector = import_module("data.collector")
 schema_dispatch = import_module("data.schema_dispatch")
 CollectorConfig = collector.CollectorConfig
-run_collector = collector.run_collector
+run_collector = partial(collector.run_collector, on_liveness=repr)
 
 
 def _uri(server) -> str:
