@@ -3,6 +3,7 @@ import base64
 import json
 import time
 from collections import namedtuple
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -26,10 +27,7 @@ BYBIT_URI = "wss://stream.bybit.com/v5/public/linear"
 
 @dataclass(frozen=True, slots=True)
 class CollectorConfig:
-    """Record mode is candidate-window provenance, not Gate 1 passage.
-
-    Failure events stay formal for later coverage evaluation.
-    """
+    """Record mode is candidate-window provenance; failure events stay formal."""
 
     root: Path
     boot_id: str
@@ -47,6 +45,23 @@ class CollectorConfig:
     def __post_init__(self) -> None:
         if self.record_mode not in {"trial", "formal"}:
             raise ContractError("invalid record_mode")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CollectorLivenessSnapshot:
+    file_integrity_ok: bool
+    hl_last_verified_mono_ns: int | None
+    bybit_last_verified_mono_ns: int | None
+
+    def __post_init__(self) -> None:
+        if type(self.file_integrity_ok) is not bool:
+            raise TypeError("file_integrity_ok must be a boolean")
+        for name in ("hl_last_verified_mono_ns", "bybit_last_verified_mono_ns"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not int:
+                raise TypeError(f"{name} must be an integer or None")
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
 
 
 CollectorReport = namedtuple(
@@ -97,23 +112,59 @@ def _protocols() -> tuple[SessionProtocol, SessionProtocol]:
 class _Sink:
     def __init__(
         self, writer: ShardWriter, boot_id: str, stop: asyncio.Event, record_mode: str,
+        on_liveness: Callable[[CollectorLivenessSnapshot], None],
     ) -> None:
-        self.writer = writer
-        self.boot_id = boot_id
-        self.stop = stop
-        self.record_mode = record_mode
+        self.writer, self.boot_id, self.stop = writer, boot_id, stop
+        self.record_mode, self.on_liveness = record_mode, on_liveness
         self.bybit_barrier = BybitBarrier()
         self.sequence_ok = False
         self.ready_seen = {"hyperliquid": False, "bybit": False}
         self.application_pong_seen = {"hyperliquid": False, "bybit": False}
         self.failures = {"hyperliquid": set(), "bybit": set()}
         self.down = {"hyperliquid": 0, "bybit": 0}
+        self.conn_ids = {"hyperliquid": None, "bybit": None}
+        self.last_verified = {"hyperliquid": None, "bybit": None}
+        self.file_integrity_ok, self._last_snapshot = (
+            _replay_integrity(writer.root, record_mode), None)
+
+    def _publish(self) -> None:
+        snapshot = CollectorLivenessSnapshot(
+            file_integrity_ok=self.file_integrity_ok,
+            hl_last_verified_mono_ns=self.last_verified["hyperliquid"],
+            bybit_last_verified_mono_ns=self.last_verified["bybit"],
+        )
+        if snapshot != self._last_snapshot:
+            self.on_liveness(snapshot)
+            self._last_snapshot = snapshot
+
+    def _advance_network_clock(self, venue: str, record: SessionRecord) -> None:
+        pong = record.payload_schema == "application_heartbeat" and record.phase == "pong"
+        if venue == "hyperliquid":
+            qualifying = pong or record.payload_schema == "subscription_ack" and record.ready
+            hard = self.ready_seen[venue] and self.application_pong_seen[venue]
+        else:
+            book = record.payload_schema == "raw_frame" and (record.stream or "").startswith(
+                "orderbook.50.")
+            qualifying = pong or book
+            hard = self.sequence_ok and self.application_pong_seen[venue]
+        if qualifying and hard:
+            self.last_verified[venue] = record.recv_mono_ns
+
+    def _update_bybit(self, record: SessionRecord) -> None:
+        if record.conn_id != self.bybit_barrier.conn_id:
+            self.bybit_barrier.start(record.conn_id)
+            self.sequence_ok = False
+        if record.payload_schema in {"pre_ack_frame", "raw_frame"}:
+            self._sequence(record)
+        self.sequence_ok = self.ready_seen["bybit"] and self.bybit_barrier.ready
 
     def record(self, venue: str, record: SessionRecord) -> None:
         self._append(venue, record)
-        if venue == "bybit" and record.conn_id != self.bybit_barrier.conn_id:
-            self.bybit_barrier.start(record.conn_id)
-            self.sequence_ok = False
+        if record.conn_id != self.conn_ids[venue]:
+            self.conn_ids[venue], self.application_pong_seen[venue] = record.conn_id, False
+            self.last_verified[venue] = None
+        if record.payload_schema in {"liveness_failure", "raw_quarantine"}:
+            self.last_verified[venue] = None
         if record.payload_schema == "liveness_failure" and record.reason:
             self.failures[venue].add(record.reason)
         if record.payload_schema == "application_heartbeat":
@@ -126,12 +177,13 @@ class _Sink:
                 self.down[venue] = 0
                 self._ops(venue, "venue_recovered", {"failure_count": 0})
         if venue == "bybit":
-            if record.payload_schema in {"pre_ack_frame", "raw_frame"}:
-                self._sequence(record)
-            self.sequence_ok = self.ready_seen[venue] and self.bybit_barrier.ready
+            self._update_bybit(record)
+        self._advance_network_clock(venue, record)
+        self._publish()
 
     def mark_down(self, venue: str) -> None:
         self.down[venue] += 1
+        self.last_verified[venue] = None
         self._ops(venue, "venue_down", {"failure_count": self.down[venue]})
 
     def config_event(self, config: CollectorConfig) -> None:
@@ -149,6 +201,7 @@ class _Sink:
     def _sequence(self, record: SessionRecord) -> None:
         if self.bybit_barrier.observe(record.raw):
             self.sequence_ok = False
+            self.last_verified["bybit"] = None
             self._append("bybit", record, schema="bybit_sequence_gap", kind="ops")
             self.stop.set()
 
@@ -159,6 +212,7 @@ class _Sink:
             False,
         )
         self._append(venue, record, extra=extra)
+        self._publish()
 
     def _append(
         self, venue: str, record: SessionRecord, *, schema: str | None = None,
@@ -182,7 +236,8 @@ class _Sink:
         }
         validate_envelope(event)
         encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
-        self.writer.append(encoded, record.recv_wall_ns)
+        if self.writer.append(encoded, record.recv_wall_ns):
+            self.file_integrity_ok = _replay_integrity(self.writer.root, self.record_mode)
 
 
 async def _supervise(
@@ -219,12 +274,16 @@ def _replay_integrity(root: Path, record_mode: str) -> bool:
     return True
 
 
-async def run_collector(config: CollectorConfig, stop: asyncio.Event) -> CollectorReport:
+async def run_collector(
+    config: CollectorConfig, stop: asyncio.Event, *,
+    on_liveness: Callable[[CollectorLivenessSnapshot], None]) -> CollectorReport:
+    if not callable(on_liveness):
+        raise TypeError("on_liveness must be callable")
     writer = ShardWriter(config.root, config.boot_id)
-    sink = _Sink(writer, config.boot_id, stop, config.record_mode)
-    sink.config_event(config)
+    sink = _Sink(writer, config.boot_id, stop, config.record_mode, on_liveness)
     hl_protocol, bybit_protocol = _protocols()
     try:
+        sink.config_event(config)
         await asyncio.gather(
             _supervise("hyperliquid", config.hl_uri, hl_protocol, config, sink, stop),
             _supervise("bybit", config.bybit_uri, bybit_protocol, config, sink, stop),

@@ -167,7 +167,7 @@ async def _assembled_scenario(root: Path, record_mode: str | None = None) -> Non
     marker_line = next(line for line in inspect.getsource(collector._Sink._append).splitlines()
                        if '"is_gate1_record"' in line)
     assert 'self.record_mode == "formal"' in marker_line and "record." not in marker_line
-    assert "_replay_integrity" in inspect.getsource(run_collector)
+    assert "_replay_integrity" in inspect.getsource(collector.run_collector)
 
     if expected_marker:
         _assert_mixed_mode_fails(root, events[0])
