@@ -7,13 +7,13 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 from data.contracts import ContractError, bybit_update_gap, validate_envelope
+from data.latency import UTC_HOUR_NS, usable_latency_hours
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS, DURABLE_EVENT_SCHEMAS, PAYLOAD_SCHEMAS
 from data.shard import replay_records
 
 MAX_EXPLAINED_GAP_NS = 4 * 3_600 * 1_000_000_000
 MAX_EXPLAINED_GAP_PERCENT = 2
 MIN_LATENCY_USABLE_HOUR_PERCENT = 95
-UTC_HOUR_NS = 3_600_000_000_000
 UTC_DAY_NS = 24 * UTC_HOUR_NS
 GATE1_WINDOW_HOURS = 168
 COMPLETION_WINDOW_HOURS = 720
@@ -45,6 +45,15 @@ class CoveragePoint(NamedTuple):
 class PairingResult(NamedTuple):
     explained_intervals: tuple[tuple[int, int], ...]
     unexplained_gap_present: bool
+
+
+class CoverageWindowResult(NamedTuple):
+    pairing: PairingResult
+    max_single_gap_ns: int
+    explained_gap_total_ns: int
+    usable_hours: int
+    eligible_hours: int
+    passed: bool
 
 
 class BybitBarrier:
@@ -140,13 +149,12 @@ def _failure_point(event: dict, pending_gap: tuple | None):
     return CoveragePoint(event["venue"], event["recv_wall_ns"], kind, reason), pending_gap
 
 
-def replay_coverage_points(root: Path) -> tuple[CoveragePoint, ...]:
-    _require(isinstance(root, Path), "coverage root must be a Path")
+def _coverage_points(events: Sequence[dict]) -> tuple[CoveragePoint, ...]:
     states = {venue: dict(conn=None, ack=False, pong=False, active=False, blocked=False)
               for venue in _COVERAGE_VENUES}
     barrier, points, pending_gap = BybitBarrier(), [], None
     starters = {"hyperliquid": lambda _: None, "bybit": barrier.start}
-    for event in tuple(_formal_events(root)):
+    for event in events:
         schema, venue, conn = event["payload_schema"], event["venue"], event["conn_id"]
         state = states[venue]
         if schema == "subscription_send" and conn != state["conn"]:
@@ -179,6 +187,11 @@ def replay_coverage_points(root: Path) -> tuple[CoveragePoint, ...]:
         state["active"] = ready
     _require(pending_gap is None, "missing Bybit sequence gap event")
     return tuple(points)
+
+
+def replay_coverage_points(root: Path) -> tuple[CoveragePoint, ...]:
+    _require(isinstance(root, Path), "coverage root must be a Path")
+    return _coverage_points(tuple(_formal_events(root)))
 
 
 def _nonnegative_exact_int(value: object) -> bool:
@@ -312,3 +325,30 @@ def window_coverage_ok(
         explained_gap_total_ns * 100 <= window_duration_ns * MAX_EXPLAINED_GAP_PERCENT,
         usable_hours * 100 >= eligible_hours * MIN_LATENCY_USABLE_HOUR_PERCENT,
     ))
+
+
+def replay_window_coverage(
+    root: Path,
+    *,
+    start_ns: int,
+    end_ns: int,
+    window_kind: Literal["gate1_7d", "completion_30d"],
+) -> CoverageWindowResult:
+    """Evaluate one formal collector root through the frozen Gate 1 chain."""
+    _require(isinstance(root, Path), "coverage root must be a Path")
+    events = tuple(_formal_events(root))
+    points = _coverage_points(events)
+    pairing = pair_explained_intervals(
+        points, window_start_ns=start_ns, window_end_ns=end_ns)
+    durations = tuple(right - left for left, right in pairing.explained_intervals)
+    maximum, total = max(durations, default=0), sum(durations)
+    eligible = eligible_utc_hours(start_ns=start_ns, end_ns=end_ns, window_kind=window_kind)
+    usable = usable_latency_hours(
+        events, start_ns=start_ns, end_ns=end_ns,
+        explained_intervals=pairing.explained_intervals)
+    passed = window_coverage_ok(
+        window_duration_ns=end_ns - start_ns, max_single_gap_ns=maximum,
+        explained_gap_total_ns=total,
+        unexplained_gap_present=pairing.unexplained_gap_present,
+        usable_hours=usable, eligible_hours=eligible)
+    return CoverageWindowResult(pairing, maximum, total, usable, eligible, passed)
