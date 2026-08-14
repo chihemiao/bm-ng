@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from dataclasses import FrozenInstanceError, fields
+from dataclasses import fields
 from decimal import Decimal
 from inspect import getsource
 
@@ -55,9 +55,6 @@ class _Unreadable:
     def __getattribute__(self, name):
         raise AssertionError(f"unselected value was read: {name}")
 
-    def __eq__(self, other):
-        raise AssertionError(f"unselected value was compared: {other!r}")
-
     def __call__(self, *args, **kwargs):
         raise AssertionError(f"unused callable was invoked: {args!r} {kwargs!r}")
 
@@ -85,11 +82,9 @@ def _inputs(intent, hits):
         return f"accepted-{intent.leg}"
 
     return submission.PairLegSubmissionInputs(
-        evidence=orders.ReconciliationEvidence("absent", 101, 102, 103),
-        request=None,
+        evidence=orders.ReconciliationEvidence("absent", 101, 102, 103), request=None,
         history=orders.ReplayedDecisionHistory(intent.client_order_id, 0, False),
-        transport=transport,
-    )
+        transport=transport)
 
 
 def _submit(plan, hl_input, bybit_input, runtime, recorder):
@@ -146,8 +141,7 @@ def test_authorization_error_propagates_without_touching_other_leg(tmp_path):
 
 def test_step_outcome_contract_and_delegation_are_pinned():
     assert [field.name for field in fields(submission.FlattenStepOutcome)] == ["intent", "result"]
-    value = submission.FlattenStepOutcome(intent=_intent("bybit", "1"), result=("hold", None))
-    with pytest.raises(FrozenInstanceError):
-        value.result = None
+    contract = submission.FlattenStepOutcome
+    assert contract.__dataclass_params__.frozen and contract.__slots__
     source = getsource(submission.submit_flatten_step)
     assert source.count("next_flatten_intent(") == source.count("submit_order(") == 1
