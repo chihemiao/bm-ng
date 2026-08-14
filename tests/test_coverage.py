@@ -41,6 +41,7 @@ def test_gap_pairing_contract_and_clean_results_are_frozen() -> None:
     expected_reason_type = Literal[
         "application_pong_timeout",
         "subscription_ack_timeout",
+        "transport_disconnected",
         "transport_ping_timeout",
         "venue_down",
         "bybit_sequence_gap",
@@ -48,7 +49,10 @@ def test_gap_pairing_contract_and_clean_results_are_frozen() -> None:
     assert reason_type == expected_reason_type
     literal_type = next(item for item in get_args(reason_type) if item is not type(None))
     assert frozenset(get_args(literal_type)) == EXPLAINED_FAILURE_REASONS
-    reasons = "application_pong_timeout subscription_ack_timeout transport_ping_timeout"
+    reasons = (
+        "application_pong_timeout subscription_ack_timeout transport_disconnected "
+        "transport_ping_timeout"
+    )
     expected_reasons = {*reasons.split(), "venue_down", "bybit_sequence_gap"}
     assert EXPLAINED_FAILURE_REASONS == expected_reasons
     parameters = inspect.signature(pair_explained_intervals).parameters
