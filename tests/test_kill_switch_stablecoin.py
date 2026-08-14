@@ -16,12 +16,15 @@ def _rate(value="1", **changes) -> FxRate:
     return FxRate(**(values | changes))
 
 
-def _known(rate=_rate(), **changes) -> bool:
+DEFAULT_RATE = _rate()
+
+
+def _known(rate=DEFAULT_RATE, **changes) -> bool:
     values = {"now_ns": 110, "max_age_ns": 10}
     return stablecoin_spread_known(rate, **(values | changes))
 
 
-def _trigger(rate=_rate(), **changes) -> bool:
+def _trigger(rate=DEFAULT_RATE, **changes) -> bool:
     values = {
         "now_ns": 110,
         "max_age_ns": 10,

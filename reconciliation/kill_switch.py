@@ -10,12 +10,13 @@ binding anomalies require a separate Goal decision rather than implicit expansio
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Literal
 
 from execution.nonce import replay_freeze_reason, replay_signer_nonce_conflict
 from execution.wallet import AgentWalletRegistration
 from reconciliation.exposure import ExposureClock
-from reconciliation.fx import Notional
+from reconciliation.fx import FxRate, Notional, convert_usdt_to_usdc
 
 KILL_SWITCH_KEY_EXPIRY_LEAD_NS = 7 * 86_400 * 1_000_000_000
 
@@ -133,6 +134,36 @@ def exposure_kill_trigger(
         or exposure.duration_exceeded is True
         or naked_notional.amount > max_naked_notional.amount
     )
+
+
+def _fx_rate_fresh(rate: FxRate | None, *, now_ns: int, max_age_ns: int) -> bool:
+    return convert_usdt_to_usdc(
+        Decimal(1), rate=rate, now_ns=now_ns, max_age_ns=max_age_ns,
+    ) is not None
+
+
+def stablecoin_spread_known(
+    rate: FxRate | None, *, now_ns: int, max_age_ns: int,
+) -> bool:
+    """Return whether the direct USDT/USDC rate is valid, current evidence."""
+    return _fx_rate_fresh(rate, now_ns=now_ns, max_age_ns=max_age_ns)
+
+
+def stablecoin_spread_trigger(
+    rate: FxRate | None,
+    *,
+    now_ns: int,
+    max_age_ns: int,
+    max_abs_deviation: Decimal,
+) -> bool:
+    """Trigger on missing evidence or deviation strictly beyond the limit."""
+    if type(max_abs_deviation) is not Decimal:
+        raise TypeError("max_abs_deviation must be Decimal")
+    if not max_abs_deviation.is_finite() or max_abs_deviation < 0:
+        raise ValueError("max_abs_deviation must be finite and nonnegative")
+    if not _fx_rate_fresh(rate, now_ns=now_ns, max_age_ns=max_age_ns):
+        return True
+    return abs(rate.rate - Decimal(1)) > max_abs_deviation
 
 
 def key_expiry_triggered(
