@@ -60,6 +60,7 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
         inputs.registration, inputs.nonce_events, now_ns=now)
     decision = kill_switch.decide_kill_switch(
         triggered=triggered, orders_known=orders_known,
-        positions_known=positions_known, reconciliation_consistency=consistency,
+        positions_known=positions_known, naked_notional_known=True,
+        reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)
     return KillSwitchSnapshot(decision, streak, consistency)
