@@ -1,11 +1,12 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 
 from data.collector import CollectorLivenessSnapshot
 from execution.orders import FlattenIntentPlan
 from execution.wallet import AgentWalletRegistration
-from reconciliation import exposure, fx, kill_switch, legs, state
+from execution.writer import WriterAuthority, WriterLease
+from reconciliation import exposure, fx, kill_switch, legs, promotion, state
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -122,3 +123,24 @@ def build_kill_switch_flatten_plan(
         now_ns=now_ns,
         max_position_age_ns=max_position_age_ns,
     )
+
+
+def finalize_kill_switch_flatten(
+    lease: WriterLease, hyperliquid_position: object, bybit_position: object, *,
+    strategy_id: str, strategy_version: str, signal_ns: int, now_ns: int,
+    max_position_age_ns: int, stop: Callable[[], object],
+) -> WriterAuthority:
+    if not callable(stop):
+        raise TypeError("stop must be callable")
+    plan = legs.build_flatten_intent_plan(
+        hyperliquid_position, bybit_position,
+        strategy_id=strategy_id, strategy_version=strategy_version, signal_ns=signal_ns,
+        now_ns=now_ns, max_position_age_ns=max_position_age_ns,
+    )
+    if plan.hyperliquid is not None or plan.bybit is not None:
+        raise ValueError("positions are not flat")
+    promotion._require_flatten_only(lease)
+    try:
+        return promotion.demote_kill_switch_complete(lease, now_ns=now_ns)
+    finally:
+        stop()

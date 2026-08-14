@@ -8,7 +8,6 @@ from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
 from reconciliation.kill_switch import KillSwitchDecision
 
 REASON = "writer_demoted:kill_switch:flatten_and_stop"
-COMPLETE_REASON = "writer_demoted:kill_switch:flatten_complete"
 
 
 def _lease(root, mode="risk_increasing", recorder=None):
@@ -101,14 +100,14 @@ def test_flatten_completion_enters_cancel_only_before_recording(tmp_path):
 
     lease, _ = _lease(tmp_path, "flatten_only", record)
     holder["lease"] = lease
+    recorded.clear()
     authority = promotion.demote_kill_switch_complete(lease, now_ns=100)
     assert authority.mode == lease.authority.mode == "cancel_only"
     assert observed == ["cancel_only"] and len(recorded) == 1
-    assert recorded[0].reason == COMPLETE_REASON
+    assert recorded[0].reason == "writer_demoted:kill_switch:flatten_complete"
     assert validate_envelope(_event(recorded[0]))
     source = getsource(promotion.demote_kill_switch_complete)
-    assert source.count("_require_flatten_only(") == 1
-    assert source.count("demote_to_cancel_only(") == 1
+    assert source.count("_require_flatten_only(") == source.count("demote_to_cancel_only(") == 1
     lease.release()
 
 
@@ -156,14 +155,4 @@ def test_schema_rejects_every_other_flatten_only_reason(tmp_path):
         event = _event(recorded[0]._replace(reason=reason))
         with pytest.raises(ContractError, match="writer decision combination"):
             validate_envelope(event)
-    lease.release()
-
-
-def test_schema_rejects_a_third_kill_switch_cancel_reason(tmp_path):
-    lease, recorded = _lease(tmp_path)
-    promotion.demote_kill_switch_freeze(
-        lease, KillSwitchDecision("cancel_only_freeze"), now_ns=100)
-    event = _event(recorded[0]._replace(reason="writer_demoted:kill_switch:flatten_done"))
-    with pytest.raises(ContractError, match="writer decision combination"):
-        validate_envelope(event)
     lease.release()

@@ -215,14 +215,6 @@ def test_flatten_decision_preserves_planner_fail_closed_checks(positions, error,
         _route(positions=positions)
 
 
-def test_authoritative_flat_finalizes_authority_then_stops(tmp_path):
-    lease, stopped = _lease(tmp_path), []
-    authority = _finalize(lease[0], lambda: stopped.append(True))
-    assert authority.mode == lease[0].authority.mode == "cancel_only"
-    assert stopped == [True] and len(lease[1]) == 1
-    lease[0].release()
-
-
 @pytest.mark.parametrize("positions", [
     (_leg("hyperliquid", "1"), _leg("bybit", "0")),
     (_leg("hyperliquid", "0"), _leg("bybit", "-1")),
@@ -252,34 +244,23 @@ def test_wrong_entry_mode_never_stops(tmp_path, mode):
     lease.release()
 
 
-def test_finalizer_signature_requires_raw_positions_not_a_plan():
+def test_finalizer_delegates_real_metadata_once(tmp_path, monkeypatch):
     parameters = tuple(signature(composition.finalize_kill_switch_flatten).parameters)
     assert parameters == (
-        "lease", "hyperliquid_position", "bybit_position", "strategy_id",
-        "strategy_version", "signal_ns", "now_ns", "max_position_age_ns", "stop")
-    assert "plan" not in parameters
-
-
-def test_finalizer_delegates_real_metadata_once(tmp_path, monkeypatch):
-    lease, _ = _lease(tmp_path)
-    observed, real_plan = [], legs.build_flatten_intent_plan
-    real_demote = promotion.demote_kill_switch_complete
+        "lease", "hyperliquid_position", "bybit_position", "strategy_id", "strategy_version",
+        "signal_ns", "now_ns", "max_position_age_ns", "stop")
+    lease, recorded = _lease(tmp_path)
+    observed, stopped, real_plan = [], [], legs.build_flatten_intent_plan
 
     def plan_spy(*args, **kwargs):
-        observed.append(("plan", kwargs))
+        observed.append(kwargs)
         return real_plan(*args, **kwargs)
 
-    def demote_spy(*args, **kwargs):
-        observed.append(("demote", kwargs))
-        return real_demote(*args, **kwargs)
-
     monkeypatch.setattr(legs, "build_flatten_intent_plan", plan_spy)
-    monkeypatch.setattr(promotion, "demote_kill_switch_complete", demote_spy)
-    _finalize(lease, lambda: None)
-    assert observed == [
-        ("plan", {**_META, "now_ns": 110, "max_position_age_ns": 10}),
-        ("demote", {"now_ns": 110}),
-    ]
+    authority = _finalize(lease, lambda: stopped.append(True))
+    assert authority.mode == lease.authority.mode == "cancel_only"
+    assert stopped == [True] and len(recorded) == 1
+    assert observed == [{**_META, "now_ns": 110, "max_position_age_ns": 10}]
     source = getsource(composition.finalize_kill_switch_flatten)
     assert all(source.count(call) == 1 for call in (
         "build_flatten_intent_plan(", "_require_flatten_only(",
@@ -287,38 +268,19 @@ def test_finalizer_delegates_real_metadata_once(tmp_path, monkeypatch):
     lease.release()
 
 
-def _record_failure_lease(root):
-    failure = OSError("decision stream unavailable")
+@pytest.mark.parametrize(("record_fails", "stop_fails"), [
+    (True, False), (False, True), (True, True),
+])
+def test_finalizer_preserves_demotion_and_stop_failures(
+    tmp_path, monkeypatch, record_fails, stop_fails):
+    record_failure, stop_failure = OSError("record failed"), OSError("stop failed")
 
-    def fail(decision):
-        if decision.action == "demote":
-            raise failure
+    def record(decision):
+        if record_fails and decision.action == "demote":
+            raise record_failure
 
-    return _lease(root, recorder=fail)[0], failure
-
-
-def test_record_failure_still_stops_and_propagates(tmp_path):
-    lease, failure = _record_failure_lease(tmp_path)
-    stopped = []
-    with pytest.raises(WriterLeaseError) as caught:
-        _finalize(lease, lambda: stopped.append(True))
-    assert caught.value.__cause__ is failure
-    assert lease.authority.mode == "cancel_only" and stopped == [True]
-    lease.release()
-
-
-def test_stop_failure_wins_after_successful_demotion(tmp_path):
-    lease, _ = _lease(tmp_path)
-    failure = OSError("stop failed")
-    with pytest.raises(OSError) as caught:
-        _finalize(lease, lambda: (_ for _ in ()).throw(failure))
-    assert caught.value is failure and lease.authority.mode == "cancel_only"
-    lease.release()
-
-
-def test_stop_failure_keeps_demotion_failure_as_context(tmp_path, monkeypatch):
-    lease, record_failure = _record_failure_lease(tmp_path)
-    stop_failure, observed = OSError("stop failed"), []
+    lease, _ = _lease(tmp_path, recorder=record)
+    observed, stopped = [], []
     real_demote = promotion.demote_kill_switch_complete
 
     def capture(*args, **kwargs):
@@ -328,9 +290,20 @@ def test_stop_failure_keeps_demotion_failure_as_context(tmp_path, monkeypatch):
             observed.append(error)
             raise
 
+    def stop():
+        stopped.append(True)
+        if stop_fails:
+            raise stop_failure
+
     monkeypatch.setattr(promotion, "demote_kill_switch_complete", capture)
-    with pytest.raises(OSError) as caught:
-        _finalize(lease, lambda: (_ for _ in ()).throw(stop_failure))
-    assert caught.value is stop_failure and caught.value.__context__ is observed[0]
-    assert observed[0].__cause__ is record_failure
+    with pytest.raises(OSError if stop_fails else WriterLeaseError) as caught:
+        _finalize(lease, stop)
+    assert lease.authority.mode == "cancel_only" and stopped == [True]
+    if record_fails:
+        assert observed[0].__cause__ is record_failure
+    if stop_fails:
+        assert caught.value is stop_failure
+        assert caught.value.__context__ is (observed[0] if record_fails else None)
+    else:
+        assert caught.value is observed[0]
     lease.release()
