@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 import reconciliation.promotion as promotion
+from data.collector import CollectorLivenessSnapshot
 from data.contracts import VALIDITY_NS, ContractError, validate_envelope
 from execution.wallet import AgentWalletRegistration
 from execution.writer import WriterIdentity, WriterLease, WriterLeaseError
@@ -28,6 +29,12 @@ from reconciliation.state import (
 
 REGISTRATION = AgentWalletRegistration("a" * 64, 1, 1 + VALIDITY_NS)
 KEY_NOW = REGISTRATION.expires_ns - 7 * 86_400 * 1_000_000_000 + 1
+def _liveness(**changes):
+    values = dict(file_integrity_ok=True, hl_last_verified_mono_ns=95,
+                  bybit_last_verified_mono_ns=95)
+    return CollectorLivenessSnapshot(**(values | changes))
+
+
 def _state(observed_ns=100, mismatch=False, unknown=False):
     surfaces = {
         name: SurfaceEvidence(
@@ -52,6 +59,8 @@ def _state(observed_ns=100, mismatch=False, unknown=False):
 
 
 def _inputs(observed_ns=100, **changes):
+    liveness = changes.pop("liveness", _liveness())
+    max_data_gap_ns = changes.pop("max_data_gap_ns", 10)
     venues, expectations = _state(
         observed_ns, changes.pop("mismatch", False), changes.pop("unknown", False))
     values = dict(
@@ -64,6 +73,8 @@ def _inputs(observed_ns=100, **changes):
         fx_max_age_ns=10, max_abs_fx_deviation=Decimal("0.01"),
         reconciliation_observed_ns=observed_ns,
         now_ns=observed_ns, max_age_ns=0)
+    if "liveness" in inspect.signature(KillSwitchSnapshotInputs).parameters:
+        values |= dict(liveness=liveness, max_data_gap_ns=max_data_gap_ns)
     return KillSwitchSnapshotInputs(**(values | changes))
 
 
@@ -145,6 +156,28 @@ def test_snapshot_composes_stablecoin_evidence_into_the_decision_table(changes, 
     assert build_snapshot(_inputs(**changes)).decision.action == action
 
 
+@pytest.mark.parametrize("changes,action", [
+    ({}, "continue"),
+    ({"liveness": _liveness(file_integrity_ok=False)}, "cancel_only_freeze"),
+    ({"liveness": _liveness(hl_last_verified_mono_ns=None)}, "cancel_only_freeze"),
+    ({"liveness": _liveness(bybit_last_verified_mono_ns=None)}, "cancel_only_freeze"),
+    ({"liveness": _liveness(hl_last_verified_mono_ns=89)}, "flatten_and_stop"),
+    ({"liveness": _liveness(bybit_last_verified_mono_ns=89)}, "flatten_and_stop"),
+    ({"liveness": _liveness(hl_last_verified_mono_ns=101)}, "flatten_and_stop"),
+    ({"liveness": _liveness(hl_last_verified_mono_ns=89), "mismatch": True},
+     "cancel_only_freeze"),
+])
+def test_snapshot_composes_data_liveness_into_existing_decision_table(changes, action):
+    assert build_snapshot(_inputs(**changes)).decision.action == action
+
+
+def test_data_liveness_is_derived_once_and_routes_both_results() -> None:
+    source = inspect.getsource(build_snapshot)
+    assert source.count("data_liveness_evidence(") == 1
+    assert "data_liveness=data_known" in source
+    assert "or data_triggered" in source
+
+
 def test_exposure_clock_uses_the_reconciliation_cycle_not_decision_time():
     result = build_snapshot(_inputs(100, now_ns=101, max_age_ns=1))
     assert result.exposure.observed_ns == 100
@@ -197,6 +230,7 @@ def test_cycle_replay_is_idempotent_and_contradiction_is_rejected():
     {"max_naked_notional": None},
     {"fx_rate": object()}, {"fx_max_age_ns": 0},
     {"max_abs_fx_deviation": 0.01}, {"max_abs_fx_deviation": Decimal("-0.01")},
+    {"liveness": object()}, {"max_data_gap_ns": True}, {"max_data_gap_ns": -1},
 ])
 def test_invalid_state_is_never_short_circuited(changes):
     with pytest.raises((TypeError, ValueError)):
@@ -209,6 +243,7 @@ def test_snapshot_contract_is_narrow_frozen_slotted_and_keyword_only():
         "venues", "expectations", "delta", "previous_exposure", "delta_tolerance",
         "max_naked_ns", "naked_notional", "max_naked_notional",
         "fx_rate", "fx_max_age_ns", "max_abs_fx_deviation",
+        "liveness", "max_data_gap_ns",
         "reconciliation_observed_ns", "now_ns", "max_age_ns"]
     assert [field.name for field in fields(KillSwitchSnapshot)] == [
         "decision", "reconciliation_streak", "reconciliation_consistency", "exposure"]

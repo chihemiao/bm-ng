@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Literal
 
+from data.collector import CollectorLivenessSnapshot
 from execution.nonce import replay_freeze_reason, replay_signer_nonce_conflict
 from execution.wallet import AgentWalletRegistration
 from reconciliation.exposure import ExposureClock
@@ -36,9 +37,12 @@ class KnownEvidence:
     positions: bool
     naked_notional: bool
     stablecoin: bool
+    data_liveness: bool
 
     def __post_init__(self) -> None:
-        for name in ("orders", "positions", "naked_notional", "stablecoin"):
+        for name in (
+            "orders", "positions", "naked_notional", "stablecoin", "data_liveness",
+        ):
             if type(getattr(self, name)) is not bool:
                 raise TypeError(f"{name} must be a boolean")
 
@@ -119,6 +123,7 @@ def decide_kill_switch(
         known_evidence.positions,
         known_evidence.naked_notional,
         known_evidence.stablecoin,
+        known_evidence.data_liveness,
     )) or reconciliation_consistency is None
     if unknown or reconciliation_streak_triggered:
         return KillSwitchDecision("cancel_only_freeze")
@@ -189,6 +194,30 @@ def stablecoin_spread_trigger(
         rate, now_ns=now_ns, max_age_ns=max_age_ns,
         max_abs_deviation=max_abs_deviation,
     )[1]
+
+
+def data_liveness_evidence(
+    snapshot: CollectorLivenessSnapshot, *, now_ns: int, max_gap_ns: int,
+) -> tuple[bool, bool]:
+    """Classify hard data evidence and local monotonic self-consistency."""
+    if not isinstance(snapshot, CollectorLivenessSnapshot):
+        raise TypeError("snapshot must be a CollectorLivenessSnapshot")
+    for name, value in (("now_ns", now_ns), ("max_gap_ns", max_gap_ns)):
+        if type(value) is not int:
+            raise TypeError(f"{name} must be an integer")
+    if now_ns <= 0:
+        raise ValueError("now_ns must be positive")
+    if max_gap_ns < 0:
+        raise ValueError("max_gap_ns must be non-negative")
+    timestamps = (
+        snapshot.hl_last_verified_mono_ns,
+        snapshot.bybit_last_verified_mono_ns,
+    )
+    known = snapshot.file_integrity_ok and all(value is not None for value in timestamps)
+    if not known:
+        return False, True
+    triggered = any(value > now_ns or now_ns - value > max_gap_ns for value in timestamps)
+    return True, triggered
 
 
 def key_expiry_triggered(
