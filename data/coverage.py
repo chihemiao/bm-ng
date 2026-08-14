@@ -146,7 +146,7 @@ def replay_coverage_points(root: Path) -> tuple[CoveragePoint, ...]:
               for venue in _COVERAGE_VENUES}
     barrier, points, pending_gap = BybitBarrier(), [], None
     starters = {"hyperliquid": lambda _: None, "bybit": barrier.start}
-    for event in _formal_events(root):
+    for event in tuple(_formal_events(root)):
         schema, venue, conn = event["payload_schema"], event["venue"], event["conn_id"]
         state = states[venue]
         if schema == "subscription_send" and conn != state["conn"]:
