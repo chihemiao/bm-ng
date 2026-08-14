@@ -328,3 +328,66 @@ class WriterLease:
             )
             _record(self._recorder, decision, suppress=True)
         self._fd = self._authority = None
+
+
+def _writer_metadata(root: Path, account_id: str, suffix: str) -> dict:
+    if type(account_id) is not str:
+        raise TypeError("account_id must be text")
+    if not account_id:
+        raise ValueError("account_id must not be empty")
+    try:
+        path = WriterLease.path_for(root, account_id).with_suffix(suffix)
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
+    except OSError:
+        return {}
+    try:
+        safe = stat.S_ISREG((mode := os.fstat(fd).st_mode)) and stat.S_IMODE(mode) == 0o600
+        return _read_metadata(fd) if safe else {}
+    finally:
+        os.close(fd)
+
+
+def read_current_epoch(root: Path, account_id: str) -> tuple[str, int] | None:
+    metadata = _writer_metadata(root, account_id, ".lock")
+    epoch = metadata.get("lease_epoch")
+    if metadata.get("account_id") == account_id and type(epoch) is int and epoch > 0:
+        return _digest(account_id), epoch
+    return None
+
+
+def read_heartbeat(root: Path, account_id: str) -> tuple[str, int, int] | None:
+    metadata = _writer_metadata(root, account_id, ".heartbeat")
+    digest, epoch, observed = (
+        metadata.get("account_digest"), metadata.get("lease_epoch"),
+        metadata.get("observed_mono_ns"),
+    )
+    valid = set(metadata) == {"account_digest", "lease_epoch", "observed_mono_ns"}
+    valid = valid and isinstance(digest, str) and len(digest) == 64
+    valid = valid and all(char in "0123456789abcdef" for char in digest)
+    valid = valid and type(epoch) is int and epoch > 0
+    valid = valid and type(observed) is int and observed > 0
+    return (digest, epoch, observed) if valid else None
+
+
+def publish_heartbeat(lease: WriterLease, *, observed_mono_ns: int) -> None:
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be WriterLease")
+    if type(observed_mono_ns) is not int:
+        raise TypeError("observed_mono_ns must be an integer")
+    if observed_mono_ns <= 0:
+        raise ValueError("observed_mono_ns must be positive")
+    authority = lease.revalidate()
+    _require(
+        authority.mode != "cancel_only" and lease._fd is not None,
+        "heartbeat requires held primary lease",
+    )
+    payload = {"account_digest": _digest(authority.identity.account_id),
+               "lease_epoch": authority.lease_epoch, "observed_mono_ns": observed_mono_ns}
+    path, temporary = lease.path.with_suffix(".heartbeat"), lease.path.with_suffix(".heartbeat.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC | os.O_NOFOLLOW
+    fd = os.open(temporary, flags, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        _require(stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "unsafe heartbeat file")
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode())
+    os.replace(temporary, path)
