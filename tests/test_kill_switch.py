@@ -9,6 +9,8 @@ import pytest
 
 from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
 from execution.wallet import AgentWalletRegistration
+from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
 from reconciliation.kill_switch import (
     KILL_SWITCH_KEY_EXPIRY_LEAD_NS,
     KillSwitchDecision,
@@ -18,8 +20,6 @@ from reconciliation.kill_switch import (
     key_expiry_triggered,
     nonce_anomaly_triggered,
 )
-from reconciliation.exposure import ExposureClock
-from reconciliation.fx import Notional
 
 DAY_NS = 86_400 * 1_000_000_000
 ISSUED_NS = DAY_NS
