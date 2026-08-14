@@ -1,4 +1,4 @@
-from dataclasses import fields
+from dataclasses import asdict, fields
 from inspect import Parameter, getsource, signature
 
 import pytest
@@ -117,3 +117,115 @@ def test_orchestrator_has_one_authority_gate_and_no_kill_switch_policy():
     assert source.count("run(bybit_transport)") == 1
     assert "KillSwitchDecision" not in module_source
     assert "reconciliation.kill_switch" not in module_source
+
+
+@pytest.mark.parametrize(
+    ("name", "field_names"),
+    [
+        ("HLCancelTarget", ["coin", "oid"]),
+        ("HLCancelBatch", ["targets"]),
+        ("BybitCancelScope", ["category", "settle_coin"]),
+    ],
+)
+def test_cancel_request_values_are_closed_keyword_only(name, field_names):
+    value_type = getattr(cancel, name)
+    assert [field.name for field in fields(value_type)] == field_names
+    assert value_type.__dataclass_params__.frozen
+    assert value_type.__slots__ == tuple(field_names)
+    assert all(
+        value.kind is Parameter.KEYWORD_ONLY
+        for value in signature(value_type).parameters.values()
+    )
+
+
+def test_hl_cancel_batch_keeps_wire_order_extras_and_duplicates():
+    batch = cancel.build_hl_cancel_batch(
+        [
+            {"coin": "ETH", "oid": 2, "ignored": "wire detail"},
+            {"coin": "BTC", "oid": 0},
+            {"coin": "ETH", "oid": 2},
+        ]
+    )
+    assert batch == cancel.HLCancelBatch(
+        targets=(
+            cancel.HLCancelTarget(coin="ETH", oid=2),
+            cancel.HLCancelTarget(coin="BTC", oid=0),
+            cancel.HLCancelTarget(coin="ETH", oid=2),
+        )
+    )
+
+
+def test_hl_empty_cancel_payload_is_an_empty_batch():
+    assert cancel.build_hl_cancel_batch([]) == cancel.HLCancelBatch(targets=())
+
+
+def test_hl_cancel_oid_accepts_the_uint64_upper_bound():
+    batch = cancel.build_hl_cancel_batch([{"coin": "BTC", "oid": 2**64 - 1}])
+    assert batch.targets[0].oid == 2**64 - 1
+
+
+@pytest.mark.parametrize("oid", [True, "1", 1.0])
+def test_hl_cancel_oid_rejects_non_integer_types(oid):
+    with pytest.raises(TypeError, match="oid"):
+        cancel.build_hl_cancel_batch([{"coin": "BTC", "oid": oid}])
+
+
+@pytest.mark.parametrize("oid", [-1, 2**64])
+def test_hl_cancel_oid_rejects_values_outside_uint64(oid):
+    with pytest.raises(ValueError, match="oid"):
+        cancel.build_hl_cancel_batch([{"coin": "BTC", "oid": oid}])
+
+
+@pytest.mark.parametrize(
+    ("coin", "error"),
+    [("", ValueError), ("SOL", ValueError), (7, TypeError)],
+)
+def test_hl_cancel_coin_is_a_typed_t0a_closed_set(coin, error):
+    with pytest.raises(error, match="coin"):
+        cancel.build_hl_cancel_batch([{"coin": coin, "oid": 1}])
+
+
+def test_hl_cancel_payload_must_be_a_list_of_dicts():
+    with pytest.raises(TypeError, match="payload"):
+        cancel.build_hl_cancel_batch({})
+    with pytest.raises(TypeError, match="row"):
+        cancel.build_hl_cancel_batch([[]])
+
+
+@pytest.mark.parametrize("missing", ["coin", "oid"])
+def test_hl_cancel_missing_field_rejects_the_entire_batch(missing):
+    malformed = {"coin": "ETH", "oid": 2}
+    malformed.pop(missing)
+    with pytest.raises(ValueError, match="missing"):
+        cancel.build_hl_cancel_batch(
+            [{"coin": "BTC", "oid": 1}, malformed, {"coin": "ETH", "oid": 3}]
+        )
+
+
+def test_bybit_cancel_scope_is_exactly_the_t0a_usdt_linear_scope():
+    scope = cancel.BybitCancelScope(category="linear", settle_coin="USDT")
+    assert asdict(scope) == {"category": "linear", "settle_coin": "USDT"}
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"category": "spot", "settle_coin": "USDT"},
+        {"category": "linear", "settle_coin": "USDC"},
+    ],
+)
+def test_bybit_cancel_scope_rejects_other_domains(values):
+    with pytest.raises(ValueError):
+        cancel.BybitCancelScope(**values)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"category": 1, "settle_coin": "USDT"},
+        {"category": "linear", "settle_coin": 1},
+    ],
+)
+def test_bybit_cancel_scope_rejects_non_string_fields(values):
+    with pytest.raises(TypeError):
+        cancel.BybitCancelScope(**values)
