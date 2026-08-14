@@ -2,7 +2,13 @@
 
 from collections.abc import Mapping
 
-from reconciliation.hl_common import COINS, _canonical_rows, _fingerprint, _valid_observed_ns
+from reconciliation.hl_common import (
+    COINS,
+    HL_UINT64_MAX,
+    _canonical_rows,
+    _fingerprint,
+    _valid_observed_ns,
+)
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 ORDER_FIELDS = frozenset({"coin", "limitPx", "oid", "side", "sz", "timestamp"})
@@ -14,7 +20,7 @@ def _order_row(row: object) -> tuple[str, str] | None:
         return None
     oid = row["oid"]
     valid = row["coin"] in COINS and row["side"] in {"A", "B"}
-    if not valid or type(oid) is not int or oid < 0:
+    if not valid or type(oid) is not int or not 0 <= oid <= HL_UINT64_MAX:
         return None
     try:
         return _fingerprint(row), _fingerprint({"oid": oid})

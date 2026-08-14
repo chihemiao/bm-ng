@@ -7,6 +7,7 @@ from reconciliation.state import canonical_fingerprint
 _fingerprint = canonical_fingerprint
 
 COINS = frozenset({"BTC", "ETH"})
+HL_UINT64_MAX = 2**64 - 1
 
 
 def _valid_observed_ns(observed_ns: object) -> int:
