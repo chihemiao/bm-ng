@@ -1,8 +1,14 @@
 """Pure Gate 1 window arithmetic over already-classified coverage evidence."""
 
+from typing import Literal
+
 MAX_EXPLAINED_GAP_NS = 4 * 3_600 * 1_000_000_000
 MAX_EXPLAINED_GAP_PERCENT = 2
 MIN_LATENCY_USABLE_HOUR_PERCENT = 95
+UTC_HOUR_NS = 3_600_000_000_000
+UTC_DAY_NS = 24 * UTC_HOUR_NS
+GATE1_WINDOW_HOURS = 168
+COMPLETION_WINDOW_HOURS = 720
 
 
 def _require(condition: bool, message: str) -> None:
@@ -12,6 +18,39 @@ def _require(condition: bool, message: str) -> None:
 
 def _nonnegative_exact_int(value: object) -> bool:
     return type(value) is int and value >= 0
+
+
+def eligible_utc_hours(
+    *,
+    start_ns: int,
+    end_ns: int,
+    window_kind: Literal["gate1_7d", "completion_30d"],
+) -> int:
+    """Validate one frozen half-open UTC coverage window and return its hours."""
+    _require(type(start_ns) is int, "invalid start_ns type")
+    _require(type(end_ns) is int, "invalid end_ns type")
+    _require(start_ns >= 0 and end_ns > start_ns, "invalid UTC window range")
+    _require(
+        start_ns % UTC_HOUR_NS == 0 and end_ns % UTC_HOUR_NS == 0,
+        "UTC hour alignment required",
+    )
+    _require(
+        type(window_kind) is str
+        and window_kind in {"gate1_7d", "completion_30d"},
+        "invalid window_kind",
+    )
+    expected_hours = (
+        GATE1_WINDOW_HOURS
+        if window_kind == "gate1_7d"
+        else COMPLETION_WINDOW_HOURS
+    )
+    actual_hours = (end_ns - start_ns) // UTC_HOUR_NS
+    _require(actual_hours == expected_hours, "invalid window duration")
+    _require(
+        window_kind != "completion_30d" or start_ns % UTC_DAY_NS == 0,
+        "completion window must be UTC day aligned",
+    )
+    return actual_hours
 
 
 def window_coverage_ok(
