@@ -5,6 +5,7 @@ import time
 from collections import namedtuple
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from data.contracts import ContractError, bybit_update_gap, validate_envelope
 from data.schema_dispatch import BYBIT_WIRE_SYMBOLS
@@ -24,6 +25,11 @@ BYBIT_URI = "wss://stream.bybit.com/v5/public/linear"
 
 @dataclass(frozen=True, slots=True)
 class CollectorConfig:
+    """Record mode is candidate-window provenance, not Gate 1 passage.
+
+    Failure events stay formal for later coverage evaluation.
+    """
+
     root: Path
     boot_id: str
     hl_uri: str = HL_URI
@@ -35,9 +41,15 @@ class CollectorConfig:
     ack_timeout: float = 10
     max_reconnects: int = 3
     reconnect_backoff: float = 5
+    record_mode: Literal["trial", "formal"] = "trial"
+
+    def __post_init__(self) -> None:
+        if self.record_mode not in {"trial", "formal"}:
+            raise ContractError("invalid record_mode")
 
 
-CollectorReport = namedtuple("CollectorReport", "file_integrity_ok hl_liveness bybit_liveness")
+CollectorReport = namedtuple(
+    "CollectorReport", "file_integrity_ok hl_liveness bybit_liveness record_mode")
 
 
 def _hl_decode(message: str | bytes) -> DecodedFrame:
@@ -82,10 +94,13 @@ def _protocols() -> tuple[SessionProtocol, SessionProtocol]:
 
 
 class _Sink:
-    def __init__(self, writer: ShardWriter, boot_id: str, stop: asyncio.Event) -> None:
+    def __init__(
+        self, writer: ShardWriter, boot_id: str, stop: asyncio.Event, record_mode: str,
+    ) -> None:
         self.writer = writer
         self.boot_id = boot_id
         self.stop = stop
+        self.record_mode = record_mode
         self.previous_u: dict[str, int] = {}
         self.sequence_ok = True
         self.ready_seen = {"hyperliquid": False, "bybit": False}
@@ -119,7 +134,10 @@ class _Sink:
             config.application_ping_interval, config.application_pong_timeout,
             config.ack_timeout, config.max_reconnects,
         ]
-        extra = {"status": "provisional", "provisional_defaults": [20, 10, 20, 10, 10, 3]}
+        extra = {
+            "status": "provisional", "provisional_defaults": [20, 10, 20, 10, 10, 3],
+            "record_mode": config.record_mode,
+        }
         self._ops("collector", "collector_config", extra | {"active": active})
 
     def _sequence(self, record: SessionRecord) -> None:
@@ -160,7 +178,8 @@ class _Sink:
             "payload_schema": schema or record.payload_schema, "venue": venue,
             "conn_id": record.conn_id, "boot_id": self.boot_id,
             "recv_wall_ns": record.recv_wall_ns, "recv_mono_ns": record.recv_mono_ns,
-            "source": "live_public_ws", "payload": payload, "is_gate1_record": False,
+            "source": "live_public_ws", "payload": payload,
+            "is_gate1_record": self.record_mode == "formal",
         }
         validate_envelope(event)
         encoded = json.dumps(event, sort_keys=True, separators=(",", ":")).encode()
@@ -190,9 +209,20 @@ async def _supervise(
             pass
 
 
+def _replay_integrity(root: Path, record_mode: str) -> bool:
+    expected_marker = record_mode == "formal"
+    try:
+        for raw in replay_records(root):
+            if validate_envelope(json.loads(raw)).get("is_gate1_record") is not expected_marker:
+                raise ContractError("record mode mismatch")
+    except (ContractError, OSError, json.JSONDecodeError):
+        return False
+    return True
+
+
 async def run_collector(config: CollectorConfig, stop: asyncio.Event) -> CollectorReport:
     writer = ShardWriter(config.root, config.boot_id)
-    sink = _Sink(writer, config.boot_id, stop)
+    sink = _Sink(writer, config.boot_id, stop, config.record_mode)
     sink.config_event(config)
     hl_protocol, bybit_protocol = _protocols()
     try:
@@ -203,13 +233,7 @@ async def run_collector(config: CollectorConfig, stop: asyncio.Event) -> Collect
     finally:
         stop.set()
         writer.close()
-    integrity = True
-    try:
-        for raw in replay_records(config.root):
-            if validate_envelope(json.loads(raw)).get("is_gate1_record") is not False:
-                raise ContractError("trial marker missing")
-    except (ContractError, OSError, json.JSONDecodeError):
-        integrity = False
+    integrity = _replay_integrity(config.root, config.record_mode)
     hl = HLLivenessEvidence(
         "transport_ping_timeout" not in sink.failures["hyperliquid"],
         sink.application_pong_seen["hyperliquid"],
@@ -220,4 +244,4 @@ async def run_collector(config: CollectorConfig, stop: asyncio.Event) -> Collect
     bybit = BybitLivenessEvidence(
         "transport_ping_timeout" not in sink.failures["bybit"],
         sink.application_pong_seen["bybit"], sink.sequence_ok)
-    return CollectorReport(integrity, hl, bybit)
+    return CollectorReport(integrity, hl, bybit, config.record_mode)
