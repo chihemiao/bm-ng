@@ -27,7 +27,7 @@ def _serialized(leg="hyperliquid", quantity="1E+2"):
     intent = orders.rehydrate_order_intent(
         "funding-carry", "git-deadbeef", 100, leg,
         symbol="BTC", side="buy", quantity=Decimal(quantity),
-        replacement_ordinal=2,
+        reduce_only=False, replacement_ordinal=2,
     )
     request = order_request_record(
         intent, 110, account_digest="a" * 64, lease_epoch=1,
@@ -101,7 +101,8 @@ def test_order_request_serializer_emits_a_valid_complete_event(leg, quantity) ->
         "payload": {
             "strategy_id": "funding-carry", "strategy_version": "git-deadbeef",
             "signal_ns": 100, "leg": leg, "symbol": "BTC", "side": "buy",
-            "quantity": quantity, "replacement_ordinal": 2, "recorded_ns": 110,
+            "quantity": quantity, "reduce_only": False,
+            "replacement_ordinal": 2, "recorded_ns": 110,
             "account_digest": "a" * 64, "lease_epoch": 1,
             "writer_instance_id": "writer-one", "wallet_fingerprint": "b" * 64,
             "allocated_nonce": request.allocated_nonce,
@@ -121,7 +122,7 @@ def test_serialize_rejects_an_intent_record_mismatch(changes) -> None:
     intent, _, _ = _serialized()
     fields = (
         "strategy_id", "strategy_version", "signal_ns", "leg",
-        "symbol", "side", "quantity", "replacement_ordinal",
+        "symbol", "side", "quantity", "reduce_only", "replacement_ordinal",
     )
     values = {field: getattr(intent, field) for field in fields}
     values.update(changes)
@@ -163,6 +164,29 @@ def test_order_request_event_round_trips_without_rewriting_quantity(leg, quantit
     assert restored_intent == intent and restored_request == request
     assert restored_intent.quantity.as_tuple() == intent.quantity.as_tuple()
     assert event == before
+
+
+@pytest.mark.parametrize("reduce_only", [False, True])
+def test_order_request_event_round_trips_reduce_only_exactly(reduce_only) -> None:
+    intent = orders.rehydrate_order_intent(
+        "funding-carry", "git-deadbeef", 100, "hyperliquid",
+        symbol="BTC", side="buy", quantity=Decimal("1"),
+        replacement_ordinal=0, reduce_only=reduce_only,
+    )
+    event = _serde().serialize_order_request(
+        intent, _request(intent), conn_id="conn-1", boot_id="boot-1",
+        recv_wall_ns=120, recv_mono_ns=90, source="execution", seq_within_boot=3,
+    )
+    restored, _ = _serde().rehydrate_order_request(event)
+    assert event["payload"]["reduce_only"] is reduce_only
+    assert restored.reduce_only is reduce_only
+
+
+def test_rehydrate_rejects_a_bound_request_missing_reduce_only() -> None:
+    _, _, event = _serialized()
+    event["payload"].pop("reduce_only", None)
+    with pytest.raises(ContractError, match="partial_binding:reduce_only"):
+        _serde().rehydrate_order_request(event)
 
 
 @pytest.mark.parametrize(

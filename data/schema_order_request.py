@@ -72,6 +72,7 @@ def _order_value_errors(payload: Mapping[str, object]) -> tuple[str, ...]:
         ("side", isinstance(payload["side"], str) and payload["side"] in ORDER_SIDES),
         ("replacement_ordinal", _valid_ns(payload["replacement_ordinal"])),
         ("quantity", _valid_quantity(payload["quantity"])),
+        ("reduce_only", type(payload["reduce_only"]) is bool),
         ("recorded_ns", recorded_valid),
     )
     errors = [f"order_request:invalid_{field}" for field, valid in checks if not valid]

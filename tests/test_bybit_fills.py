@@ -276,7 +276,7 @@ def test_bybit_intent_assembly_passes_one_intent_identity_and_direction(
     module = _module()
     intent = make_order_intent(
         "funding-carry", "git-deadbeef", 100, "bybit",
-        symbol=symbol, side=side, quantity=Decimal("0.1"),
+        symbol=symbol, side=side, quantity=Decimal("0.1"), reduce_only=False,
     )
     row = {
         **ROW, "symbol": wire_symbol, "side": wire_side,
@@ -302,7 +302,7 @@ def test_bybit_intent_assembly_passes_one_intent_identity_and_direction(
         (
             make_order_intent(
                 "funding-carry", "git-deadbeef", 100, "hyperliquid",
-                symbol="BTC", side="buy", quantity=Decimal("0.1"),
+                symbol="BTC", side="buy", quantity=Decimal("0.1"), reduce_only=False,
             ),
             ValueError,
             "bybit",

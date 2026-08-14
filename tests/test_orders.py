@@ -31,6 +31,7 @@ def _intent(**changes):
         "symbol": "BTC",
         "side": "buy",
         "quantity": Decimal("1"),
+        "reduce_only": False,
     }
     values.update(changes)
     return make_order_intent(**values)
@@ -150,18 +151,42 @@ def test_new_order_trade_terms_are_required() -> None:
     assert all(parameters[name].default is Parameter.empty for name in names)
 
 
+def test_reduce_only_is_a_required_keyword_only_intent_term() -> None:
+    for constructor in (make_order_intent, orders.rehydrate_order_intent):
+        parameter = signature(constructor).parameters["reduce_only"]
+        assert parameter.kind is Parameter.KEYWORD_ONLY
+        assert parameter.default is Parameter.empty
+
+
+@pytest.mark.parametrize("reduce_only", [False, True])
+def test_reduce_only_accepts_only_explicit_boolean_semantics(reduce_only) -> None:
+    assert _intent(reduce_only=reduce_only).reduce_only is reduce_only
+
+
+@pytest.mark.parametrize("reduce_only", [0, 1, None])
+def test_reduce_only_rejects_non_boolean_values(reduce_only) -> None:
+    with pytest.raises(TypeError, match="reduce_only"):
+        _intent(reduce_only=reduce_only)
+
+
+def test_reduce_only_changes_the_client_order_identity() -> None:
+    ordinary = _intent(reduce_only=False)
+    reducing = _intent(reduce_only=True)
+    assert ordinary.client_order_id != reducing.client_order_id
+
+
 def test_rehydrate_order_intent_exposes_the_durable_ordinal_boundary() -> None:
     parameters = signature(orders.rehydrate_order_intent).parameters
     assert tuple(parameters) == (
         "strategy_id", "strategy_version", "signal_ns", "leg",
-        "symbol", "side", "quantity", "replacement_ordinal",
+        "symbol", "side", "quantity", "reduce_only", "replacement_ordinal",
     )
     kinds = tuple(parameter.kind for parameter in parameters.values())
-    assert kinds == (Parameter.POSITIONAL_OR_KEYWORD,) * 4 + (Parameter.KEYWORD_ONLY,) * 4
+    assert kinds == (Parameter.POSITIONAL_OR_KEYWORD,) * 4 + (Parameter.KEYWORD_ONLY,) * 5
     restored = orders.rehydrate_order_intent(
         strategy_id="funding-carry", strategy_version="git-deadbeef",
         signal_ns=100, leg="hyperliquid", symbol="BTC", side="buy",
-        quantity=Decimal("1E+2"), replacement_ordinal=2,
+        quantity=Decimal("1E+2"), reduce_only=False, replacement_ordinal=2,
     )
     initial = _intent(quantity=Decimal("1E+2"))
     assert restored.replacement_ordinal == 2
@@ -178,11 +203,11 @@ def test_t0a_pair_intents_freeze_the_two_named_equal_quantity_legs() -> None:
     assert isinstance(pair, T0APairIntents) and not hasattr(pair, "__dict__")
     assert pair.hyperliquid == make_order_intent(
         "funding-carry", "git-deadbeef", 100, "hyperliquid",
-        symbol="BTC", side="sell", quantity=Decimal("1"),
+        symbol="BTC", side="sell", quantity=Decimal("1"), reduce_only=False,
     )
     assert pair.bybit == make_order_intent(
         "funding-carry", "git-deadbeef", 100, "bybit",
-        symbol="BTC", side="buy", quantity=Decimal("1"),
+        symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
     )
     assert pair.hyperliquid.client_order_id != pair.bybit.client_order_id
     with pytest.raises(AttributeError):
@@ -234,11 +259,11 @@ def test_t0a_pair_match_freezes_topology_but_not_independent_replacement() -> No
         pair,
         hyperliquid=make_order_intent(
             "funding-carry", "git-deadbeef", 100, "hyperliquid",
-            symbol="BTC", side="buy", quantity=Decimal("1"),
+            symbol="BTC", side="buy", quantity=Decimal("1"), reduce_only=False,
         ),
         bybit=make_order_intent(
             "funding-carry", "git-deadbeef", 100, "bybit",
-            symbol="BTC", side="sell", quantity=Decimal("1"),
+            symbol="BTC", side="sell", quantity=Decimal("1"), reduce_only=False,
         ),
     )
     assert not t0a_pair_intents_match(swapped)
@@ -247,6 +272,11 @@ def test_t0a_pair_match_freezes_topology_but_not_independent_replacement() -> No
         bybit=replace(pair.bybit, leg="hyperliquid"),
     )
     assert not t0a_pair_intents_match(wrong_legs)
+    reducing = T0APairIntents(
+        hyperliquid=_intent(side="sell", reduce_only=True),
+        bybit=_intent(leg="bybit", side="buy", reduce_only=True),
+    )
+    assert not t0a_pair_intents_match(reducing)
     replaced = replacement_intent(
         pair.bybit, _evidence("cancelled"), quantity=pair.bybit.quantity,
     )
@@ -333,12 +363,13 @@ def test_only_post_request_absence_can_submit_or_reject_a_stale_signal() -> None
 
 
 def test_replacement_requires_complete_cancelled_or_rejected_evidence() -> None:
-    intent = _intent()
+    intent = _intent(reduce_only=True)
     replacement = replacement_intent(intent, _evidence("cancelled"), quantity=Decimal("2"))
     assert replacement.replacement_ordinal == 1
     assert replacement.client_order_id != intent.client_order_id
     assert (replacement.symbol, replacement.side) == (intent.symbol, intent.side)
     assert replacement.quantity == Decimal("2")
+    assert replacement.reduce_only
     parameters = signature(replacement_intent).parameters
     assert set(parameters) == {"previous", "evidence", "quantity"}
     assert parameters["quantity"].kind is Parameter.KEYWORD_ONLY

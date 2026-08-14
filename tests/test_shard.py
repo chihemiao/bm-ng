@@ -107,6 +107,7 @@ def _order_request(
         "symbol": "BTC",
         "side": "buy",
         "quantity": "1",
+        "reduce_only": False,
         "recorded_ns": 2,
     }
     payload.update(changes)
