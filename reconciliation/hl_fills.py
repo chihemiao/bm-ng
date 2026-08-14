@@ -8,7 +8,7 @@ from data.replay_order import OrderBinding
 from data.schema_dispatch import ORDER_SIDES
 from data.shard import EventReplay
 from execution.orders import OrderIntent
-from reconciliation.hl_common import COINS, _fingerprint, _valid_observed_ns
+from reconciliation.hl_common import COINS, HL_UINT64_MAX, _fingerprint, _valid_observed_ns
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 FILL_REQUIRED_FIELDS = frozenset(
@@ -18,9 +18,6 @@ FILL_REQUIRED_FIELDS = frozenset(
     }
 )
 FILL_OPTIONAL_FIELDS = frozenset({"builderFee", "liquidation"})
-HL_UINT64_MAX = 2**64 - 1
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HLFilledQuantity:
     client_order_id: str
