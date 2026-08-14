@@ -13,14 +13,8 @@ from reconciliation.state import CanonicalSet, SurfaceEvidence
 _STATE = CanonicalSet("positions.state", 1, frozenset({"state"}))
 _IDENTITY = CanonicalSet("positions.identity", 1, frozenset({"identity"}))
 _EVIDENCE = SurfaceEvidence(
-    observed_ns=100,
-    fetched_count=1,
-    page_complete=True,
-    truncated=False,
-    unknown_count=0,
-    mismatch_count=0,
-    entities=_STATE,
-    identities=_IDENTITY,
+    observed_ns=100, fetched_count=1, page_complete=True, truncated=False,
+    unknown_count=0, mismatch_count=0, entities=_STATE, identities=_IDENTITY,
 )
 _META = {"strategy_id": "funding-carry", "strategy_version": "git-deadbeef", "signal_ns": 0}
 
@@ -37,30 +31,24 @@ def _build(hl="-2", bybit="1", *, positions=None, **changes):
 
 def _intent(leg="hyperliquid", *, reduce_only=True):
     return orders.make_order_intent(
-        **_META,
-        leg=leg,
-        symbol="BTC",
-        side="buy",
-        quantity=Decimal("1"),
-        reduce_only=reduce_only,
+        **_META, leg=leg, symbol="BTC", side="buy",
+        quantity=Decimal("1"), reduce_only=reduce_only,
     )
 
 
 def _plan(**changes):
-    return orders.FlattenIntentPlan(**{**_META, "hyperliquid": None, "bybit": None, **changes})
+    return orders.FlattenIntentPlan(
+        **{**_META, "hyperliquid": None, "bybit": None, **changes}
+    )
 
 
 def test_each_nonzero_position_gets_an_independent_reduce_only_intent():
     plan = _build()
     assert (plan.hyperliquid.leg, plan.hyperliquid.side, plan.hyperliquid.quantity) == (
-        "hyperliquid",
-        "buy",
-        Decimal("2"),
+        "hyperliquid", "buy", Decimal("2"),
     )
     assert (plan.bybit.leg, plan.bybit.side, plan.bybit.quantity) == (
-        "bybit",
-        "sell",
-        Decimal("1"),
+        "bybit", "sell", Decimal("1"),
     )
 
 
