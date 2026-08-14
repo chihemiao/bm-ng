@@ -2,6 +2,7 @@
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from execution.cancel import (
     HL_SCHEDULE_MIN_LEAD_MS,
@@ -9,7 +10,7 @@ from execution.cancel import (
     bind_bybit_cancel,
     bind_hl_schedule_cancel,
 )
-from execution.writer import WriterLease
+from execution.writer import WriterLease, read_current_epoch
 from execution.writer import read_heartbeat as read_heartbeat
 
 
@@ -53,6 +54,55 @@ def request_bybit_cancel_on_timeout(
     if healthy:
         return None
     return BybitCancelRequested(response=transport())
+
+
+async def run_until_cancel_requested(
+    *,
+    root: Path,
+    account_id: str,
+    stop_requested: Callable[[], bool],
+    mono_ns: Callable[[], int],
+    wait_ms: Callable[[int], Awaitable[None]],
+    interval_ms: int,
+    max_gap_ns: int,
+    scope: BybitCancelScope,
+    cancel_all: Callable[..., object],
+) -> BybitCancelRequested | None:
+    """Return after one request enters awaiting_authoritative_confirmation.
+
+    Cancellation causes no further checks or wait and no retry in this loop.
+    """
+    if not isinstance(root, Path):
+        raise TypeError("root must be Path")
+    if type(account_id) is not str:
+        raise TypeError("account_id must be a string")
+    if not account_id:
+        raise ValueError("account_id must not be empty")
+    if not all(map(callable, (stop_requested, mono_ns, wait_ms, cancel_all))):
+        raise TypeError("loop callbacks must be callable")
+    if type(interval_ms) is not int or type(max_gap_ns) is not int:
+        raise TypeError("loop timing must use integers")
+    if interval_ms <= 0 or max_gap_ns <= 0:
+        raise ValueError("loop timing must be positive")
+    if not isinstance(scope, BybitCancelScope):
+        raise TypeError("scope must be BybitCancelScope")
+
+    while not stop_requested():
+        current_ns = mono_ns()
+        lock_identity = read_current_epoch(root, account_id)
+        heartbeat = read_heartbeat(root, account_id)
+        result = request_bybit_cancel_on_timeout(
+            lock_identity,
+            heartbeat,
+            now_mono_ns=current_ns,
+            max_gap_ns=max_gap_ns,
+            scope=scope,
+            cancel_all=cancel_all,
+        )
+        if result is not None:
+            return result
+        await wait_ms(interval_ms)
+    return None
 
 
 def renew_hl_dead_man(
