@@ -1,4 +1,5 @@
 import inspect
+from typing import Literal, get_args, get_type_hints
 
 import pytest
 
@@ -36,6 +37,17 @@ def _pair(points: list[CoveragePoint], *, start_ns: int = 0, end_ns: int = 100) 
 def test_gap_pairing_contract_and_clean_results_are_frozen() -> None:
     assert CoveragePoint._fields == ("venue", "observed_ns", "kind", "reason")
     assert PairingResult._fields == ("explained_intervals", "unexplained_gap_present")
+    reason_type = get_type_hints(CoveragePoint)["reason"]
+    expected_reason_type = Literal[
+        "application_pong_timeout",
+        "subscription_ack_timeout",
+        "transport_ping_timeout",
+        "venue_down",
+        "bybit_sequence_gap",
+    ] | None
+    assert reason_type == expected_reason_type
+    literal_type = next(item for item in get_args(reason_type) if item is not type(None))
+    assert frozenset(get_args(literal_type)) == EXPLAINED_FAILURE_REASONS
     reasons = "application_pong_timeout subscription_ack_timeout transport_ping_timeout"
     expected_reasons = {*reasons.split(), "venue_down", "bybit_sequence_gap"}
     assert EXPLAINED_FAILURE_REASONS == expected_reasons
