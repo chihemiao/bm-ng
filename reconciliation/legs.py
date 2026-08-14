@@ -7,8 +7,10 @@ from decimal import Decimal
 from data.shard import EventReplay
 from execution.order_serde import rehydrate_order_request
 from execution.orders import (
+    FlattenIntentPlan,
     ReconciliationEvidence,
     T0APairIntents,
+    make_order_intent,
     t0a_pair_intents_match,
 )
 from reconciliation.bybit_surface import (
@@ -16,6 +18,7 @@ from reconciliation.bybit_surface import (
     build_intent_bybit_filled_quantity,
 )
 from reconciliation.clock import StateClock, advance_state_clock
+from reconciliation.exposure import LegPosition, net_delta
 from reconciliation.hl_fills import HLFilledQuantity, build_replayed_hl_filled_quantity
 from reconciliation.state import (
     VENUES,
@@ -37,6 +40,38 @@ class LegOutcome:
 class PairState:
     state: str
     unresolved: tuple[tuple[str, str], ...]
+
+
+def build_flatten_intent_plan(
+    hyperliquid_position: LegPosition, bybit_position: LegPosition, *,
+    strategy_id: str, strategy_version: str, signal_ns: int,
+    now_ns: int, max_position_age_ns: int,
+) -> FlattenIntentPlan:
+    """Build independent reduce-only intents from authoritative positions."""
+    slots = (("hyperliquid", hyperliquid_position), ("bybit", bybit_position))
+    for venue, position in slots:
+        if not isinstance(position, LegPosition):
+            raise TypeError(f"{venue}_position must be a LegPosition")
+        if position.venue != venue:
+            raise ValueError("leg positions must match their declared venue slots")
+    if net_delta(
+        (hyperliquid_position, bybit_position), symbol=hyperliquid_position.symbol,
+        now_ns=now_ns, max_age_ns=max_position_age_ns,
+    ) is None:
+        raise ValueError("both leg positions must be authoritative")
+    intents = []
+    for venue, position in slots:
+        quantity = position.signed_quantity
+        intent = None if quantity == 0 else make_order_intent(
+            strategy_id, strategy_version, signal_ns, venue,
+            symbol=position.symbol, side="sell" if quantity > 0 else "buy",
+            quantity=abs(quantity), reduce_only=True,
+        )
+        intents.append(intent)
+    return FlattenIntentPlan(
+        strategy_id=strategy_id, strategy_version=strategy_version, signal_ns=signal_ns,
+        hyperliquid=intents[0], bybit=intents[1],
+    )
 
 
 def build_order_reconciliation_evidence(
