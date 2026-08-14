@@ -6,9 +6,10 @@ from functools import partial
 from importlib import import_module
 from pathlib import Path
 
+import pytest
 from websockets.asyncio.server import serve
 
-from data.shard import replay_records
+from data.shard import ShardWriter, replay_records
 
 collector = import_module("data.collector")
 schema_dispatch = import_module("data.schema_dispatch")
@@ -95,7 +96,15 @@ async def _normal_handler(websocket, venue: str) -> None:
     await websocket.wait_closed()
 
 
-async def _assembled_scenario(root: Path) -> None:
+def _assert_mixed_mode_fails(root: Path, event: dict) -> None:
+    event["is_gate1_record"] = False
+    writer = ShardWriter(root.parent / "mixed", "mixed")
+    writer.append(json.dumps(event).encode(), event["recv_wall_ns"])
+    writer.close()
+    assert not collector._replay_integrity(root.parent / "mixed", "formal")
+
+
+async def _assembled_scenario(root: Path, record_mode: str | None = None) -> None:
     stop = asyncio.Event()
     hl = partial(_normal_handler, venue="hyperliquid")
     bybit = partial(_normal_handler, venue="bybit")
@@ -103,14 +112,16 @@ async def _assembled_scenario(root: Path) -> None:
         serve(hl, "127.0.0.1", 0, ping_interval=None) as hl_server,
         serve(bybit, "127.0.0.1", 0, ping_interval=None) as bybit_server,
     ):
+        changes = {} if record_mode is None else {"record_mode": record_mode}
         task = asyncio.create_task(
-            run_collector(_config(root, _uri(hl_server), _uri(bybit_server)), stop)
+            run_collector(_config(root, _uri(hl_server), _uri(bybit_server), **changes), stop)
         )
         await asyncio.sleep(0.08)
         stop.set()
         report = await asyncio.wait_for(task, 2)
 
     events = _events(root)
+    expected_mode, expected_marker = record_mode or "trial", record_mode == "formal"
     sends = [event for event in events if event["payload_schema"] == "subscription_send"]
     assert [
         sum(event["venue"] == venue for event in sends) for venue in ("hyperliquid", "bybit")
@@ -120,7 +131,7 @@ async def _assembled_scenario(root: Path) -> None:
         "hyperliquid",
         "bybit",
     }
-    assert all(event["is_gate1_record"] is False for event in events)
+    assert all(event["is_gate1_record"] is expected_marker for event in events)
     early = [event for event in events if event["payload_schema"] == "pre_ack_frame"]
     assert {event["venue"] for event in early} == {"hyperliquid", "bybit"}
     sent_frames = [json.loads(base64.b64decode(event["payload"]["raw"])) for event in sends]
@@ -130,8 +141,9 @@ async def _assembled_scenario(root: Path) -> None:
     assert all(frame["args"] == [frame["req_id"]] for frame in sent_frames[8:])
     config_event = next(event for event in events if event["payload_schema"] == "collector_config")
     assert config_event["payload"]["status"] == "provisional"
+    assert config_event["payload"]["record_mode"] == expected_mode
     assert config_event["payload"]["provisional_defaults"] == [20, 10, 20, 10, 10, 3]
-    assert report.file_integrity_ok
+    assert report.file_integrity_ok and report.record_mode == expected_mode
     assert report.hl_liveness == collector.HLLivenessEvidence(True, True, True, True)
     assert report.bybit_liveness == collector.BybitLivenessEvidence(True, True, True)
     heartbeats = [event for event in events
@@ -145,13 +157,34 @@ async def _assembled_scenario(root: Path) -> None:
     assert sent["hyperliquid"] == {"method": "ping"} and sent["bybit"]["op"] == "ping"
     source = inspect.getsource(collector._Sink.record)
     assert 'record.phase == "pong"' in source and 'payload_schema == "subscription_send"' in source
+    marker_line = next(line for line in inspect.getsource(collector._Sink._append).splitlines()
+                       if '"is_gate1_record"' in line)
+    assert 'self.record_mode == "formal"' in marker_line and "record." not in marker_line
+    assert "_replay_integrity" in inspect.getsource(run_collector)
+
+    if expected_marker:
+        _assert_mixed_mode_fails(root, events[0])
 
 
 def test_dual_venue_assembly_stop_and_verified_trial_evidence(tmp_path: Path) -> None:
     asyncio.run(_assembled_scenario(tmp_path))
 
 
-async def _gap_scenario(root: Path) -> None:
+def test_explicit_formal_mode_marks_candidate_window_without_starting_live_collection(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_assembled_scenario(tmp_path, "formal"))
+
+
+def test_record_mode_is_closed_before_file_or_network_side_effects(tmp_path: Path) -> None:
+    with pytest.raises(collector.ContractError, match="record_mode"):
+        CollectorConfig(root=tmp_path / "invalid", boot_id="bad", record_mode="FORMAL")
+    assert not (tmp_path / "invalid").exists()
+    doc = (inspect.getdoc(CollectorConfig) or "").lower()
+    assert "candidate-window provenance" in doc and "failure events stay formal" in doc
+
+
+async def _gap_scenario(root: Path, record_mode: str | None = None) -> None:
     stop = asyncio.Event()
 
     async def bybit(websocket):
@@ -167,20 +200,27 @@ async def _gap_scenario(root: Path) -> None:
         serve(hl, "127.0.0.1", 0, ping_interval=None) as hl_server,
         serve(bybit, "127.0.0.1", 0, ping_interval=None) as bybit_server,
     ):
+        changes = {} if record_mode is None else {"record_mode": record_mode}
         report = await asyncio.wait_for(
-            run_collector(_config(root, _uri(hl_server), _uri(bybit_server)), stop), 2
+            run_collector(_config(root, _uri(hl_server), _uri(bybit_server), **changes), stop), 2
         )
 
     events = _events(root)
+    expected_mode = record_mode or "trial"
     gaps = [event for event in events if event["payload_schema"] == "bybit_sequence_gap"]
     assert stop.is_set() and len(gaps) == 1
     assert json.loads(base64.b64decode(gaps[0]["payload"]["raw"]))["data"]["u"] == 42
+    assert all(event["is_gate1_record"] is (expected_mode == "formal") for event in events)
     assert not report.bybit_liveness.sequence_ok
-    assert report.file_integrity_ok
+    assert report.file_integrity_ok and report.record_mode == expected_mode
 
 
 def test_bybit_sequence_gap_closes_both_venues_after_preserving_trigger(tmp_path: Path) -> None:
     asyncio.run(_gap_scenario(tmp_path))
+
+
+def test_formal_gap_evidence_stays_formal_for_later_coverage_failure(tmp_path: Path) -> None:
+    asyncio.run(_gap_scenario(tmp_path, "formal"))
 
 
 async def _venue_down_scenario(root: Path) -> None:
