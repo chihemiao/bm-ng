@@ -229,3 +229,98 @@ def test_bybit_cancel_scope_rejects_other_domains(values):
 def test_bybit_cancel_scope_rejects_non_string_fields(values):
     with pytest.raises(TypeError):
         cancel.BybitCancelScope(**values)
+
+
+def test_hl_cancel_binding_calls_once_with_exact_ordered_wire_rows():
+    calls, result = [], object()
+
+    def bulk_cancel(rows):
+        calls.append(rows)
+        return result
+
+    batch = cancel.HLCancelBatch(
+        targets=(
+            cancel.HLCancelTarget(coin="ETH", oid=2),
+            cancel.HLCancelTarget(coin="BTC", oid=1),
+            cancel.HLCancelTarget(coin="ETH", oid=2),
+        )
+    )
+    transport = cancel.bind_hl_cancel(batch, bulk_cancel)
+    assert calls == []
+    assert transport() is result
+    assert calls == [[
+        {"coin": "ETH", "oid": 2},
+        {"coin": "BTC", "oid": 1},
+        {"coin": "ETH", "oid": 2},
+    ]]
+
+
+def test_hl_empty_cancel_binding_still_calls_bulk_cancel_once():
+    calls = []
+    transport = cancel.bind_hl_cancel(
+        cancel.HLCancelBatch(targets=()), lambda rows: calls.append(rows)
+    )
+    assert transport() is None
+    assert calls == [[]]
+
+
+def test_bybit_cancel_binding_uses_exact_official_wire_kwargs_once():
+    calls, result = [], object()
+
+    def cancel_all(**kwargs):
+        calls.append(kwargs)
+        return result
+
+    scope = cancel.BybitCancelScope(category="linear", settle_coin="USDT")
+    transport = cancel.bind_bybit_cancel(scope, cancel_all)
+    assert calls == []
+    assert transport() is result
+    assert calls == [{"category": "linear", "settleCoin": "USDT"}]
+
+
+@pytest.mark.parametrize(
+    ("binder_name", "value", "invalid_position"),
+    [
+        ("bind_hl_cancel", cancel.HLCancelBatch(targets=()), "value"),
+        (
+            "bind_bybit_cancel",
+            cancel.BybitCancelScope(category="linear", settle_coin="USDT"),
+            "value",
+        ),
+        ("bind_hl_cancel", cancel.HLCancelBatch(targets=()), "callable"),
+        (
+            "bind_bybit_cancel",
+            cancel.BybitCancelScope(category="linear", settle_coin="USDT"),
+            "callable",
+        ),
+    ],
+)
+def test_cancel_binding_preflights_both_dependencies(binder_name, value, invalid_position):
+    calls = []
+
+    def venue_call(*args, **kwargs):
+        calls.append((args, kwargs))
+
+    values = [value, venue_call]
+    values[0 if invalid_position == "value" else 1] = object()
+    with pytest.raises(TypeError):
+        getattr(cancel, binder_name)(*values)
+    assert calls == []
+
+
+@pytest.mark.parametrize("binder_name", ["bind_hl_cancel", "bind_bybit_cancel"])
+def test_cancel_binding_propagates_the_same_base_exception(binder_name):
+    error = KeyboardInterrupt(binder_name)
+
+    def venue_call(*args, **kwargs):
+        raise error
+
+    value = (
+        cancel.HLCancelBatch(targets=())
+        if binder_name == "bind_hl_cancel"
+        else cancel.BybitCancelScope(category="linear", settle_coin="USDT")
+    )
+    transport = getattr(cancel, binder_name)(value, venue_call)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        transport()
+    assert caught.value is error
