@@ -8,192 +8,120 @@ import reconciliation.legs as legs
 from reconciliation.exposure import LegPosition
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
-
-def _canonical(kind: str) -> CanonicalSet:
-    return CanonicalSet(f"positions.{kind}", 1, frozenset({kind}))
-
-
-def _evidence(**changes) -> SurfaceEvidence:
-    values = {
-        "observed_ns": 100,
-        "fetched_count": 1,
-        "page_complete": True,
-        "truncated": False,
-        "unknown_count": 0,
-        "mismatch_count": 0,
-        "entities": _canonical("state"),
-        "identities": _canonical("identity"),
-    }
-    values.update(changes)
-    return SurfaceEvidence(**values)
+_STATE = CanonicalSet("positions.state", 1, frozenset({"state"}))
+_IDENTITY = CanonicalSet("positions.identity", 1, frozenset({"identity"}))
+_EVIDENCE = SurfaceEvidence(
+    observed_ns=100, fetched_count=1, page_complete=True, truncated=False,
+    unknown_count=0, mismatch_count=0, entities=_STATE, identities=_IDENTITY,
+)
+_META = {"strategy_id": "funding-carry", "strategy_version": "git-deadbeef", "signal_ns": 0}
 
 
-def _leg(venue: str, quantity: str, **changes) -> LegPosition:
-    values = {
-        "venue": venue,
-        "symbol": "BTC",
-        "signed_quantity": Decimal(quantity),
-        "evidence": _evidence(),
-    }
-    values.update(changes)
-    return LegPosition(**values)
+def _leg(venue, quantity, evidence=_EVIDENCE):
+    return LegPosition(venue, "BTC", Decimal(quantity), evidence)
 
 
-def _build(
-    hl: str = "-2",
-    bybit: str = "1",
-    *,
-    hyperliquid_position=None,
-    bybit_position=None,
-    **changes,
-):
-    values = {
-        "strategy_id": "funding-carry",
-        "strategy_version": "git-deadbeef",
-        "signal_ns": 0,
-        "now_ns": 110,
-        "max_position_age_ns": 10,
-    }
-    values.update(changes)
-    return legs.build_flatten_intent_plan(
-        hyperliquid_position or _leg("hyperliquid", hl),
-        bybit_position or _leg("bybit", bybit),
-        **values,
+def _build(hl="-2", bybit="1", *, positions=None, **changes):
+    values = {**_META, "now_ns": 110, "max_position_age_ns": 10, **changes}
+    pair = positions or (_leg("hyperliquid", hl), _leg("bybit", bybit))
+    return legs.build_flatten_intent_plan(*pair, **values)
+
+
+def _intent(leg="hyperliquid", *, reduce_only=True):
+    return orders.make_order_intent(
+        **_META, leg=leg, symbol="BTC", side="buy",
+        quantity=Decimal("1"), reduce_only=reduce_only,
     )
 
 
-def _intent(leg: str, **changes):
-    values = {
-        "strategy_id": "funding-carry",
-        "strategy_version": "git-deadbeef",
-        "signal_ns": 0,
-        "leg": leg,
-        "symbol": "BTC",
-        "side": "buy",
-        "quantity": Decimal("1"),
-        "reduce_only": True,
-    }
-    values.update(changes)
-    return orders.make_order_intent(**values)
-
-
 def _plan(**changes):
-    values = {
-        "strategy_id": "funding-carry",
-        "strategy_version": "git-deadbeef",
-        "signal_ns": 0,
-        "hyperliquid": None,
-        "bybit": None,
-    }
-    values.update(changes)
-    return orders.FlattenIntentPlan(**values)
+    return orders.FlattenIntentPlan(
+        **{**_META, "hyperliquid": None, "bybit": None, **changes}
+    )
 
 
 def test_each_nonzero_position_gets_an_independent_reduce_only_intent():
     plan = _build()
-    assert plan.hyperliquid is not None and plan.bybit is not None
-    assert (plan.hyperliquid.leg, plan.hyperliquid.side) == ("hyperliquid", "buy")
-    assert (plan.bybit.leg, plan.bybit.side) == ("bybit", "sell")
-    assert (plan.hyperliquid.quantity, plan.bybit.quantity) == (
-        Decimal("2"),
-        Decimal("1"),
+    assert (plan.hyperliquid.leg, plan.hyperliquid.side, plan.hyperliquid.quantity) == (
+        "hyperliquid", "buy", Decimal("2"),
+    )
+    assert (plan.bybit.leg, plan.bybit.side, plan.bybit.quantity) == (
+        "bybit", "sell", Decimal("1"),
     )
 
 
 @pytest.mark.parametrize(
-    ("hl", "bybit", "present"),
-    [("-2", "0", "hyperliquid"), ("0", "1", "bybit")],
+    ("hl", "bybit", "present"), [("-2", "0", "hyperliquid"), ("0", "1", "bybit")]
 )
 def test_zero_position_omits_only_that_venue_intent(hl, bybit, present):
     plan = _build(hl, bybit)
     absent = "bybit" if present == "hyperliquid" else "hyperliquid"
-    assert getattr(plan, present) is not None
-    assert getattr(plan, absent) is None
+    assert getattr(plan, present) is not None and getattr(plan, absent) is None
 
 
 def test_authoritative_zero_positions_form_a_valid_empty_plan():
     plan = _build("0", "0")
     assert (plan.hyperliquid, plan.bybit) == (None, None)
-    assert (plan.strategy_id, plan.strategy_version, plan.signal_ns) == (
-        "funding-carry",
-        "git-deadbeef",
-        0,
-    )
+    assert (plan.strategy_id, plan.strategy_version, plan.signal_ns) == tuple(_META.values())
 
 
 def test_generated_intents_share_only_the_plan_metadata():
     plan = _build()
     for intent in (plan.hyperliquid, plan.bybit):
-        assert intent is not None
-        assert (intent.strategy_id, intent.strategy_version, intent.signal_ns) == (
-            plan.strategy_id,
-            plan.strategy_version,
-            plan.signal_ns,
+        assert (intent.strategy_id, intent.strategy_version, intent.signal_ns) == tuple(
+            _META.values()
         )
     assert plan.hyperliquid.side != plan.bybit.side
     assert plan.hyperliquid.quantity != plan.bybit.quantity
 
 
-@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
-def test_any_non_authoritative_position_rejects_the_whole_plan(venue):
-    positions = {
-        "hyperliquid": _leg("hyperliquid", "-1"),
-        "bybit": _leg("bybit", "1"),
-    }
-    positions[venue] = replace(positions[venue], evidence=_evidence(truncated=True))
+@pytest.mark.parametrize("index", [0, 1])
+def test_any_non_authoritative_position_rejects_the_whole_plan(index):
+    pair = [_leg("hyperliquid", "-1"), _leg("bybit", "1")]
+    pair[index] = replace(pair[index], evidence=replace(_EVIDENCE, truncated=True))
     with pytest.raises(ValueError, match="authoritative"):
-        _build(
-            hyperliquid_position=positions["hyperliquid"],
-            bybit_position=positions["bybit"],
-        )
+        _build(positions=pair)
 
 
 def test_named_venue_slots_cannot_be_swapped():
     with pytest.raises(ValueError, match="venue"):
-        _build(
-            hyperliquid_position=_leg("bybit", "1"),
-            bybit_position=_leg("hyperliquid", "-1"),
-        )
+        _build(positions=(_leg("bybit", "1"), _leg("hyperliquid", "-1")))
+
+
+@pytest.mark.parametrize(
+    "pair", [(object(), _leg("bybit", "1")), (_leg("hyperliquid", "-1"), object())]
+)
+def test_builder_rejects_non_position_inputs(pair):
+    with pytest.raises(TypeError, match="LegPosition"):
+        _build(positions=pair)
 
 
 @pytest.mark.parametrize(
     "changes",
-    [
-        {"strategy_id": ""},
-        {"strategy_version": ""},
-        {"signal_ns": True},
-        {"signal_ns": -1},
-    ],
+    [{"strategy_id": ""}, {"strategy_version": ""}, {"signal_ns": True}, {"signal_ns": -1}],
 )
 def test_empty_plan_still_validates_plan_metadata(changes):
     with pytest.raises(ValueError):
         _plan(**changes)
 
 
-def test_plan_rejects_non_intent_slot_values():
-    with pytest.raises(TypeError, match="OrderIntent"):
-        _plan(hyperliquid=object())
-
-
-def test_plan_rejects_an_intent_in_the_wrong_venue_slot():
-    with pytest.raises(ValueError, match="leg"):
-        _plan(hyperliquid=_intent("bybit"))
-
-
-def test_plan_rejects_a_non_reducing_intent():
-    with pytest.raises(ValueError, match="reduce_only"):
-        _plan(hyperliquid=_intent("hyperliquid", reduce_only=False))
+@pytest.mark.parametrize(
+    ("changes", "error", "match"),
+    [
+        ({"hyperliquid": object()}, TypeError, "OrderIntent"),
+        ({"hyperliquid": _intent("bybit")}, ValueError, "leg"),
+        ({"hyperliquid": _intent(reduce_only=False)}, ValueError, "reduce_only"),
+    ],
+)
+def test_plan_rejects_invalid_slot_values(changes, error, match):
+    with pytest.raises(error, match=match):
+        _plan(**changes)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [
-        ("strategy_id", "other"),
-        ("strategy_version", "git-cafebabe"),
-        ("signal_ns", 1),
-    ],
+    [("strategy_id", "other"), ("strategy_version", "git-cafebabe"), ("signal_ns", 1)],
 )
 def test_plan_rejects_intent_metadata_divergence(field, value):
-    intent = replace(_intent("hyperliquid"), **{field: value})
     with pytest.raises(ValueError, match="metadata"):
-        _plan(hyperliquid=intent)
+        _plan(hyperliquid=replace(_intent(), **{field: value}))
