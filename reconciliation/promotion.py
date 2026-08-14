@@ -128,6 +128,18 @@ def demote_kill_switch_freeze(
     return _demote(lease, now_ns=now_ns, reason=reason)
 
 
+def demote_kill_switch_flatten(
+    lease: WriterLease, decision: KillSwitchDecision, *, now_ns: int,
+) -> WriterAuthority:
+    """Revoke opening authority before the owner begins flattening."""
+    if not isinstance(decision, KillSwitchDecision):
+        raise TypeError("decision must be a KillSwitchDecision")
+    if decision.action != "flatten_and_stop":
+        raise ValueError("kill switch decision is not flatten_and_stop")
+    reason = f"{DEMOTION_PREFIX}kill_switch:flatten_and_stop"
+    return lease.demote_to_flatten_only(demotion_ns=now_ns, reason=reason)
+
+
 def apply_continuous_admission(
     lease: WriterLease,
     *,

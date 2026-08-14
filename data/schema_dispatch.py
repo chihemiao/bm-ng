@@ -79,12 +79,19 @@ AUTHORIZATION_DENIAL_REASONS = frozenset(
         "authorize_denied:cancel_only:close:action_not_authorized",
         "authorize_denied:cancel_only:market:action_not_authorized",
         "authorize_denied:cancel_only:modify:native_modify_disabled",
+        "authorize_denied:flatten_only:submit:action_not_authorized",
+        "authorize_denied:flatten_only:close:action_not_authorized",
+        "authorize_denied:flatten_only:market:action_not_authorized",
+        "authorize_denied:flatten_only:modify:native_modify_disabled",
         "authorize_denied:risk_increasing:modify:native_modify_disabled",
     }
 )
 WRITER_DECISIONS = {
     ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
     ("demote", "cancel_only"): frozenset(),
+    ("demote", "flatten_only"): frozenset(
+        {"writer_demoted:kill_switch:flatten_and_stop"}
+    ),
     ("deny", "cancel_only"): frozenset({"incumbent_other_wallet"}),
     ("deny", "terminated"): frozenset(
         {"shared_writer_identity", "unknown_incumbent", "unsafe_lock_file"}
