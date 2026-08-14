@@ -1,10 +1,21 @@
 """Run explicitly authorized host watchdog steps."""
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
-from execution.cancel import HL_SCHEDULE_MIN_LEAD_MS, bind_hl_schedule_cancel
+from execution.cancel import (
+    HL_SCHEDULE_MIN_LEAD_MS,
+    BybitCancelScope,
+    bind_bybit_cancel,
+    bind_hl_schedule_cancel,
+)
 from execution.writer import WriterLease
 from execution.writer import read_heartbeat as read_heartbeat
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BybitCancelRequested:
+    response: object
 
 
 def bybit_writer_timeout(
@@ -22,6 +33,26 @@ def bybit_writer_timeout(
     observed_digest, observed_epoch, observed_ns = heartbeat
     changed = (digest, epoch) != (observed_digest, observed_epoch)
     return changed or observed_ns > now_mono_ns or now_mono_ns - observed_ns > max_gap_ns
+
+
+def request_bybit_cancel_on_timeout(
+    lock_identity: tuple[str, int] | None,
+    heartbeat: tuple[str, int, int] | None,
+    *, now_mono_ns: int, max_gap_ns: int,
+    scope: BybitCancelScope, cancel_all: Callable[..., object],
+) -> BybitCancelRequested | None:
+    """Return awaiting_authoritative_confirmation after one request.
+
+    A healthy writer causes no venue call. A request is never retried here and
+    is not completion without authoritative order evidence.
+    """
+    transport = bind_bybit_cancel(scope, cancel_all)
+    healthy = not bybit_writer_timeout(
+        lock_identity, heartbeat, now_mono_ns=now_mono_ns, max_gap_ns=max_gap_ns,
+    )
+    if healthy:
+        return None
+    return BybitCancelRequested(response=transport())
 
 
 def renew_hl_dead_man(
