@@ -4,8 +4,10 @@ from decimal import Decimal
 import pytest
 
 import execution.orders as orders
+import reconciliation.kill_switch_composition as composition
 import reconciliation.legs as legs
 from reconciliation.exposure import LegPosition
+from reconciliation.kill_switch import KillSwitchDecision
 from reconciliation.state import CanonicalSet, SurfaceEvidence
 
 _STATE = CanonicalSet("positions.state", 1, frozenset({"state"}))
@@ -125,3 +127,66 @@ def test_plan_rejects_invalid_slot_values(changes, error, match):
 def test_plan_rejects_intent_metadata_divergence(field, value):
     with pytest.raises(ValueError, match="metadata"):
         _plan(hyperliquid=replace(_intent(), **{field: value}))
+
+
+class _UnreadablePosition:
+    def __getattribute__(self, name):
+        raise AssertionError(f"non-flatten action read position attribute {name}")
+
+    def __eq__(self, other):
+        raise AssertionError(f"non-flatten action compared position with {other!r}")
+
+
+def _route(action="flatten_and_stop", *, positions=None, **changes):
+    values = {**_META, "now_ns": 110, "max_position_age_ns": 10, **changes}
+    selected = positions or (_leg("hyperliquid", "-2"), _leg("bybit", "1"))
+    return composition.build_kill_switch_flatten_plan(
+        KillSwitchDecision(action), *selected, **values
+    )
+
+
+def test_flatten_decision_routes_every_planner_input():
+    plan = _route()
+    assert (plan.strategy_id, plan.strategy_version, plan.signal_ns) == tuple(_META.values())
+    assert (plan.hyperliquid.side, plan.hyperliquid.quantity) == ("buy", Decimal("2"))
+    assert (plan.bybit.side, plan.bybit.quantity) == ("sell", Decimal("1"))
+    assert plan.hyperliquid.reduce_only and plan.bybit.reduce_only
+
+
+@pytest.mark.parametrize("action", ["continue", "cancel_only_freeze"])
+def test_non_flatten_decision_never_reads_positions(action):
+    unreadable = _UnreadablePosition()
+    assert _route(action, positions=(unreadable, unreadable)) is None
+
+
+def test_route_rejects_a_bare_action_before_reading_positions():
+    unreadable = _UnreadablePosition()
+    with pytest.raises(TypeError, match="decision"):
+        composition.build_kill_switch_flatten_plan(
+            "flatten_and_stop",
+            unreadable,
+            unreadable,
+            **_META,
+            now_ns=110,
+            max_position_age_ns=10,
+        )
+
+
+@pytest.mark.parametrize(
+    ("positions", "error", "match"),
+    [
+        ((_leg("bybit", "1"), _leg("hyperliquid", "-1")), ValueError, "venue"),
+        ((object(), _leg("bybit", "1")), TypeError, "LegPosition"),
+        (
+            (
+                replace(_leg("hyperliquid", "-1"), evidence=replace(_EVIDENCE, truncated=True)),
+                _leg("bybit", "1"),
+            ),
+            ValueError,
+            "authoritative",
+        ),
+    ],
+)
+def test_flatten_decision_preserves_planner_fail_closed_checks(positions, error, match):
+    with pytest.raises(error, match=match):
+        _route(positions=positions)

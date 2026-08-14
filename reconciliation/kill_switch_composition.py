@@ -3,8 +3,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from data.collector import CollectorLivenessSnapshot
+from execution.orders import FlattenIntentPlan
 from execution.wallet import AgentWalletRegistration
-from reconciliation import exposure, fx, kill_switch, state
+from reconciliation import exposure, fx, kill_switch, legs, state
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -94,3 +95,30 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
         reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)
     return KillSwitchSnapshot(decision, streak, consistency, exposure_state)
+
+
+def build_kill_switch_flatten_plan(
+    decision: kill_switch.KillSwitchDecision,
+    hyperliquid_position: object,
+    bybit_position: object,
+    *,
+    strategy_id: str,
+    strategy_version: str,
+    signal_ns: int,
+    now_ns: int,
+    max_position_age_ns: int,
+) -> FlattenIntentPlan | None:
+    """Plan trusted flatten intents only for the explicit flatten action."""
+    if not isinstance(decision, kill_switch.KillSwitchDecision):
+        raise TypeError("decision must be a KillSwitchDecision")
+    if decision.action != "flatten_and_stop":
+        return None
+    return legs.build_flatten_intent_plan(
+        hyperliquid_position,
+        bybit_position,
+        strategy_id=strategy_id,
+        strategy_version=strategy_version,
+        signal_ns=signal_ns,
+        now_ns=now_ns,
+        max_position_age_ns=max_position_age_ns,
+    )
