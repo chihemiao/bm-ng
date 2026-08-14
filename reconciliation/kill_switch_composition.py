@@ -20,6 +20,9 @@ class KillSwitchSnapshotInputs:
     max_naked_ns: int
     naked_notional: fx.Notional | None
     max_naked_notional: fx.Notional
+    fx_rate: fx.FxRate | None
+    fx_max_age_ns: int
+    max_abs_fx_deviation: Decimal
     reconciliation_observed_ns: int
     now_ns: int
     max_age_ns: int
@@ -71,11 +74,15 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
     exposure_triggered = kill_switch.exposure_kill_trigger(
         exposure_state, inputs.naked_notional,
         max_naked_notional=inputs.max_naked_notional)
-    triggered = key_triggered or exposure_triggered
+    stablecoin_known, stablecoin_triggered = kill_switch._stablecoin_evidence(
+        inputs.fx_rate, now_ns=now, max_age_ns=inputs.fx_max_age_ns,
+        max_abs_deviation=inputs.max_abs_fx_deviation)
+    triggered = key_triggered or exposure_triggered or stablecoin_triggered
     decision = kill_switch.decide_kill_switch(
         triggered=triggered, orders_known=orders_known,
         positions_known=positions_known,
         naked_notional_known=inputs.naked_notional is not None,
+        stablecoin_known=stablecoin_known,
         reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)
     return KillSwitchSnapshot(decision, streak, consistency, exposure_state)
