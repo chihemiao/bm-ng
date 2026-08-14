@@ -1,8 +1,8 @@
 """Run explicitly authorized host watchdog steps."""
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
-from execution.cancel import bind_hl_schedule_cancel
+from execution.cancel import HL_SCHEDULE_MIN_LEAD_MS, bind_hl_schedule_cancel
 from execution.writer import WriterLease
 
 
@@ -23,3 +23,44 @@ def renew_hl_dead_man(
     )
     lease.authorize("cancel_all")
     return transport()
+
+
+async def run_hl_dead_man_loop(
+    *,
+    lease: WriterLease,
+    stop_requested: Callable[[], bool],
+    wall_ms: Callable[[], int],
+    wait_ms: Callable[[int], Awaitable[None]],
+    interval_ms: int,
+    horizon_ms: int,
+    schedule_cancel: Callable[[int | None], object],
+) -> None:
+    """Renew until stopped; do not retry, disarm, or record events here."""
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be WriterLease")
+    if not all(map(callable, (stop_requested, wall_ms, wait_ms))):
+        raise TypeError("loop callbacks must be callable")
+    if type(interval_ms) is not int or type(horizon_ms) is not int:
+        raise TypeError("loop timing must use integers")
+    if interval_ms <= 0 or horizon_ms <= 0:
+        raise ValueError("loop timing must be positive")
+    if horizon_ms < interval_ms + HL_SCHEDULE_MIN_LEAD_MS:
+        raise ValueError("horizon_ms leaves insufficient renewal lead")
+
+    previous_ms = None
+    while not stop_requested():
+        current_ms = wall_ms()
+        if type(current_ms) is not int:
+            raise TypeError("wall clock must return an integer")
+        if current_ms <= 0:
+            raise ValueError("wall clock must be positive")
+        if previous_ms is not None and current_ms <= previous_ms:
+            raise ValueError("wall clock must strictly increase")
+        renew_hl_dead_man(
+            lease=lease,
+            now_ms=current_ms,
+            deadline_ms=current_ms + horizon_ms,
+            schedule_cancel=schedule_cancel,
+        )
+        previous_ms = current_ms
+        await wait_ms(interval_ms)
