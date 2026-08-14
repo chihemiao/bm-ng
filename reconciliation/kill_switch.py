@@ -14,6 +14,8 @@ from typing import Literal
 
 from execution.nonce import replay_freeze_reason, replay_signer_nonce_conflict
 from execution.wallet import AgentWalletRegistration
+from reconciliation.exposure import ExposureClock
+from reconciliation.fx import Notional
 
 KILL_SWITCH_KEY_EXPIRY_LEAD_NS = 7 * 86_400 * 1_000_000_000
 
@@ -105,6 +107,29 @@ def decide_kill_switch(
         return KillSwitchDecision("cancel_only_freeze")
     action = "flatten_and_stop" if triggered else "continue"
     return KillSwitchDecision(action)
+
+
+def exposure_kill_trigger(
+    exposure: ExposureClock,
+    naked_notional: Notional | None,
+    *,
+    max_naked_notional: Notional,
+) -> bool:
+    """Trigger when cross-venue exposure is unknown, overdue, or over limit."""
+    if not isinstance(exposure, ExposureClock):
+        raise TypeError("exposure must be an ExposureClock")
+    if naked_notional is not None and not isinstance(naked_notional, Notional):
+        raise TypeError("naked_notional must be Notional or None")
+    if not isinstance(max_naked_notional, Notional):
+        raise TypeError("max_naked_notional must be Notional")
+    if naked_notional is not None and naked_notional.quote != max_naked_notional.quote:
+        raise ValueError("notional quote mismatch")
+    return (
+        exposure.state == "unknown"
+        or naked_notional is None
+        or exposure.duration_exceeded is True
+        or naked_notional.amount > max_naked_notional.amount
+    )
 
 
 def key_expiry_triggered(
