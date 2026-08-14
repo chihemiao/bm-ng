@@ -165,13 +165,14 @@ def test_positions_knowability_reuses_the_derived_exposure_state():
     source = inspect.getsource(build_snapshot)
     assert source.count("delta_state(") == 1
     assert 'positions_known = exposure_state.state != "unknown"' in source
-    assert "naked_notional_known=inputs.naked_notional is not None" in source
+    assert "naked_notional=inputs.naked_notional is not None" in source
 
 
 def test_stablecoin_evidence_is_derived_once_and_routes_through_the_table():
     source = inspect.getsource(build_snapshot)
     assert source.count("_stablecoin_evidence(") == 1
-    assert "stablecoin_known=stablecoin_known" in source
+    assert "known_evidence=kill_switch.KnownEvidence(" in source
+    assert "stablecoin=stablecoin_known" in source
 
 
 def test_cycle_replay_is_idempotent_and_contradiction_is_rejected():

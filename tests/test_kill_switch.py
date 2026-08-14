@@ -7,6 +7,7 @@ from typing import get_args, get_type_hints
 
 import pytest
 
+import reconciliation.kill_switch as kill_switch
 from data.contracts import ROTATION_LEAD_NS, VALIDITY_NS
 from execution.wallet import AgentWalletRegistration
 from reconciliation.exposure import ExposureClock
@@ -244,6 +245,13 @@ def test_key_and_nonce_derives_the_wallet_fingerprint_from_registration() -> Non
     ) is True
 
 
+def _known_evidence(orders, positions, naked_notional, stablecoin):
+    return kill_switch.KnownEvidence(
+        orders=orders, positions=positions,
+        naked_notional=naked_notional, stablecoin=stablecoin,
+    )
+
+
 @pytest.mark.parametrize(
     (
         "triggered", "orders_known", "positions_known", "naked_notional_known",
@@ -275,10 +283,8 @@ def test_kill_switch_decision_table(
 ) -> None:
     assert decide_kill_switch(
         triggered=triggered,
-        orders_known=orders_known,
-        positions_known=positions_known,
-        naked_notional_known=naked_notional_known,
-        stablecoin_known=stablecoin_known,
+        known_evidence=_known_evidence(
+            orders_known, positions_known, naked_notional_known, stablecoin_known),
         reconciliation_consistency=reconciliation_consistency,
         reconciliation_streak_triggered=streak_triggered,
     ) == KillSwitchDecision(action)
@@ -286,16 +292,14 @@ def test_kill_switch_decision_table(
 
 def test_pre_threshold_mismatch_continues_without_an_independent_trigger() -> None:
     assert decide_kill_switch(
-        triggered=False, orders_known=True, positions_known=True,
-        naked_notional_known=True, stablecoin_known=True,
+        triggered=False, known_evidence=_known_evidence(True, True, True, True),
         reconciliation_consistency=False, reconciliation_streak_triggered=False,
     ) == KillSwitchDecision("continue")
 
 
 def test_pre_threshold_mismatch_blocks_triggered_flattening() -> None:
     assert decide_kill_switch(
-        triggered=True, orders_known=True, positions_known=True,
-        naked_notional_known=True, stablecoin_known=True,
+        triggered=True, known_evidence=_known_evidence(True, True, True, True),
         reconciliation_consistency=False, reconciliation_streak_triggered=False,
     ) == KillSwitchDecision("cancel_only_freeze")
 
@@ -304,10 +308,6 @@ def test_pre_threshold_mismatch_blocks_triggered_flattening() -> None:
     ("field", "value"),
     [
         ("triggered", 1), ("triggered", None),
-        ("orders_known", 1), ("orders_known", None),
-        ("positions_known", 1), ("positions_known", None),
-        ("naked_notional_known", 1), ("naked_notional_known", None),
-        ("stablecoin_known", 1), ("stablecoin_known", None),
         ("reconciliation_consistency", 1), ("reconciliation_consistency", "true"),
         ("reconciliation_streak_triggered", 1),
         ("reconciliation_streak_triggered", None),
@@ -316,10 +316,7 @@ def test_pre_threshold_mismatch_blocks_triggered_flattening() -> None:
 def test_kill_switch_decision_requires_exact_booleans(field, value) -> None:
     values = {
         "triggered": False,
-        "orders_known": True,
-        "positions_known": True,
-        "naked_notional_known": True,
-        "stablecoin_known": True,
+        "known_evidence": _known_evidence(True, True, True, True),
         "reconciliation_consistency": True,
         "reconciliation_streak_triggered": False,
     }
@@ -342,8 +339,8 @@ def test_kill_switch_decision_has_one_frozen_closed_action() -> None:
 
     signature = inspect.signature(decide_kill_switch)
     assert tuple(signature.parameters) == (
-        "triggered", "orders_known", "positions_known", "naked_notional_known",
-        "stablecoin_known", "reconciliation_consistency", "reconciliation_streak_triggered",
+        "triggered", "known_evidence", "reconciliation_consistency",
+        "reconciliation_streak_triggered",
     )
     assert all(
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
