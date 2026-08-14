@@ -26,6 +26,19 @@ def _leg(venue, quantity, evidence=_EVIDENCE):
     return LegPosition(venue, "BTC", Decimal(quantity), evidence)
 
 
+def _orders(venue, *, present=False, **changes):
+    fingerprints = frozenset({"state"}) if present else frozenset()
+    identities = frozenset({"identity"}) if present else frozenset()
+    values = dict(
+        observed_ns=100, fetched_count=int(present), page_complete=True,
+        truncated=False, unknown_count=0, mismatch_count=0)
+    values.update(changes)
+    return SurfaceEvidence(
+        **values,
+        entities=CanonicalSet(f"{venue}.orders.state", 1, fingerprints),
+        identities=CanonicalSet(f"{venue}.orders.identity", 1, identities))
+
+
 def _build(hl="-2", bybit="1", *, positions=None, **changes):
     values = {**_META, "now_ns": 110, "max_position_age_ns": 10, **changes}
     pair = positions or (_leg("hyperliquid", hl), _leg("bybit", bybit))
@@ -56,7 +69,11 @@ def _lease(root, mode="flatten_only", recorder=None):
 
 
 def _finalize(lease, stop, *, positions=None, **changes):
-    values = {**_META, "now_ns": 110, "max_position_age_ns": 10, **changes}
+    values = {
+        **_META, "now_ns": 110, "max_position_age_ns": 10,
+        "max_order_age_ns": 10,
+        "hyperliquid_orders": _orders("hyperliquid"),
+        "bybit_orders": _orders("bybit"), **changes}
     pair = positions or (_leg("hyperliquid", "0"), _leg("bybit", "0"))
     return composition.finalize_kill_switch_flatten(lease, *pair, stop=stop, **values)
 
@@ -161,7 +178,11 @@ class _UnreadablePosition:
 
 
 def _route(action="flatten_and_stop", *, positions=None, **changes):
-    values = {**_META, "now_ns": 110, "max_position_age_ns": 10, **changes}
+    values = {
+        **_META, "now_ns": 110, "max_position_age_ns": 10,
+        "max_order_age_ns": 10,
+        "hyperliquid_orders": _orders("hyperliquid"),
+        "bybit_orders": _orders("bybit"), **changes}
     selected = positions or (_leg("hyperliquid", "-2"), _leg("bybit", "1"))
     return composition.build_kill_switch_flatten_plan(
         KillSwitchDecision(action), *selected, **values
@@ -174,12 +195,19 @@ def test_flatten_decision_routes_every_planner_input():
     assert (plan.hyperliquid.side, plan.hyperliquid.quantity) == ("buy", Decimal("2"))
     assert (plan.bybit.side, plan.bybit.quantity) == ("sell", Decimal("1"))
     assert plan.hyperliquid.reduce_only and plan.bybit.reduce_only
+    source = getsource(composition.build_kill_switch_flatten_plan)
+    assert source.count("_require_authoritative_empty_orders(") == 1
+    assert source.index("decision.action") < source.index(
+        "_require_authoritative_empty_orders(") < source.index("build_flatten_intent_plan(")
+    assert "PairCancelOutcome" not in getsource(composition)
 
 
 @pytest.mark.parametrize("action", ["continue", "cancel_only_freeze"])
 def test_non_flatten_decision_never_reads_positions(action):
     unreadable = _UnreadablePosition()
-    assert _route(action, positions=(unreadable, unreadable)) is None
+    assert _route(
+        action, positions=(unreadable, unreadable),
+        hyperliquid_orders=unreadable, bybit_orders=unreadable) is None
 
 
 def test_route_rejects_a_bare_action_before_reading_positions():
@@ -189,9 +217,12 @@ def test_route_rejects_a_bare_action_before_reading_positions():
             "flatten_and_stop",
             unreadable,
             unreadable,
+            hyperliquid_orders=unreadable,
+            bybit_orders=unreadable,
             **_META,
             now_ns=110,
             max_position_age_ns=10,
+            max_order_age_ns=10,
         )
 
 
@@ -213,6 +244,40 @@ def test_route_rejects_a_bare_action_before_reading_positions():
 def test_flatten_decision_preserves_planner_fail_closed_checks(positions, error, match):
     with pytest.raises(error, match=match):
         _route(positions=positions)
+
+
+def _bad_orders(venue, failure):
+    present, changes = {
+        "nonempty": (True, {}), "stale": (False, {"observed_ns": 99}),
+        "truncated": (False, {"truncated": True}),
+        "unknown": (False, {"fetched_count": 1, "unknown_count": 1}),
+        "mismatch": (False, {"mismatch_count": 1}),
+        "wrong-scheme": (False, {}),
+    }[failure]
+    target = ({"hyperliquid": "bybit", "bybit": "hyperliquid"}[venue]
+              if failure == "wrong-scheme" else venue)
+    return _orders(target, present=present, **changes)
+
+
+@pytest.mark.parametrize("entry", ["plan", "finalizer"])
+@pytest.mark.parametrize("venue", ["hyperliquid", "bybit"])
+@pytest.mark.parametrize(
+    "failure", ["nonempty", "stale", "truncated", "unknown", "mismatch", "wrong-scheme"])
+def test_unproven_empty_orders_precede_positions_and_never_stop(
+    tmp_path, entry, venue, failure,
+):
+    unreadable = _UnreadablePosition()
+    changes = {f"{venue}_orders": _bad_orders(venue, failure)}
+    if entry == "plan":
+        with pytest.raises(ValueError, match="orders"):
+            _route(positions=(unreadable, unreadable), **changes)
+        return
+    lease, recorded = _lease(tmp_path)
+    with pytest.raises(ValueError, match="orders"):
+        _finalize(
+            lease, _never_stop, positions=(unreadable, unreadable), **changes)
+    assert lease.authority.mode == "flatten_only" and recorded == []
+    lease.release()
 
 
 @pytest.mark.parametrize("positions", [
@@ -247,8 +312,9 @@ def test_wrong_entry_mode_never_stops(tmp_path, mode):
 def test_finalizer_delegates_real_metadata_once(tmp_path, monkeypatch):
     parameters = tuple(signature(composition.finalize_kill_switch_flatten).parameters)
     assert parameters == (
-        "lease", "hyperliquid_position", "bybit_position", "strategy_id", "strategy_version",
-        "signal_ns", "now_ns", "max_position_age_ns", "stop")
+        "lease", "hyperliquid_position", "bybit_position", "hyperliquid_orders",
+        "bybit_orders", "strategy_id", "strategy_version", "signal_ns", "now_ns",
+        "max_position_age_ns", "max_order_age_ns", "stop")
     lease, recorded = _lease(tmp_path)
     observed, stopped, real_plan = [], [], legs.build_flatten_intent_plan
 
@@ -263,8 +329,10 @@ def test_finalizer_delegates_real_metadata_once(tmp_path, monkeypatch):
     assert observed == [{**_META, "now_ns": 110, "max_position_age_ns": 10}]
     source = getsource(composition.finalize_kill_switch_flatten)
     assert all(source.count(call) == 1 for call in (
-        "build_flatten_intent_plan(", "_require_flatten_only(",
-        "demote_kill_switch_complete("))
+        "_require_authoritative_empty_orders(", "build_flatten_intent_plan(",
+        "_require_flatten_only(", "demote_kill_switch_complete("))
+    assert source.index("_require_authoritative_empty_orders(") < source.index(
+        "build_flatten_intent_plan(") < source.index("_require_flatten_only(")
     lease.release()
 
 

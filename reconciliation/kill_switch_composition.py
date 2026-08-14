@@ -98,22 +98,57 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
     return KillSwitchSnapshot(decision, streak, consistency, exposure_state)
 
 
+def _require_authoritative_empty_orders(
+    hyperliquid_orders: state.SurfaceEvidence,
+    bybit_orders: state.SurfaceEvidence,
+    *,
+    now_ns: int,
+    max_order_age_ns: int,
+) -> None:
+    if type(max_order_age_ns) is not int:
+        raise TypeError("max_order_age_ns must be an integer")
+    if max_order_age_ns <= 0:
+        raise ValueError("max_order_age_ns must be positive")
+    for venue, evidence in (
+        ("hyperliquid", hyperliquid_orders), ("bybit", bybit_orders),
+    ):
+        state.validate_surface_evidence(evidence, now_ns=now_ns)
+        schemes = (evidence.entities.scheme_id, evidence.identities.scheme_id)
+        if schemes != (f"{venue}.orders.state", f"{venue}.orders.identity"):
+            raise ValueError(f"{venue} orders evidence scheme mismatch")
+        if not state.surface_is_authoritative(
+            evidence, now_ns=now_ns, max_age_ns=max_order_age_ns,
+        ):
+            raise ValueError(f"{venue} orders evidence is not authoritative")
+        empty = evidence.fetched_count == 0
+        empty &= evidence.entities.fingerprints == frozenset()
+        empty &= evidence.identities.fingerprints == frozenset()
+        if not empty:
+            raise ValueError(f"{venue} orders are not empty")
+
+
 def build_kill_switch_flatten_plan(
     decision: kill_switch.KillSwitchDecision,
     hyperliquid_position: object,
     bybit_position: object,
     *,
+    hyperliquid_orders: state.SurfaceEvidence,
+    bybit_orders: state.SurfaceEvidence,
     strategy_id: str,
     strategy_version: str,
     signal_ns: int,
     now_ns: int,
     max_position_age_ns: int,
+    max_order_age_ns: int,
 ) -> FlattenIntentPlan | None:
     """Plan trusted flatten intents only for the explicit flatten action."""
     if not isinstance(decision, kill_switch.KillSwitchDecision):
         raise TypeError("decision must be a KillSwitchDecision")
     if decision.action != "flatten_and_stop":
         return None
+    _require_authoritative_empty_orders(
+        hyperliquid_orders, bybit_orders,
+        now_ns=now_ns, max_order_age_ns=max_order_age_ns)
     return legs.build_flatten_intent_plan(
         hyperliquid_position,
         bybit_position,
@@ -127,11 +162,15 @@ def build_kill_switch_flatten_plan(
 
 def finalize_kill_switch_flatten(
     lease: WriterLease, hyperliquid_position: object, bybit_position: object, *,
+    hyperliquid_orders: state.SurfaceEvidence, bybit_orders: state.SurfaceEvidence,
     strategy_id: str, strategy_version: str, signal_ns: int, now_ns: int,
-    max_position_age_ns: int, stop: Callable[[], object],
+    max_position_age_ns: int, max_order_age_ns: int, stop: Callable[[], object],
 ) -> WriterAuthority:
     if not callable(stop):
         raise TypeError("stop must be callable")
+    _require_authoritative_empty_orders(
+        hyperliquid_orders, bybit_orders,
+        now_ns=now_ns, max_order_age_ns=max_order_age_ns)
     plan = legs.build_flatten_intent_plan(
         hyperliquid_position, bybit_position,
         strategy_id=strategy_id, strategy_version=strategy_version, signal_ns=signal_ns,
