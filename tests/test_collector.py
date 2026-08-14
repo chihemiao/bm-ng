@@ -21,12 +21,16 @@ def _uri(server) -> str:
     return f"ws://127.0.0.1:{server.sockets[0].getsockname()[1]}"
 
 
-async def _subscriptions(websocket, venue: str):
+async def _subscriptions(
+    websocket, venue: str, bybit_symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT"),
+):
     count = 8 if venue == "hyperliquid" else 6
     frames = [json.loads(await websocket.recv()) for _ in range(count)]
     for frame in frames[:-1]:
         await websocket.send(json.dumps(_ack(venue, frame)))
-    await websocket.send(json.dumps(_market(venue, "early")))
+    symbols = (None,) if venue == "hyperliquid" else bybit_symbols
+    for symbol in symbols:
+        await websocket.send(json.dumps(_market(venue, "early", symbol=symbol)))
     await websocket.send(json.dumps(_ack(venue, frames[-1])))
     return frames
 
@@ -47,11 +51,12 @@ def _ack(venue: str, frame: dict) -> dict:
     return {"success": True, "op": "subscribe", "req_id": frame["req_id"]}
 
 
-def _market(venue: str, tag: str, *, update_id: int = 40, kind: str = "snapshot") -> dict:
+def _market(venue: str, tag: str, *, update_id: int = 40, kind: str = "snapshot",
+            symbol: str | None = "BTCUSDT") -> dict:
     if venue == "hyperliquid":
         return {"channel": "l2Book", "data": {"coin": "BTC", "tag": tag}}
     return {
-        "topic": "orderbook.50.BTCUSDT",
+        "topic": f"orderbook.50.{symbol}",
         "type": kind,
         "data": {"u": update_id, "tag": tag},
     }
@@ -112,8 +117,7 @@ async def _assembled_scenario(root: Path, record_mode: str | None = None) -> Non
     bybit = partial(_normal_handler, venue="bybit")
     async with (
         serve(hl, "127.0.0.1", 0, ping_interval=None) as hl_server,
-        serve(bybit, "127.0.0.1", 0, ping_interval=None) as bybit_server,
-    ):
+        serve(bybit, "127.0.0.1", 0, ping_interval=None) as bybit_server):
         changes = {} if record_mode is None else {"record_mode": record_mode}
         task = asyncio.create_task(
             run_collector(_config(root, _uri(hl_server), _uri(bybit_server), **changes), stop)
@@ -129,13 +133,14 @@ async def _assembled_scenario(root: Path, record_mode: str | None = None) -> Non
         sum(event["venue"] == venue for event in sends) for venue in ("hyperliquid", "bybit")
     ] == [8, 6]
     assert len([event for event in events if event["payload_schema"] == "subscription_ack"]) == 14
-    assert {event["venue"] for event in events if event["event_kind"] == "market"} == {
-        "hyperliquid",
-        "bybit",
-    }
+    market_venues = {event["venue"] for event in events if event["event_kind"] == "market"}
+    assert market_venues == {"hyperliquid", "bybit"}
     assert all(event["is_gate1_record"] is expected_marker for event in events)
     early = [event for event in events if event["payload_schema"] == "pre_ack_frame"]
     assert {event["venue"] for event in early} == {"hyperliquid", "bybit"}
+    assert {event["payload"]["stream"] for event in early if event["venue"] == "bybit"} == {
+        "orderbook.50.BTCUSDT", "orderbook.50.ETHUSDT",
+    }
     sent_frames = [json.loads(base64.b64decode(event["payload"]["raw"])) for event in sends]
     assert {frame["subscription"]["type"] for frame in sent_frames[:8]} == {
         "l2Book", "trades", "bbo", "activeAssetCtx"
@@ -223,6 +228,123 @@ def test_bybit_sequence_gap_closes_both_venues_after_preserving_trigger(tmp_path
 
 def test_formal_gap_evidence_stays_formal_for_later_coverage_failure(tmp_path: Path) -> None:
     asyncio.run(_gap_scenario(tmp_path, "formal"))
+
+
+async def _sequence_scenario(root: Path, bybit_handler) -> tuple:
+    stop = asyncio.Event()
+    async def hl(websocket):
+        await _subscriptions(websocket, "hyperliquid")
+        await _heartbeat(websocket, "hyperliquid")
+        await websocket.send(json.dumps(_market("hyperliquid", "steady")))
+        await websocket.wait_closed()
+
+    bybit = partial(bybit_handler, stop=stop)
+
+    async with (
+        serve(hl, "127.0.0.1", 0, ping_interval=None) as hl_server,
+        serve(bybit, "127.0.0.1", 0, ping_interval=None) as bybit_server,
+    ):
+        config = _config(root, _uri(hl_server), _uri(bybit_server))
+        report = await asyncio.wait_for(run_collector(config, stop), 2)
+    return report, _events(root)
+
+
+async def _incomplete_snapshot_scenario(root: Path) -> None:
+    async def bybit(websocket, stop):
+        await _subscriptions(websocket, "bybit", ("BTCUSDT",))
+        await _heartbeat(websocket, "bybit")
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    report, _ = await _sequence_scenario(root, bybit)
+    assert not report.bybit_liveness.sequence_ok
+
+    async def unacked(websocket, stop):
+        frames = [json.loads(await websocket.recv()) for _ in range(6)]
+        for frame in frames[:-1]:
+            await websocket.send(json.dumps(_ack("bybit", frame)))
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            await websocket.send(json.dumps(_market("bybit", "early", symbol=symbol)))
+        await _heartbeat(websocket, "bybit")
+        await asyncio.sleep(0.02)
+        stop.set()
+        await websocket.send(json.dumps(_market("bybit", "stop-wakeup")))
+        await websocket.wait_closed()
+
+    unacked_report, events = await _sequence_scenario(root / "unacked", unacked)
+    assert not unacked_report.bybit_liveness.sequence_ok
+    assert not any(event["payload_schema"] == "liveness_failure" for event in events)
+
+
+def test_bybit_sequence_requires_both_orderbook_snapshots(tmp_path: Path) -> None:
+    asyncio.run(_incomplete_snapshot_scenario(tmp_path))
+
+
+async def _reconnected_snapshot_scenario(root: Path) -> None:
+    attempts = 0
+
+    async def bybit(websocket, stop):
+        nonlocal attempts
+        attempts += 1
+        symbols = ("BTCUSDT", "ETHUSDT") if attempts == 1 else ("BTCUSDT",)
+        await _subscriptions(websocket, "bybit", symbols)
+        await _heartbeat(websocket, "bybit")
+        if attempts == 1:
+            await websocket.close()
+        else:
+            await asyncio.sleep(0.02)
+            stop.set()
+
+    report, _ = await _sequence_scenario(root, bybit)
+    assert attempts == 2
+    assert not report.bybit_liveness.sequence_ok
+
+
+def test_bybit_sequence_baseline_resets_on_new_connection(tmp_path: Path) -> None:
+    asyncio.run(_reconnected_snapshot_scenario(tmp_path))
+
+
+async def _snapshot_reset_scenario(root: Path) -> None:
+    async def bybit(websocket, stop):
+        await _subscriptions(websocket, "bybit")
+        await _heartbeat(websocket, "bybit")
+        updates = [
+            _market("bybit", "btc-41", update_id=41, kind="delta"),
+            _market("bybit", "eth-41", update_id=41, kind="delta", symbol="ETHUSDT"),
+            _market("bybit", "btc-reset", update_id=100),
+            _market("bybit", "btc-101", update_id=101, kind="delta")]
+        for update in updates:
+            await websocket.send(json.dumps(update))
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    report, events = await _sequence_scenario(root, bybit)
+    assert report.bybit_liveness.sequence_ok
+    assert not any(event["payload_schema"] == "bybit_sequence_gap" for event in events)
+
+
+def test_bybit_new_snapshot_resets_one_topic_without_a_gap(tmp_path: Path) -> None:
+    asyncio.run(_snapshot_reset_scenario(tmp_path))
+
+
+async def _delta_before_snapshot_scenario(root: Path) -> None:
+    async def bybit(websocket, stop):
+        await _subscriptions(websocket, "bybit", ())
+        await _heartbeat(websocket, "bybit")
+        await websocket.send(json.dumps(
+            _market("bybit", "missing-snapshot", update_id=41, kind="delta")
+        ))
+        await asyncio.sleep(0.02)
+        stop.set()
+
+    report, events = await _sequence_scenario(root, bybit)
+    assert not report.bybit_liveness.sequence_ok
+    assert len([event for event in events
+                if event["payload_schema"] == "bybit_sequence_gap"]) == 1
+
+
+def test_bybit_delta_before_snapshot_is_a_hard_gap(tmp_path: Path) -> None:
+    asyncio.run(_delta_before_snapshot_scenario(tmp_path))
 
 
 async def _venue_down_scenario(root: Path) -> None:
