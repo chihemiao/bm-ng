@@ -88,7 +88,8 @@ AUTHORIZATION_DENIAL_REASONS = frozenset(
 )
 WRITER_DECISIONS = {
     ("acquire", "pending_reconciliation"): frozenset({"lease_acquired"}),
-    ("demote", "cancel_only"): frozenset(),
+    ("demote", "cancel_only"): frozenset({"writer_demoted:kill_switch:cancel_only_freeze",
+                                            "writer_demoted:kill_switch:flatten_complete"}),
     ("demote", "flatten_only"): frozenset(
         {"writer_demoted:kill_switch:flatten_and_stop"}
     ),

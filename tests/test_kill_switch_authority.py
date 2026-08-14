@@ -90,6 +90,50 @@ def test_record_failure_keeps_flatten_only_applied(tmp_path):
     lease.release()
 
 
+def test_flatten_completion_enters_cancel_only_before_recording(tmp_path):
+    holder, observed, recorded = {}, [], []
+
+    def record(decision):
+        recorded.append(decision)
+        if decision.action == "demote":
+            observed.append(holder["lease"].authority.mode)
+
+    lease, _ = _lease(tmp_path, "flatten_only", record)
+    holder["lease"] = lease
+    recorded.clear()
+    authority = promotion.demote_kill_switch_complete(lease, now_ns=100)
+    assert authority.mode == lease.authority.mode == "cancel_only"
+    assert observed == ["cancel_only"] and len(recorded) == 1
+    assert recorded[0].reason == "writer_demoted:kill_switch:flatten_complete"
+    assert validate_envelope(_event(recorded[0]))
+    source = getsource(promotion.demote_kill_switch_complete)
+    assert source.count("_require_flatten_only(") == source.count("demote_to_cancel_only(") == 1
+    lease.release()
+
+
+@pytest.mark.parametrize("mode", ["pending_reconciliation", "cancel_only", "risk_increasing"])
+def test_only_flatten_only_can_complete_flattening(tmp_path, mode):
+    lease, recorded = _lease(tmp_path, mode)
+    with pytest.raises(WriterLeaseError, match="flatten only"):
+        promotion.demote_kill_switch_complete(lease, now_ns=100)
+    assert lease.authority.mode == mode and recorded == []
+    lease.release()
+
+
+def test_completion_record_failure_keeps_cancel_only_applied(tmp_path):
+    failure = OSError("decision stream unavailable")
+
+    def fail(decision):
+        if decision.action == "demote":
+            raise failure
+
+    lease, _ = _lease(tmp_path, "flatten_only", fail)
+    with pytest.raises(WriterLeaseError, match="applied.*evidence") as caught:
+        promotion.demote_kill_switch_complete(lease, now_ns=100)
+    assert caught.value.__cause__ is failure and lease.authority.mode == "cancel_only"
+    lease.release()
+
+
 def test_flatten_only_can_freeze_to_cancel_only_and_revoke_reduce_only(tmp_path):
     lease, recorded = _lease(tmp_path)
     promotion.demote_kill_switch_flatten(
@@ -98,6 +142,7 @@ def test_flatten_only_can_freeze_to_cancel_only_and_revoke_reduce_only(tmp_path)
     promotion.demote_kill_switch_freeze(
         lease, KillSwitchDecision("cancel_only_freeze"), now_ns=101)
     assert lease.authority.mode == "cancel_only" and len(recorded) == 1
+    assert validate_envelope(_event(recorded[0]))
     with pytest.raises(WriterLeaseError, match="not authorized"):
         lease.authorize("reduce_only")
     lease.release()

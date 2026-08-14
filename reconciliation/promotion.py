@@ -140,6 +140,21 @@ def demote_kill_switch_flatten(
     return lease.demote_to_flatten_only(demotion_ns=now_ns, reason=reason)
 
 
+def _require_flatten_only(lease: WriterLease) -> WriterAuthority:
+    if not isinstance(lease, WriterLease):
+        raise TypeError("lease must be a WriterLease")
+    authority = lease.revalidate()
+    if authority.mode != "flatten_only":
+        raise WriterLeaseError("writer lease not flatten only")
+    return authority
+
+
+def demote_kill_switch_complete(lease: WriterLease, *, now_ns: int) -> WriterAuthority:
+    _require_flatten_only(lease)
+    return lease.demote_to_cancel_only(
+        demotion_ns=now_ns, reason=f"{DEMOTION_PREFIX}kill_switch:flatten_complete")
+
+
 def apply_continuous_admission(
     lease: WriterLease,
     *,

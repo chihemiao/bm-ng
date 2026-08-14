@@ -154,7 +154,7 @@ def _validate_writer_decision(event: dict[str, Any]) -> None:
         has_prefix = isinstance(reason, str) and reason.startswith("writer_demoted:")
         keys = reason.removeprefix("writer_demoted:").split(",") if has_prefix else []
         valid_reason = bool(keys and keys[0]) and keys == sorted(set(keys))
-        valid_reason &= keys == ["kill_switch:cancel_only_freeze"] or all(
+        valid_reason &= reason in WRITER_DECISIONS[combination] or all(
             key.startswith("continuous_admission:") and key.count(":") == 1 for key in keys)
     _require(valid_reason, "invalid writer decision combination")
     needs_epoch = payload["outcome"] != "terminated"
