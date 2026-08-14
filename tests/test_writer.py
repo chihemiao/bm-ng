@@ -32,6 +32,13 @@ AUTHORIZATION_MATRIX = (
     ("cancel_only", "close", False, "action_not_authorized"),
     ("cancel_only", "market", False, "action_not_authorized"),
     ("cancel_only", "modify", False, "native_modify_disabled"),
+    ("flatten_only", "cancel", True, None),
+    ("flatten_only", "cancel_all", True, None),
+    ("flatten_only", "submit", False, "action_not_authorized"),
+    ("flatten_only", "reduce_only", True, None),
+    ("flatten_only", "close", False, "action_not_authorized"),
+    ("flatten_only", "market", False, "action_not_authorized"),
+    ("flatten_only", "modify", False, "native_modify_disabled"),
     ("risk_increasing", "cancel", True, None),
     ("risk_increasing", "cancel_all", True, None),
     ("risk_increasing", "submit", True, None),
@@ -103,7 +110,7 @@ def _lease_for_mode(root: Path, mode: str, recorder) -> WriterLease:
         path = WriterLease.path_for(root, identity.account_id)
         return WriterLease(path, authority, None, recorder, True, acquired_ns=None)
     lease = WriterLease.acquire(root, identity, recorder, acquired_ns=100)
-    if mode == "risk_increasing":
+    if mode in {"flatten_only", "risk_increasing"}:
         lease._authority = lease.authority._replace(mode=mode)
     return lease
 
@@ -173,7 +180,7 @@ def test_writer_authority_promotion_rejects_invalid_fields_and_combinations() ->
 
 def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> None:
     assert AUTHORITY_MODES == frozenset(
-        {"pending_reconciliation", "cancel_only", "risk_increasing"}
+        {"pending_reconciliation", "cancel_only", "flatten_only", "risk_increasing"}
     )
     owner = _holder(tmp_path, _identity())
     assert owner.stdout.readline().strip() == "pending_reconciliation:1"
@@ -182,7 +189,7 @@ def test_real_process_competition_release_and_crash_takeover(tmp_path: Path) -> 
     assert path.stat().st_mode & 0o777 == 0o600
 
     observer, observer_events = _acquire(tmp_path, _identity("two", "b" * 64))
-    assert observer.authority.mode == "cancel_only"
+    assert observer.authority.mode == "cancel_only" != "flatten_only"
     assert observer.authorize("cancel") == observer.authority
     assert observer_events[-1].outcome == "cancel_only"
     denied = []

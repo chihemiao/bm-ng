@@ -15,7 +15,7 @@ from data.contracts import (
     validate_manifest,
 )
 
-WRITER_MODES = ("pending_reconciliation", "cancel_only", "risk_increasing")
+WRITER_MODES = ("pending_reconciliation", "cancel_only", "flatten_only", "risk_increasing")
 WRITER_RISK_ACTIONS = ("submit", "reduce_only", "close", "market")
 
 LEGACY_PAYLOAD_SCHEMAS = frozenset(
@@ -180,6 +180,7 @@ def _writer_event(**changes) -> dict:
     ("action", "outcome", "reason", "lease_epoch"),
     [
         ("acquire", "pending_reconciliation", "lease_acquired", 1),
+        ("demote", "flatten_only", "writer_demoted:kill_switch:flatten_and_stop", 1),
         ("deny", "cancel_only", "incumbent_other_wallet", 4),
         ("deny", "terminated", "shared_writer_identity", 4),
         ("deny", "terminated", "unknown_incumbent", None),
@@ -201,6 +202,7 @@ def test_writer_lease_decision_has_a_closed_action_matrix(
     [
         *(("pending_reconciliation", action) for action in WRITER_RISK_ACTIONS),
         *(("cancel_only", action) for action in WRITER_RISK_ACTIONS),
+        *(("flatten_only", action) for action in ("submit", "close", "market")),
         *((mode, "modify") for mode in WRITER_MODES),
     ],
 )

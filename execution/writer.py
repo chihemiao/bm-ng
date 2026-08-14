@@ -8,7 +8,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-AUTHORITY_MODES = frozenset({"pending_reconciliation", "cancel_only", "risk_increasing"})
+AUTHORITY_MODES = frozenset(
+    {"pending_reconciliation", "cancel_only", "flatten_only", "risk_increasing"}
+)
 WRITER_ACTIONS = frozenset(
     {"cancel", "cancel_all", "submit", "reduce_only", "close", "market", "modify"}
 )
@@ -85,6 +87,17 @@ def _record(recorder: Recorder, decision: WriterLeaseDecision, suppress: bool = 
         if not suppress:
             raise WriterLeaseError("writer evidence recording failed") from exc
         print("writer evidence recording failed", file=sys.stderr)
+
+
+def _validate_demotion(demotion_ns: object, reason: object) -> None:
+    if type(demotion_ns) is not int:
+        raise TypeError("demotion_ns must be an integer")
+    if demotion_ns <= 0:
+        raise ValueError("demotion_ns must be positive")
+    if type(reason) is not str:
+        raise TypeError("demotion reason must be text")
+    if not reason.startswith("writer_demoted:") or reason == "writer_demoted:":
+        raise ValueError("invalid demotion reason")
 
 
 def _contended(
@@ -226,7 +239,12 @@ class WriterLease:
         message = None
         if action == "modify":
             cause = message = "native_modify_disabled"
-        allowed = CANCEL_ACTIONS if authority.mode != "risk_increasing" else WRITER_ACTIONS
+        if authority.mode == "risk_increasing":
+            allowed = WRITER_ACTIONS
+        elif authority.mode == "flatten_only":
+            allowed = CANCEL_ACTIONS | {"reduce_only"}
+        else:
+            allowed = CANCEL_ACTIONS
         if action not in allowed and cause is None:
             cause = "action_not_authorized"
             message = "writer action not authorized"
@@ -264,16 +282,9 @@ class WriterLease:
         return elevated
 
     def demote_to_cancel_only(self, *, demotion_ns: int, reason: str) -> WriterAuthority:
-        if type(demotion_ns) is not int:
-            raise TypeError("demotion_ns must be an integer")
-        if demotion_ns <= 0:
-            raise ValueError("demotion_ns must be positive")
-        if type(reason) is not str:
-            raise TypeError("demotion reason must be text")
-        if not reason.startswith("writer_demoted:") or reason == "writer_demoted:":
-            raise ValueError("invalid demotion reason")
+        _validate_demotion(demotion_ns, reason)
         authority = self.authority
-        if authority.mode != "risk_increasing":
+        if authority.mode not in {"flatten_only", "risk_increasing"}:
             return authority
         authority = self.revalidate()
         demoted = authority._replace(mode="cancel_only")
@@ -286,6 +297,23 @@ class WriterLease:
             self._recorder(decision)
         except Exception as exc:
             message = "writer demotion applied; evidence recording failed"
+            raise WriterLeaseError(message) from exc
+        return demoted
+
+    def demote_to_flatten_only(self, *, demotion_ns: int, reason: str) -> WriterAuthority:
+        _validate_demotion(demotion_ns, reason)
+        authority = self.revalidate()
+        _require(authority.mode == "risk_increasing", "writer lease not risk increasing")
+        demoted = authority._replace(mode="flatten_only")
+        self._authority = demoted
+        decision = _decision(
+            authority.identity, self.path, "demote", "flatten_only", reason,
+            authority.lease_epoch, self._prior_epoch_valid,
+        )
+        try:
+            self._recorder(decision)
+        except Exception as exc:
+            message = "writer flatten restriction applied; evidence recording failed"
             raise WriterLeaseError(message) from exc
         return demoted
 
