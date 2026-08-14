@@ -31,6 +31,19 @@ class KillSwitchDecision:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class KnownEvidence:
+    orders: bool
+    positions: bool
+    naked_notional: bool
+    stablecoin: bool
+
+    def __post_init__(self) -> None:
+        for name in ("orders", "positions", "naked_notional", "stablecoin"):
+            if type(getattr(self, name)) is not bool:
+                raise TypeError(f"{name} must be a boolean")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ReconciliationStreak:
     count: int
     last_observed_ns: int
@@ -86,26 +99,27 @@ def reconciliation_streak_triggered(
 
 
 def decide_kill_switch(
-    *, triggered: bool, orders_known: bool, positions_known: bool,
-    naked_notional_known: bool, stablecoin_known: bool,
+    *, triggered: bool, known_evidence: KnownEvidence,
     reconciliation_consistency: bool | None,
     reconciliation_streak_triggered: bool,
 ) -> KillSwitchDecision:
     """Choose a stop action without flattening through unknown venue state."""
+    if not isinstance(known_evidence, KnownEvidence):
+        raise TypeError("known_evidence must be a KnownEvidence")
     for name, value in (
         ("triggered", triggered),
-        ("orders_known", orders_known),
-        ("positions_known", positions_known),
-        ("naked_notional_known", naked_notional_known),
-        ("stablecoin_known", stablecoin_known),
         ("reconciliation_streak_triggered", reconciliation_streak_triggered),
     ):
         if type(value) is not bool:
             raise TypeError(f"{name} must be a boolean")
     if reconciliation_consistency is not None and type(reconciliation_consistency) is not bool:
         raise TypeError("reconciliation_consistency must be a boolean or None")
-    unknown = (not orders_known or not positions_known or not naked_notional_known
-               or not stablecoin_known or reconciliation_consistency is None)
+    unknown = not all((
+        known_evidence.orders,
+        known_evidence.positions,
+        known_evidence.naked_notional,
+        known_evidence.stablecoin,
+    )) or reconciliation_consistency is None
     if unknown or reconciliation_streak_triggered:
         return KillSwitchDecision("cancel_only_freeze")
     if triggered and not reconciliation_consistency:

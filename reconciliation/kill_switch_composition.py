@@ -79,10 +79,12 @@ def build_kill_switch_snapshot(inputs: KillSwitchSnapshotInputs) -> KillSwitchSn
         max_abs_deviation=inputs.max_abs_fx_deviation)
     triggered = key_triggered or exposure_triggered or stablecoin_triggered
     decision = kill_switch.decide_kill_switch(
-        triggered=triggered, orders_known=orders_known,
-        positions_known=positions_known,
-        naked_notional_known=inputs.naked_notional is not None,
-        stablecoin_known=stablecoin_known,
+        triggered=triggered, known_evidence=kill_switch.KnownEvidence(
+            orders=orders_known,
+            positions=positions_known,
+            naked_notional=inputs.naked_notional is not None,
+            stablecoin=stablecoin_known,
+        ),
         reconciliation_consistency=consistency,
         reconciliation_streak_triggered=reached)
     return KillSwitchSnapshot(decision, streak, consistency, exposure_state)
