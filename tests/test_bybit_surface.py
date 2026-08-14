@@ -335,7 +335,7 @@ def test_open_order_statuses_are_known(status):
     "field,value",
     [
         ("symbol", "SOLUSDT"), ("positionIdx", 1), ("positionIdx", True),
-        ("side", "None"), ("orderStatus", "Filled"), ("orderId", ""), ("orderId", 1),
+        ("side", []), ("orderStatus", "Filled"), ("orderId", ""), ("orderId", 1),
         ("orderLinkId", ""), ("orderLinkId", None), ("price", ""),
         ("price", "bad"), ("price", "NaN"),
         ("price", "Infinity"), ("price", "-1"), ("qty", ""), ("qty", "bad"),

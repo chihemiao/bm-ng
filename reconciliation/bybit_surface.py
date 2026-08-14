@@ -24,6 +24,10 @@ BYBIT_EXECUTION_TYPES = frozenset(
         "BlockTrade", "MovePosition", "FutureSpread", "CorporateAction", "UNKNOWN",
     }
 )
+OPEN_ORDER_FIELDS = frozenset(
+    {"orderId", "orderLinkId", "orderStatus", "symbol", "positionIdx", "side", "price", "qty"}
+)
+OPEN_ORDER_STATUSES = frozenset({"New", "PartiallyFilled", "Untriggered"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -204,6 +208,66 @@ def _fill_results(pages: object, observed_ns: object) -> list[Mapping]:
     if any(not result["nextPageCursor"] for result in results[:-1]):
         raise ValueError("non-terminal page has an empty cursor")
     return results
+
+
+def _open_order_row(row: object) -> tuple[str, str] | None:
+    if not isinstance(row, Mapping) or not OPEN_ORDER_FIELDS <= set(row):
+        return None
+    order_id, link = row["orderId"], row["orderLinkId"]
+    valid = isinstance(order_id, str) and bool(order_id)
+    valid &= isinstance(link, str) and bool(link)
+    status, symbol, side = row["orderStatus"], row["symbol"], row["side"]
+    valid &= isinstance(status, str) and status in OPEN_ORDER_STATUSES
+    valid &= isinstance(symbol, str) and symbol in BYBIT_WIRE_SYMBOLS.values()
+    valid &= type(row["positionIdx"]) is int and row["positionIdx"] == 0
+    valid &= isinstance(side, str) and side in {"Buy", "Sell"}
+    price, quantity = row["price"], row["qty"]
+    if not valid or not isinstance(price, str) or not isinstance(quantity, str):
+        return None
+    try:
+        parsed_price, parsed_quantity = Decimal(price), Decimal(quantity)
+    except InvalidOperation:
+        return None
+    if not parsed_price.is_finite() or parsed_price < 0:
+        return None
+    if not parsed_quantity.is_finite() or parsed_quantity <= 0:
+        return None
+    state = {
+        name: row[name]
+        for name in ("orderId", "orderLinkId", "orderStatus", "symbol", "side", "price", "qty")
+    }
+    try:
+        return _fingerprint(state), _fingerprint({"orderId": order_id})
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_bybit_orders_surface(
+    pages: Sequence[Mapping[str, object]], *, observed_ns: int,
+) -> SurfaceEvidence:
+    """Parse the complete BTC/ETH linear open-order response chain."""
+    results = _fill_results(pages, observed_ns)
+    states: dict[str, str] = {}
+    unknown = mismatch = 0
+    for row in (row for result in results for row in result["list"]):
+        parsed = _open_order_row(row)
+        if parsed is None:
+            # Unlike out-of-scope balances, another symbol is unexpected exposure.
+            unknown += 1
+            continue
+        state, identity = parsed
+        if identity in states:
+            unknown += 1
+            mismatch += 1
+            continue
+        # Untriggered is a real identified open order even when locally unexpected.
+        states[identity] = state
+    cursor = results[-1]["nextPageCursor"]
+    return SurfaceEvidence(
+        observed_ns, len(states) + unknown, not cursor, bool(cursor), unknown, mismatch,
+        CanonicalSet("bybit.orders.state", 1, frozenset(states.values())),
+        CanonicalSet("bybit.orders.identity", 1, frozenset(states)),
+    )
 
 
 def parse_bybit_fills_surface(
