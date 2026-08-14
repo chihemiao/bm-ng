@@ -36,11 +36,11 @@ def _snapshot(at: int, symbol: str, *, conn: str, update: int = 1,
     return event
 
 
-def _barrier(conn: str, at: int, symbols: tuple[str, ...] = ("BTC", "ETH")) -> list[dict]:
+def _barrier(conn, at, symbols=("BTC", "ETH"), ready=True) -> list[dict]:
     return [_event("subscription_send", at, venue="bybit", conn=conn),
             *[_snapshot(at + index, symbol, conn=conn) for index, symbol in enumerate(symbols, 1)],
             _event("application_heartbeat", at + 3, venue="bybit", conn=conn, phase="pong"),
-            _event("subscription_ack", at + 4, venue="bybit", conn=conn, ready=True)]
+            _event("subscription_ack", at + 4, venue="bybit", conn=conn, ready=ready)]
 
 
 def _write(root: Path, *events: dict | bytes) -> None:
@@ -96,7 +96,7 @@ def test_replay_emits_hard_points_and_requires_new_connection_after_failure(tmp_
               _event("subscription_ack", 2, ready=True),
               _event("application_heartbeat", 3, phase="pong"),
               _event("application_heartbeat", 4, phase="pong"),
-              *_barrier("b1", 5, ("BTC",)), *_barrier("b2", 10, ("ETH",)),
+              *_barrier("b1", 5, ready=False), *_barrier("b2", 10, ("ETH",)),
               _snapshot(15, "BTC", conn="b2", schema="raw_frame"),
               _event("raw_quarantine", 16, venue="bybit", conn="b2", raw="eA=="),
               _event("application_heartbeat", 17, venue="bybit", conn="b2", phase="pong"),
