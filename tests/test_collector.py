@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import json
 from functools import partial
 from importlib import import_module
@@ -29,6 +30,16 @@ async def _subscriptions(websocket, venue: str):
     return frames
 
 
+async def _heartbeat(websocket, venue: str):
+    frame = json.loads(await websocket.recv())
+    expected = {"method": "ping"} if venue == "hyperliquid" else {
+        "req_id": "collector-heartbeat", "op": "ping"}
+    assert frame == expected
+    pong = {"channel": "pong"} if venue == "hyperliquid" else {
+        "success": True, "ret_msg": "pong", "op": "ping", "req_id": ""}
+    await websocket.send(json.dumps(pong))
+
+
 def _ack(venue: str, frame: dict) -> dict:
     if venue == "hyperliquid":
         return {"channel": "subscriptionResponse", "data": frame}
@@ -51,8 +62,10 @@ def _config(root: Path, hl_uri: str, bybit_uri: str, **changes):
         "boot_id": "trial-a",
         "hl_uri": hl_uri,
         "bybit_uri": bybit_uri,
-        "ping_interval": 0.05,
-        "ping_timeout": 0.02,
+        "transport_ping_interval": 0.05,
+        "transport_ping_timeout": 0.02,
+        "application_ping_interval": 1,
+        "application_pong_timeout": 0.02,
         "ack_timeout": 0.05,
         "max_reconnects": 1,
         "reconnect_backoff": 0.01,
@@ -75,6 +88,7 @@ def test_bybit_wire_symbols_have_one_shared_closed_source() -> None:
 
 async def _normal_handler(websocket, venue: str) -> None:
     await _subscriptions(websocket, venue)
+    await _heartbeat(websocket, venue)
     for index in range(20):
         await websocket.send(json.dumps(_market(venue, f"after-{index}")))
         await asyncio.sleep(0.005)
@@ -116,10 +130,21 @@ async def _assembled_scenario(root: Path) -> None:
     assert all(frame["args"] == [frame["req_id"]] for frame in sent_frames[8:])
     config_event = next(event for event in events if event["payload_schema"] == "collector_config")
     assert config_event["payload"]["status"] == "provisional"
-    assert config_event["payload"]["provisional_defaults"] == [20, 10, 10, 3]
+    assert config_event["payload"]["provisional_defaults"] == [20, 10, 20, 10, 10, 3]
     assert report.file_integrity_ok
-    assert report.hl_liveness == collector.HLLivenessEvidence(True, True, True)
-    assert report.bybit_liveness == collector.BybitLivenessEvidence(True, True)
+    assert report.hl_liveness == collector.HLLivenessEvidence(True, True, True, True)
+    assert report.bybit_liveness == collector.BybitLivenessEvidence(True, True, True)
+    heartbeats = [event for event in events
+                  if event["payload_schema"] == "application_heartbeat"]
+    assert {venue: [event["payload"]["phase"] for event in heartbeats
+                    if event["venue"] == venue]
+            for venue in ("hyperliquid", "bybit")} == {
+                "hyperliquid": ["sent", "pong"], "bybit": ["sent", "pong"]}
+    sent = {event["venue"]: json.loads(base64.b64decode(event["payload"]["raw"]))
+            for event in heartbeats if event["payload"]["phase"] == "sent"}
+    assert sent["hyperliquid"] == {"method": "ping"} and sent["bybit"]["op"] == "ping"
+    source = inspect.getsource(collector._Sink.record)
+    assert 'record.phase == "pong"' in source and 'payload_schema == "subscription_send"' in source
 
 
 def test_dual_venue_assembly_stop_and_verified_trial_evidence(tmp_path: Path) -> None:
@@ -131,6 +156,7 @@ async def _gap_scenario(root: Path) -> None:
 
     async def bybit(websocket):
         await _subscriptions(websocket, "bybit")
+        await _heartbeat(websocket, "bybit")
         await websocket.send(json.dumps(_market("bybit", "base", update_id=40)))
         trigger = _market("bybit", "gap", update_id=42, kind="delta")
         await websocket.send(json.dumps(trigger))
@@ -169,6 +195,7 @@ async def _venue_down_scenario(root: Path) -> None:
             await websocket.close()
             return
         await _subscriptions(websocket, "bybit")
+        await _heartbeat(websocket, "bybit")
         await websocket.send(json.dumps(_market("bybit", "recovered")))
         recovered.set()
         await websocket.wait_closed()
