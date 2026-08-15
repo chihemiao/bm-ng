@@ -12,11 +12,30 @@ from execution.cancel import (
 )
 from execution.writer import WriterLease, read_current_epoch
 from execution.writer import read_heartbeat as read_heartbeat
+from reconciliation import state
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BybitCancelRequested:
     response: object
+
+
+def confirm_bybit_cancel_completion(
+    requested: BybitCancelRequested,
+    bybit_orders: state.SurfaceEvidence,
+    *,
+    now_ns: int,
+    max_order_age_ns: int,
+) -> bool:
+    """Confirm empty orders after a request, not from the ACK alone.
+
+    False means evidence is not yet trustworthy or orders remain; never retried here.
+    """
+    if not isinstance(requested, BybitCancelRequested):
+        raise TypeError("requested must be BybitCancelRequested")
+    return state.orders_surface_confirmed_empty(
+        bybit_orders, "bybit", now_ns=now_ns, max_age_ns=max_order_age_ns,
+    )
 
 
 def bybit_writer_timeout(

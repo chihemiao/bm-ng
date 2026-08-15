@@ -105,26 +105,13 @@ def _require_authoritative_empty_orders(
     now_ns: int,
     max_order_age_ns: int,
 ) -> None:
-    if type(max_order_age_ns) is not int:
-        raise TypeError("max_order_age_ns must be an integer")
-    if max_order_age_ns <= 0:
-        raise ValueError("max_order_age_ns must be positive")
     for venue, evidence in (
         ("hyperliquid", hyperliquid_orders), ("bybit", bybit_orders),
     ):
-        state.validate_surface_evidence(evidence, now_ns=now_ns)
-        schemes = (evidence.entities.scheme_id, evidence.identities.scheme_id)
-        if schemes != (f"{venue}.orders.state", f"{venue}.orders.identity"):
-            raise ValueError(f"{venue} orders evidence scheme mismatch")
-        if not state.surface_is_authoritative(
-            evidence, now_ns=now_ns, max_age_ns=max_order_age_ns,
+        if not state.orders_surface_confirmed_empty(
+            evidence, venue, now_ns=now_ns, max_age_ns=max_order_age_ns,
         ):
-            raise ValueError(f"{venue} orders evidence is not authoritative")
-        empty = evidence.fetched_count == 0
-        empty &= evidence.entities.fingerprints == frozenset()
-        empty &= evidence.identities.fingerprints == frozenset()
-        if not empty:
-            raise ValueError(f"{venue} orders are not empty")
+            raise ValueError(f"{venue} orders are not authoritatively empty")
 
 
 def build_kill_switch_flatten_plan(
