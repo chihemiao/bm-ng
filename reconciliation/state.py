@@ -140,12 +140,26 @@ def surface_is_authoritative(evidence: SurfaceEvidence, *, now_ns: int, max_age_
     """Report whether validated evidence is complete, known, and fresh."""
     age_ns = now_ns - evidence.observed_ns
     return (
-        evidence.page_complete
-        and not evidence.truncated
-        and evidence.unknown_count == 0
-        and evidence.mismatch_count == 0
+        evidence.page_complete and not evidence.truncated
+        and evidence.unknown_count == evidence.mismatch_count == 0
         and 0 <= age_ns <= max_age_ns
     )
+
+
+def orders_surface_confirmed_empty(
+    evidence: SurfaceEvidence, venue: str, *, now_ns: int, max_age_ns: int) -> bool:
+    """Return whether valid venue order evidence authoritatively proves empty."""
+    if type(venue) is not str or type(max_age_ns) is not int:
+        raise TypeError("orders policy must use typed values")
+    if not venue or max_age_ns <= 0:
+        raise ValueError("orders policy values must be positive")
+    validate_surface_evidence(evidence, now_ns)
+    schemes = (evidence.entities.scheme_id, evidence.identities.scheme_id)
+    if schemes != (f"{venue}.orders.state", f"{venue}.orders.identity"):
+        raise ValueError(f"{venue} orders evidence scheme mismatch")
+    empty = evidence.fetched_count == 0
+    empty &= evidence.entities.fingerprints == evidence.identities.fingerprints == frozenset()
+    return surface_is_authoritative(evidence, now_ns=now_ns, max_age_ns=max_age_ns) and empty
 
 
 def _validate_expected_surface(expected: ExpectedSurface) -> None:
