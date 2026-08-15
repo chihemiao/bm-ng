@@ -26,7 +26,7 @@ def _leg(venue, quantity, evidence=_EVIDENCE):
     return LegPosition(venue, "BTC", Decimal(quantity), evidence)
 
 
-def _orders(venue, *, present=False, **changes):
+def orders_evidence(venue, *, present=False, **changes):
     fingerprints = frozenset({"state"}) if present else frozenset()
     identities = frozenset({"identity"}) if present else frozenset()
     values = dict(
@@ -72,8 +72,8 @@ def _finalize(lease, stop, *, positions=None, **changes):
     values = {
         **_META, "now_ns": 110, "max_position_age_ns": 10,
         "max_order_age_ns": 10,
-        "hyperliquid_orders": _orders("hyperliquid"),
-        "bybit_orders": _orders("bybit"), **changes}
+        "hyperliquid_orders": orders_evidence("hyperliquid"),
+        "bybit_orders": orders_evidence("bybit"), **changes}
     pair = positions or (_leg("hyperliquid", "0"), _leg("bybit", "0"))
     return composition.finalize_kill_switch_flatten(lease, *pair, stop=stop, **values)
 
@@ -181,8 +181,8 @@ def _route(action="flatten_and_stop", *, positions=None, **changes):
     values = {
         **_META, "now_ns": 110, "max_position_age_ns": 10,
         "max_order_age_ns": 10,
-        "hyperliquid_orders": _orders("hyperliquid"),
-        "bybit_orders": _orders("bybit"), **changes}
+        "hyperliquid_orders": orders_evidence("hyperliquid"),
+        "bybit_orders": orders_evidence("bybit"), **changes}
     selected = positions or (_leg("hyperliquid", "-2"), _leg("bybit", "1"))
     return composition.build_kill_switch_flatten_plan(
         KillSwitchDecision(action), *selected, **values
@@ -256,7 +256,7 @@ def _bad_orders(venue, failure):
     }[failure]
     target = ({"hyperliquid": "bybit", "bybit": "hyperliquid"}[venue]
               if failure == "wrong-scheme" else venue)
-    return _orders(target, present=present, **changes)
+    return orders_evidence(target, present=present, **changes)
 
 
 @pytest.mark.parametrize("entry", ["plan", "finalizer"])
@@ -278,6 +278,12 @@ def test_unproven_empty_orders_precede_positions_and_never_stop(
             lease, _never_stop, positions=(unreadable, unreadable), **changes)
     assert lease.authority.mode == "flatten_only" and recorded == []
     lease.release()
+
+
+def test_empty_orders_requirement_has_one_shared_predicate_source():
+    source = getsource(composition._require_authoritative_empty_orders)
+    assert source.count("state.orders_surface_confirmed_empty(") == 1
+    assert "surface_is_authoritative" not in source and "fingerprints" not in source
 
 
 @pytest.mark.parametrize("positions", [

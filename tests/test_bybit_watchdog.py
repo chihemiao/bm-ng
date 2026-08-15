@@ -1,10 +1,14 @@
 import asyncio
 import importlib
+from dataclasses import replace
 from inspect import getdoc, getsource
 
 import pytest
 
 from execution.cancel import BybitCancelScope
+from reconciliation import state
+from reconciliation.state import StartupContractError
+from tests.test_flatten_intent_plan import orders_evidence
 from tests.test_watchdog import ACCOUNT_ID, heartbeat_owner
 
 SCOPE = BybitCancelScope(category="linear", settle_coin="USDT")
@@ -16,6 +20,13 @@ def _module():
 
 def _run(values):
     return asyncio.run(_module().run_until_cancel_requested(**values))
+
+
+def _confirm(evidence):
+    return _module().confirm_bybit_cancel_completion(
+        _module().BybitCancelRequested(response=None), evidence,
+        now_ns=110, max_order_age_ns=10,
+    )
 
 
 def _loop_case(root):
@@ -193,4 +204,72 @@ def test_loop_delegates_once_and_registers_its_terminal_boundary():
     assert "bybit_writer_timeout" not in source and "bind_bybit_cancel" not in source
     assert documentation and all(term in documentation for term in (
         "awaiting_authoritative_confirmation", "no further checks", "no retry",
+    ))
+
+
+@pytest.mark.parametrize(("present", "expected"), [(False, True), (True, False)])
+def test_orders_surface_confirms_only_authoritative_empty_evidence(present, expected):
+    evidence = orders_evidence("bybit", present=present)
+    assert state.orders_surface_confirmed_empty(
+        evidence, "bybit", now_ns=110, max_age_ns=10,
+    ) is expected
+
+
+@pytest.mark.parametrize("changes", [
+    {"observed_ns": 99}, {"truncated": True},
+    {"fetched_count": 1, "unknown_count": 1}, {"mismatch_count": 1},
+])
+def test_orders_surface_treats_each_untrusted_condition_as_unconfirmed(changes):
+    assert not state.orders_surface_confirmed_empty(
+        orders_evidence("bybit", **changes), "bybit", now_ns=110, max_age_ns=10,
+    )
+
+
+def test_orders_surface_rejects_wrong_scheme_and_structural_corruption():
+    with pytest.raises(ValueError, match="orders"):
+        state.orders_surface_confirmed_empty(
+            orders_evidence("hyperliquid"), "bybit", now_ns=110, max_age_ns=10,
+        )
+    corrupt = replace(orders_evidence("bybit"), fetched_count=1)
+    with pytest.raises(StartupContractError, match="fetched_count"):
+        state.orders_surface_confirmed_empty(
+            corrupt, "bybit", now_ns=110, max_age_ns=10,
+        )
+
+
+@pytest.mark.parametrize(("field", "bad", "error"), [
+    ("evidence", object(), StartupContractError), ("venue", None, TypeError),
+    ("venue", "", ValueError), ("now_ns", None, StartupContractError),
+    ("now_ns", -1, StartupContractError), ("max_age_ns", True, TypeError),
+    ("max_age_ns", 0, ValueError),
+])
+def test_orders_surface_rejects_each_caller_contract_error(field, bad, error):
+    values = {
+        "evidence": orders_evidence("bybit"), "venue": "bybit",
+        "now_ns": 110, "max_age_ns": 10,
+    }
+    values[field] = bad
+    with pytest.raises(error):
+        state.orders_surface_confirmed_empty(**values)
+
+
+@pytest.mark.parametrize(("present", "expected"), [(False, True), (True, False)])
+def test_cancel_confirmation_depends_on_order_evidence_not_ack(present, expected):
+    assert _confirm(orders_evidence("bybit", present=present)) is expected
+
+
+def test_cancel_confirmation_rejects_missing_request_before_order_evidence():
+    with pytest.raises(TypeError, match="requested"):
+        _module().confirm_bybit_cancel_completion(
+            object(), object(), now_ns=110, max_order_age_ns=10,
+        )
+
+
+def test_cancel_confirmation_has_one_delegation_and_never_reads_response():
+    function = _module().confirm_bybit_cancel_completion
+    source, documentation = getsource(function), getdoc(function)
+    assert source.count("orders_surface_confirmed_empty(") == 1
+    assert ".response" not in source
+    assert documentation and all(term in documentation for term in (
+        "not yet trustworthy", "never retried", "ACK alone",
     ))
